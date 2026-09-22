@@ -587,6 +587,39 @@ return { types = { P }, functions = { pick, combine } }
         },
     },
     {
+        -- `Builder:intern` makes the IR a DAG. The emitter names a node used more than once and
+        -- declares it in the innermost statement list containing every use, which covers arms and loops.
+        name = "cse",
+        source = [==[
+let R = { v: U32 }
+let pick(c: Bool, x: U32): U32 = do
+  let r = R { v = 0 }
+  if c then
+    r.v = x ~ (x << 3)
+  else
+    r.v = (x ~ (x << 3)) + 1
+  end
+  return r.v
+end
+let step(n: U32, x: U32): U32 = do
+  if n == 0 then return x ~ (x << 3) end
+  let y = x ~ (x << 3)
+  return step(n - 1, y)
+end
+let mixed(c: Bool, n: U32, x: U32): U32 = do
+  let a = x ~ (x << 3)
+  let b = if c then a + n else a - n
+  return (x ~ (x << 3)) + b
+end
+return { types = { R }, functions = { pick, step, mixed } }
+]==],
+        entries = {
+            { entry = "pick", arity = 2, inputs = { { true, 0 }, { false, 5 }, { true, 4294967295 } } },
+            { entry = "step", arity = 2, inputs = { { 0, 7 }, { 3, 7 }, { 5, 0 } } },
+            { entry = "mixed", arity = 3, inputs = { { true, 2, 7 }, { false, 2, 7 } } },
+        },
+    },
+    {
         -- Narrower integers: arithmetic wraps at the width the type names, widening is implicit, and
         -- a run-time narrowing conversion is checked, which is why each entry has its own inputs.
         name = "widths",
@@ -761,6 +794,34 @@ local function runCase(case)
 end
 
 for _, case in ipairs(CASES) do runCase(case) end
+
+-- `Builder:intern` shares structurally equal expressions, so a chain that rebuilds each value from
+-- the previous one is a DAG. Naming the shared nodes keeps the generated C linear instead of
+-- exponential; this guards that and runs the result.
+do
+    local lines = { "let f(s: U32): U32 = do" }
+    local previous = "s"
+    for index = 1, 14 do
+        lines[#lines + 1] = ("  let a%d = (%s ~ (%s << 3))"):format(index, previous, previous)
+        previous = "a" .. index
+    end
+    lines[#lines + 1] = ("  return %s"):format(previous)
+    lines[#lines + 1] = "end"
+    lines[#lines + 1] = "return { functions = { f } }"
+    local program = table.concat(lines, "\n")
+    local generated = wordlet.compile{ source = program, name = "cse.let" }:unit()
+    check(#generated < 20000, "shared expressions were expanded, not named: " .. #generated .. " bytes")
+    local expected = wordlet.interpret{ source = program, name = "cse.let", entry = "f", args = { 1 } }[1]
+    local path = directory .. "/cse.c"
+    write(path, generated .. "\n\n#include <assert.h>\nint main(void) {\n    assert(wordlet_f(UINT32_C(1)) == UINT32_C("
+        .. expected .. "));\n    return 0;\n}\n")
+    local exe = directory .. "/cse"
+    check(shell("timeout --kill-after=2s 30s " .. CC .. " -std=c11 -Wall -Wextra -Werror -O2 -o '"
+        .. exe .. "' '" .. path .. "' 2> " .. directory .. "/cseerr.txt") == 0,
+        "shared-expression C failed to compile:\n" .. read(directory .. "/cseerr.txt"))
+    check(shell("timeout --kill-after=2s 10s '" .. exe .. "'") == 0,
+        "shared-expression C produced the wrong value")
+end
 
 -- A self-tail call must not consume C stack. Without the loop rewrite this overflows; with it,
 -- the call is a back edge and the depth is constant. This runs only in C because the reference

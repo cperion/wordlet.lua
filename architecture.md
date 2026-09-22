@@ -316,6 +316,12 @@ values may omit a copy when proven unchanged. Then assign simultaneously and tra
 header. Reinitialize source by-value parameter storage for the next iteration. Uncertain lifetime
 cases remain ordinary calls. Nonself tail calls are not guaranteed constant-stack by portable C11.
 
+A loop-carried value parameter is read once at the top of the loop body, not at every mention. The
+parameter is immutable, so one read per iteration is equivalent; and because reads are never
+interned, a read per mention would give each mention a distinct `Ir.Value` and block sharing of
+every expression built from it. Aggregate parameter storage stays a place, because a field or
+element write must reach the instance the iteration owns.
+
 The compiler performs the safe self-loop rewrite itself. GCC's ability to optimize other tail calls
 is an optional benefit, not a semantic or resource guarantee.
 
@@ -401,10 +407,14 @@ emits a Trap on the zero predicate, then materializes the checked quotient/remai
 value at that point. It is not left as a freely movable division expression whose guard could be lost.
 The same rule applies to any future potentially trapping operation.
 
-CSE is optional and block-local initially. A repeated safe expression can use a temporary only where
-all its operands are available and the definition dominates its uses. Across arms, either duplicate
-pure computation or use explicit join slots. Never hoist a partial operation from a conditional arm
-just because its expression descriptor has several users.
+`Builder:intern` unifies structurally equal expressions, so the IR is a DAG and one `Ir.Expr` node can
+be referenced many times. The emitter names a node used more than once in one local. The
+declaration goes in the innermost statement list that contains all of its uses, immediately before
+the earliest statement in that list that uses it; in a structured IR nesting is dominance, so this
+covers arms and loops with no separate dominance check. An operand shared by the node is declared
+first, and a `Const` or `Ref` is never named, because duplicating a leaf is free. This is why an
+`Ir.Expr` must stay pure: a trap or a read is a statement materialised at its point, so no guarded
+operation is ever hoisted out of the arm that guards it.
 
 ## 8. Callables, captures and owners
 
@@ -521,6 +531,10 @@ narrowing of a run-time value is checked by a `Trap` in the same style as a run-
 so a value that does not fit aborts rather than being silently truncated. Arithmetic is computed in a
 wide enough intermediate and cast to the result's own type, which is what makes a narrower width wrap
 at its own width rather than at 32 bits.
+
+A shift whose amount is a compile-time constant below the type's width prints as a plain shift, with
+no run-time range guard, because that guard can never fire. An unknown amount keeps the guard, since
+C leaves a shift by a value at least the width undefined.
 
 An array is a struct holding one C array of its element type, because a bare C array cannot be
 assigned or returned by value while a struct that contains one can. The element is embedded, so its

@@ -3501,8 +3501,14 @@ function Eval:buildInstance(key, def, values, span, receiver)
                 local storage = builder:storageId()
                 setup[#setup + 1] = Ir.Var(storage, ty, Ir.Ref(value, ty))
                 self:loopTarget(instance, index, storage, ty)
-                declare(sc, param.name.text, { kind = "param", name = param.name.text, ty = ty,
-                    storage = storage }, param.span)
+                -- A value parameter is immutable, so one read per iteration is equivalent to reading at
+                -- every mention. Sharing the read is what lets expressions built from the parameter be
+                -- shared too, because reads are never interned.
+                local read = builder:valueId()
+                instance.loopHeader = instance.loopHeader or {}
+                instance.loopHeader[#instance.loopHeader + 1] = Ir.Read(read, ty, Ir.Local(storage))
+                declare(sc, param.name.text, { kind = "value", name = param.name.text,
+                    value = V.ir(Ir.Ref(read, ty), ty) }, param.span)
             else
                 declare(sc, param.name.text, { kind = "value", name = param.name.text,
                     value = V.ir(Ir.Ref(value, ty), ty) }, param.span)
@@ -3542,9 +3548,15 @@ function Eval:buildInstance(key, def, values, span, receiver)
     end
     -- Loop-carried parameter storage lives outside the loop so it survives each iteration.
     local statements = setup
+    local header = instance.loopHeader or {}
     if instance.loopBack then
-        statements[#statements + 1] = Ir.Loop(S.list(body))
+        -- The header reads run once per iteration; the back edge stores the next values.
+        local iterations = {}
+        for _, stmt in ipairs(header) do iterations[#iterations + 1] = stmt end
+        for _, stmt in ipairs(body) do iterations[#iterations + 1] = stmt end
+        statements[#statements + 1] = Ir.Loop(S.list(iterations))
     else
+        for _, stmt in ipairs(header) do statements[#statements + 1] = stmt end
         for _, stmt in ipairs(body) do statements[#statements + 1] = stmt end
     end
     instance.fn = Ir.Fn(instance.target, Ir.Body, receiver and 1 or 0, S.list(inputs),

@@ -20,19 +20,81 @@ local BINARY_OP = {
 }
 local UNARY_OP = { Neg = "-", BitNot = "~" }
 
+local collectExprs, collectPlaceExprs
+
+-- The `Expr` operands of an expression. A place can carry an index expression, so `Addr` and a
+-- place's `Index` are followed here too.
+function collectPlaceExprs(place, out)
+    if not place then return end
+    local kind = place.kind
+    if kind == "Project" or kind == "Deref" then collectPlaceExprs(place.base, out)
+    elseif kind == "Index" then collectPlaceExprs(place.base, out); out[#out + 1] = place.index end
+end
+
+function collectExprs(expr, out)
+    local kind = expr.kind
+    if kind == "Un" then out[#out + 1] = expr.operand
+    elseif kind == "Bin" then out[#out + 1] = expr.left; out[#out + 1] = expr.right
+    elseif kind == "Get" then out[#out + 1] = expr.aggregate
+    elseif kind == "Make" then for _, field in ipairs(expr.fields) do out[#out + 1] = field end
+    elseif kind == "Owned" then out[#out + 1] = expr.environment
+    elseif kind == "Convert" then out[#out + 1] = expr.operand
+    elseif kind == "Addr" then collectPlaceExprs(expr.place, out)
+    end
+end
+
+-- A shift amount that is a compile-time constant below the width needs no run-time range guard.
+local function shiftInRange(expr, width)
+    if expr.kind ~= "Const" then return false end
+    local literal = expr.literal
+    return literal.kind == "UInt" and literal.value < width
+end
+
 local Emitter = {}
 Emitter.__index = Emitter
-local function newEmitter(layouts, signature, usedStorages)
+local function newEmitter(layouts, signature, usedStorages, plan)
     return setmetatable({ layouts = layouts, lines = {}, indent = 1,
         placeParams = (signature and signature.placeParams) or {},
-        usedStorages = usedStorages or {} }, Emitter)
+        usedStorages = usedStorages or {},
+        shared = plan and plan.shared or nil,
+        decls = plan and plan.decls or nil,
+        assigned = {}, nextTemp = 0 }, Emitter)
 end
 function Emitter:line(text) self.lines[#self.lines + 1] = string.rep("    ", self.indent) .. text end
 function Emitter:raw(text) self.lines[#self.lines + 1] = text end
 function Emitter:value(id) return "v" .. id end
 function Emitter:storage(id) return "s" .. id end
 
+-- A shared expression is declared once and referenced by name; every other expression renders inline.
 function Emitter:expr(expr)
+    local name = self.assigned and self.assigned[expr]
+    if name then return name end
+    return self:render(expr)
+end
+
+function Emitter:tempName()
+    self.nextTemp = self.nextTemp + 1
+    return "e" .. self.nextTemp
+end
+
+-- Emits one local for a shared expression. Shared descendants are declared first so operands are
+-- available; `render` prints the node's own body rather than its own name.
+function Emitter:declareShared(node)
+    if self.assigned[node] then return end
+    local function visit(expr)
+        local children = {}
+        collectExprs(expr, children)
+        for _, child in ipairs(children) do
+            if self.shared[child] then self:declareShared(child) else visit(child) end
+        end
+    end
+    visit(node)
+    local name = self:tempName()
+    self.assigned[node] = name
+    self:line(self.layouts:cType(node.type) .. " " .. name .. " = " .. self:render(node) .. ";")
+end
+
+function Emitter:render(expr)
     local kind = expr.kind
     if kind == "Const" then
         if expr.literal.kind == "UInt64" then
@@ -63,6 +125,7 @@ function Emitter:expr(expr)
     elseif kind == "Bin" then
         local op, left, right = expr.op.kind, self:expr(expr.left), self:expr(expr.right)
         if op == "Pow" then
+            self.layouts.usespow32 = true
             local resultType = self.layouts:cType(expr.type)
             if S.isSigned(expr.type) then
                 return "wordlet_i32(wordlet_pow(wordlet_u32(" .. left .. "), " .. right .. "))"
@@ -106,6 +169,9 @@ function Emitter:expr(expr)
                         .. right .. "))"
                 end
                 if op == "Shl" then
+                    if shiftInRange(expr.right, 64) then
+                        return "wordlet_i64(wordlet_u64(" .. left .. ") << (" .. right .. "))"
+                    end
                     return "wordlet_i64(wordlet_u64(" .. left .. ") << ((" .. right
                         .. ") >= UINT64_C(64) ? UINT64_C(0) : (" .. right .. ")))"
                 end
@@ -132,6 +198,9 @@ function Emitter:expr(expr)
                     .. ") " .. cOp .. " (uint64_t)wordlet_u32(" .. right .. ")))"
             end
             if op == "Shl" then
+                if shiftInRange(expr.right, 32) then
+                    return "wordlet_i32(wordlet_u32(" .. left .. ") << (" .. right .. "))"
+                end
                 return "wordlet_i32(wordlet_u32(" .. left .. ") << ((" .. right
                     .. ") >= UINT32_C(32) ? UINT32_C(0) : (" .. right .. ")))"
             end
@@ -147,8 +216,12 @@ function Emitter:expr(expr)
                 .. right .. "))"
         end
         if op == "Shl" or op == "Shr" then
+            local width = S.widthOf(expr.type) or 32
+            if shiftInRange(expr.right, width) then
+                return "(" .. resultType .. ")((uint64_t)(" .. left .. ") " .. cOp .. " (" .. right .. "))"
+            end
             return "(" .. resultType .. ")((" .. right .. ") >= UINT32_C("
-                .. tostring(S.widthOf(expr.type) or 32) .. ") ? UINT32_C(0) : ((uint64_t)("
+                .. tostring(width) .. ") ? UINT32_C(0) : ((uint64_t)("
                 .. left .. ") " .. cOp .. " (" .. right .. ")))"
         end
         if op == "BitAnd" or op == "BitOr" or op == "BitXor" then
@@ -242,7 +315,13 @@ function Emitter:declare(ty, name, initial)
 end
 
 function Emitter:statements(list)
-    for _, stmt in ipairs(list) do
+    for index, stmt in ipairs(list) do
+        -- Shared expressions are declared at the innermost list that contains all their uses,
+        -- immediately before the first statement that needs them.
+        local pending = self.decls and self.decls[list] and self.decls[list][index]
+        if pending then
+            for _, node in ipairs(pending) do self:declareShared(node) end
+        end
         local kind = stmt.kind
         if kind == "Let" then
             self:declare(stmt.type, self:value(stmt.value.id), self:expr(stmt.expr))
@@ -689,7 +768,9 @@ function M.prototypes(layouts)
     return lines
 end
 
-function M.prelude()
+function M.prelude(layouts)
+    -- The 32-bit power helper is only emitted when a body actually uses `^`.
+    if not layouts.usespow32 then return {} end
     return {
         "uint32_t wordlet_pow(uint32_t base, uint32_t exponent) {",
         "    uint32_t result = UINT32_C(1);",
@@ -760,11 +841,165 @@ local function usedStorages(fn)
     return used
 end
 
+-- The IR is a DAG: `Builder:intern` unifies structurally equal expressions, so one node can be
+-- referenced many times, and `Emitter:render` is a tree walk that would print every reference. This
+-- finds the nodes used more than once and the innermost statement list containing all of their
+-- uses, so the emitter can bind each to one local and print names instead.
+local function analyzeSharing(fn)
+    local seen, nodes, edges, roots = {}, {}, {}, {}
+    local paths, pathList, chains = {}, {}, {}
+
+    local function chainOf(path)
+        local chain = chains[path]
+        if chain then return chain end
+        local reversed = {}
+        local current = path
+        while current do reversed[#reversed + 1] = current; current = current.parent end
+        chain = {}
+        for index = #reversed, 1, -1 do chain[#chain + 1] = reversed[index] end
+        chains[path] = chain
+        return chain
+    end
+
+    local function collect(expr)
+        if not expr or seen[expr] then return end
+        seen[expr] = true
+        nodes[#nodes + 1] = expr
+        local children = {}
+        collectExprs(expr, children)
+        local list, position = {}, {}
+        for _, child in ipairs(children) do
+            if not position[child] then
+                position[child] = #list + 1
+                list[#list + 1] = { node = child, count = 0 }
+            end
+            list[position[child]].count = list[position[child]].count + 1
+        end
+        edges[expr] = list
+        for _, edge in ipairs(list) do collect(edge.node) end
+    end
+
+    local function statementExprs(stmt, out)
+        local kind = stmt.kind
+        local function arg(value)
+            if value.kind == "ValueArg" then out[#out + 1] = value.value
+            elseif value.kind == "BorrowArg" then collectPlaceExprs(value.place, out) end
+        end
+        if kind == "Let" then out[#out + 1] = stmt.expr
+        elseif kind == "Var" then out[#out + 1] = stmt.initial
+        elseif kind == "Read" then collectPlaceExprs(stmt.place, out)
+        elseif kind == "Store" then collectPlaceExprs(stmt.place, out); out[#out + 1] = stmt.value
+        elseif kind == "BundleDef" or kind == "View" then for _, value in ipairs(stmt.slots) do arg(value) end
+        elseif kind == "Call" then for _, value in ipairs(stmt.arguments) do arg(value) end
+        elseif kind == "Indirect" then
+            out[#out + 1] = stmt.callable
+            for _, value in ipairs(stmt.arguments) do arg(value) end
+        elseif kind == "If" then out[#out + 1] = stmt.test
+        elseif kind == "Trap" then out[#out + 1] = stmt.failure
+        elseif kind == "ConstructVariant" then out[#out + 1] = stmt.payload
+        elseif kind == "Return" then for _, value in ipairs(stmt.values) do out[#out + 1] = value end
+        end
+    end
+
+    local stack = {}
+    local function walkList(list)
+        for index, stmt in ipairs(list) do
+            local path = { list = list, index = index, parent = stack[#stack] }
+            stack[#stack + 1] = path
+            local exprs = {}
+            statementExprs(stmt, exprs)
+            for _, expr in ipairs(exprs) do
+                if expr then
+                    collect(expr)
+                    roots[#roots + 1] = { node = expr, path = path }
+                end
+            end
+            if stmt.kind == "If" then walkList(stmt.yes); walkList(stmt.no)
+            elseif stmt.kind == "Loop" then walkList(stmt.body) end
+            stack[#stack] = nil
+        end
+    end
+    walkList(fn.body)
+
+    -- Reference counts and use positions propagate from the statement roots through the DAG, so the
+    -- walk is linear in the DAG and never expands the shared tree.
+    local order, marked = {}, {}
+    local function orderVisit(node)
+        if marked[node] then return end
+        marked[node] = true
+        for _, edge in ipairs(edges[node]) do orderVisit(edge.node) end
+        order[#order + 1] = node
+    end
+    for _, root in ipairs(roots) do orderVisit(root.node) end
+
+    local uses = {}
+    for _, root in ipairs(roots) do
+        uses[root.node] = math.min(2, (uses[root.node] or 0) + 1)
+        if not paths[root.node] then paths[root.node] = {}; pathList[root.node] = {} end
+        if not paths[root.node][root.path] then
+            paths[root.node][root.path] = true
+            pathList[root.node][#pathList[root.node] + 1] = root.path
+        end
+    end
+    for index = #order, 1, -1 do
+        local node = order[index]
+        local count = uses[node] or 0
+        if count > 0 then
+            for _, edge in ipairs(edges[node]) do
+                local child = edge.node
+                uses[child] = math.min(2, (uses[child] or 0) + count * edge.count)
+                if pathList[node] then
+                    if not paths[child] then paths[child] = {}; pathList[child] = {} end
+                    for _, path in ipairs(pathList[node]) do
+                        if not paths[child][path] then
+                            paths[child][path] = true
+                            pathList[child][#pathList[child] + 1] = path
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- A node used twice or more is shared; its declaration goes in the innermost list that contains
+    -- every use, before the earliest statement in that list that uses it.
+    local shared, decls = {}, {}
+    for _, node in ipairs(nodes) do
+        if uses[node] and uses[node] >= 2 and node.kind ~= "Const" and node.kind ~= "Ref" then
+            shared[node] = true
+            local list = pathList[node]
+            local first = chainOf(list[1])
+            local depth = #first
+            for _, path in ipairs(list) do
+                local chain = chainOf(path)
+                local matched = 0
+                while matched < depth and matched < #chain
+                    and chain[matched + 1].list == first[matched + 1].list do
+                    matched = matched + 1
+                end
+                if matched < depth then depth = matched end
+            end
+            local target = first[depth].list
+            local earliest = first[depth].index
+            for _, path in ipairs(list) do
+                local index = chainOf(path)[depth].index
+                if index < earliest then earliest = index end
+            end
+            decls[target] = decls[target] or {}
+            decls[target][earliest] = decls[target][earliest] or {}
+            local pending = decls[target][earliest]
+            pending[#pending + 1] = node
+        end
+    end
+    return { shared = shared, decls = decls }
+end
+
 function M.bodies(layouts)
     local lines = {}
     for _, instance in ipairs(layouts.order) do
         local signature = layouts.signatures[instance.target]
-        local emitter = newEmitter(layouts, signature, usedStorages(instance.fn))
+        local emitter = newEmitter(layouts, signature, usedStorages(instance.fn),
+            analyzeSharing(instance.fn))
         emitter:raw(M.signatureText(layouts, signature) .. " {")
         emitter:statements(instance.fn.body)
         -- A residual base case keeps the full ABI, so a parameter it never reads still appears in
@@ -917,7 +1152,7 @@ function M.unit(layouts)
     lines[#lines + 1] = ""
     for _, line in ipairs(M.prototypes(layouts)) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""
-    for _, line in ipairs(M.prelude()) do lines[#lines + 1] = line end
+    for _, line in ipairs(M.prelude(layouts)) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""
     for _, line in ipairs(adapters) do
         lines[#lines + 1] = line
@@ -952,7 +1187,7 @@ function M.source(layouts, headerName)
     lines[#lines + 1] = ""
     for _, line in ipairs(M.prototypes(layouts)) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""
-    for _, line in ipairs(M.prelude()) do lines[#lines + 1] = line end
+    for _, line in ipairs(M.prelude(layouts)) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""
     for _, line in ipairs(adapters) do
         lines[#lines + 1] = line

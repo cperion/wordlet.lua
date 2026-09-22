@@ -340,6 +340,17 @@ bothSession:compile(Parse.source("let count(n: U32) : U32 =\n"
     .. "return { functions = { count } }", "b.let"))
 check(A.dump(bothSession.order[1].fn):find("Loop", 1, true) ~= nil, "either tail arm may loop")
 
+-- A loop-carried parameter is read once at the top of the loop body, so expressions built from it
+-- are shared. Reads are never interned, so a read per mention would block that sharing.
+local readSession = Eval.session()
+readSession:compile(Parse.source("let step(n: U32, x: U32): U32 = do\n"
+    .. "  if n == 0 then return x ~ (x << 3) end\n"
+    .. "  let y = x ~ (x << 3)\n"
+    .. "  return step(n - 1, y)\n"
+    .. "end\nreturn { functions = { step } }", "read.let"))
+local _, reads = A.dump(readSession.order[1].fn):gsub("Read", "")
+check(reads == 2, "a loop-carried parameter is read once, not per mention (found " .. reads .. ")")
+
 -- A tail call with different static arguments is a different instance, so it is a real call.
 local staticSession = Eval.session()
 staticSession:compile(Parse.source("let scale(k, x: U32) : U32 = if k == 0 then x else scale(0, x + 1)\n"
