@@ -2669,7 +2669,7 @@ function Eval:buildCallableInstance(key, callable, args, span)
         inputs[#inputs + 1] = S.inValue(ty)
         paramTypes[#paramTypes + 1] = ty
         instance.inputTypes[#instance.inputTypes + 1] = ty
-        declare(sc, name, { kind = "value", name = name, value = V.ir(Ir.Ref(value, ty), ty) }, span)
+        declare(sc, name, { kind = "value", name = name, value = V.ir(builder:ref(value, ty), ty) }, span)
     end
     for _, name in ipairs(plan.borrowedOrder) do
         local borrowed = plan.borrowed[name]
@@ -2752,14 +2752,14 @@ function Eval:buildCallableInstance(key, callable, args, span)
                 instance.paramPositions[#instance.paramPositions + 1] = index
                 if S.isRecord(ty) then
                     local storage = builder:storageId()
-                    setup[#setup + 1] = Ir.Var(storage, ty, Ir.Ref(value, ty))
+                    setup[#setup + 1] = Ir.Var(storage, ty, builder:ref(value, ty))
                     declare(sc, param.name.text, { kind = "value", name = param.name.text,
                         value = V.object(ty, Ir.Local(storage), { fields = S.fieldsOf(ty),
                             fieldNames = S.fieldNames(ty), statics = {}, readonly = {}, methods = {}, type = ty }) },
                         param.span)
                 else
                     declare(sc, param.name.text, { kind = "value", name = param.name.text,
-                        value = V.ir(Ir.Ref(value, ty), ty) }, param.span)
+                        value = V.ir(builder:ref(value, ty), ty) }, param.span)
                 end
             end
         end
@@ -3292,7 +3292,7 @@ function Eval:emitLoopBack(ctx, instance, values, span)
         self:requireType(value, target.ty, span)
         local id = builder:valueId()
         builder:emit(ctx.body, Ir.Let(id, target.ty, self:expression(ctx, value)))
-        temporaries[index] = Ir.Ref(id, target.ty)
+        temporaries[index] = builder:ref(id, target.ty)
     end
     for index, target in ipairs(instance.loopTargets) do
         builder:store(ctx.body, Ir.Local(target.storage), temporaries[index])
@@ -3481,14 +3481,14 @@ function Eval:buildInstance(key, def, values, span, receiver)
             if S.isArray(ty) then
                 -- A by-value array parameter owns fresh local storage for the same reason.
                 local storage = builder:storageId()
-                setup[#setup + 1] = Ir.Var(storage, ty, Ir.Ref(value, ty))
+                setup[#setup + 1] = Ir.Var(storage, ty, builder:ref(value, ty))
                 declare(sc, param.name.text, { kind = "value", name = param.name.text,
                     value = V.array(ty, nil, Ir.Local(storage)) }, param.span)
             elseif S.isRecord(ty) then
                 -- A by-value record parameter owns fresh local storage, so field writes and method
                 -- calls do not touch the caller's instance.
                 local storage = builder:storageId()
-                setup[#setup + 1] = Ir.Var(storage, ty, Ir.Ref(value, ty))
+                setup[#setup + 1] = Ir.Var(storage, ty, builder:ref(value, ty))
                 declare(sc, param.name.text, { kind = "value", name = param.name.text,
                     value = V.object(ty, Ir.Local(storage), { fields = S.fieldsOf(ty),
                         fieldNames = S.fieldNames(ty), statics = {}, readonly = {}, methods = {}, type = ty }) },
@@ -3499,7 +3499,7 @@ function Eval:buildInstance(key, def, values, span, receiver)
             elseif def.tailSelf then
                 -- Loop-carried parameters need mutable storage so a back edge can rebind them.
                 local storage = builder:storageId()
-                setup[#setup + 1] = Ir.Var(storage, ty, Ir.Ref(value, ty))
+                setup[#setup + 1] = Ir.Var(storage, ty, builder:ref(value, ty))
                 self:loopTarget(instance, index, storage, ty)
                 -- A value parameter is immutable, so one read per iteration is equivalent to reading at
                 -- every mention. Sharing the read is what lets expressions built from the parameter be
@@ -3508,10 +3508,10 @@ function Eval:buildInstance(key, def, values, span, receiver)
                 instance.loopHeader = instance.loopHeader or {}
                 instance.loopHeader[#instance.loopHeader + 1] = Ir.Read(read, ty, Ir.Local(storage))
                 declare(sc, param.name.text, { kind = "value", name = param.name.text,
-                    value = V.ir(Ir.Ref(read, ty), ty) }, param.span)
+                    value = V.ir(builder:ref(read, ty), ty) }, param.span)
             else
                 declare(sc, param.name.text, { kind = "value", name = param.name.text,
-                    value = V.ir(Ir.Ref(value, ty), ty) }, param.span)
+                    value = V.ir(builder:ref(value, ty), ty) }, param.span)
             end
         end
         end

@@ -1365,4 +1365,21 @@ local one = compile("let f(x: U32) : U32 = x * 3 + 1\nreturn { functions = { f }
 local two = compile("let f(x: U32) : U32 = x * 3 + 1\nreturn { functions = { f } }"):unit()
 check(one == two, "emission is deterministic")
 
+-- A long binding chain must compile in time linear in the chain. Interned expressions name their
+-- operands by id, not by re-encoding the subtree, so a key costs the same however deep an operand
+-- is; re-encoding made a 400-binding chain take seconds.
+do
+    local lines = { "let big(x: U32): U32 = do", "  let a0 = x" }
+    for index = 1, 400 do
+        lines[#lines + 1] = ("  let a%d = a%d * 3 + %d"):format(index, index - 1, index)
+    end
+    lines[#lines + 1] = "  return a400"
+    lines[#lines + 1] = "end"
+    lines[#lines + 1] = "return { functions = { big } }"
+    local start = os.clock()
+    compile(table.concat(lines, "\n"))
+    local elapsed = os.clock() - start
+    check(elapsed < 2, "a 400-binding chain compiles in linear time (took " .. elapsed .. " s)")
+end
+
 print(("PASS: evaluator semantics (%d checks)"):format(checks))

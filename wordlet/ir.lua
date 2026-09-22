@@ -87,7 +87,7 @@ local Builder = {}
 Builder.__index = Builder
 
 function M.builder(fn)
-    return setmetatable({ fn = fn, memo = {}, values = 0, storage = 0, bundles = 0 }, Builder)
+    return setmetatable({ fn = fn, memo = {}, values = 0, storage = 0, bundles = 0, expressions = 0 }, Builder)
 end
 
 function Builder:valueId()
@@ -105,10 +105,15 @@ end
 
 -- Interned pure expressions. The key is the canonical encoding, so structural equality of
 -- descriptions wins; that is safe because these nodes cannot read memory or have effects.
+-- Interned pure expressions. The key names each operand by its own interned id, never by
+-- re-encoding the subtree, so a key costs the same however deep an operand is. Structural equality
+-- still wins, because equal operands are the same interned object and therefore the same id.
 function Builder:intern(key, make)
     local existing = self.memo[key]
     if existing then return existing end
     local expr = make()
+    self.expressions = self.expressions + 1
+    expr.id = self.expressions
     self.memo[key] = expr
     return expr
 end
@@ -130,7 +135,7 @@ end
 function Builder:un(op, operand, ty)
     local constructor = Ir[op]
     if not constructor then D.bug("ir-op", "Unknown unary operation: " .. tostring(op)) end
-    return self:intern("un|" .. op .. "|" .. S.encode(operand) .. "|" .. S.encode(ty), function()
+    return self:intern("un|" .. op .. "|" .. operand.id .. "|" .. S.encode(ty), function()
         return Ir.Un(constructor, operand, ty)
     end)
 end
@@ -182,7 +187,7 @@ function Builder:bin(op, left, right, ty)
     if folded then return self:u32(folded) end
     local constructor = Ir[op]
     if not constructor then D.bug("ir-op", "Unknown binary operation: " .. tostring(op)) end
-    return self:intern("bin|" .. op .. "|" .. S.encode(left) .. "|" .. S.encode(right) .. "|" .. S.encode(ty),
+    return self:intern("bin|" .. op .. "|" .. left.id .. "|" .. right.id .. "|" .. S.encode(ty),
         function() return Ir.Bin(constructor, left, right, ty) end)
 end
 
@@ -193,16 +198,21 @@ function Builder:get(aggregate, name, ty)
             if aggregate.type.fields[index].name == name then return field end
         end
     end
-    return self:intern("get|" .. S.encode(aggregate) .. "|" .. name .. "|" .. S.encode(ty), function()
+    return self:intern("get|" .. aggregate.id .. "|" .. name .. "|" .. S.encode(ty), function()
         return Ir.Get(aggregate, Ir.Field(name), ty)
     end)
 end
 
-function Builder:make(ty, fields) return Ir.Make(ty, S.list(fields)) end
+-- A `Make` is pure, so it is interned like any other expression and carries an id for its users.
+function Builder:make(ty, fields)
+    local key = { "make", S.encode(ty) }
+    for index, field in ipairs(fields) do key[#key + 1] = field.id end
+    return self:intern(table.concat(key, "|"), function() return Ir.Make(ty, S.list(fields)) end)
+end
 -- An integer conversion, interned like every other pure expression.
 function Builder:convert(operand, ty)
     if operand.type == ty then return operand end
-    return self:intern("convert|" .. S.encode(operand) .. "|" .. S.encode(ty), function()
+    return self:intern("convert|" .. operand.id .. "|" .. S.encode(ty), function()
         return Ir.Convert(operand, ty)
     end)
 end
