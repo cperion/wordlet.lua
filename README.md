@@ -87,10 +87,11 @@ emits a local adapter that binds its hidden inputs, and the field stores the res
 adapter lives in the assigning activation, the record holding it is non-retaining: it may be used,
 copied and called locally, but returning it or storing it in module state is rejected.
 
-`tests/eval.lua` (458 checks) and `tests/c.lua` (549 checks, 34 programs, compiling and running the
+`tests/eval.lua` (458 checks) and `tests/c.lua` (553 checks, 34 programs, compiling and running the
 generated C11 under strict warnings) cover this. `tests/sha256.lua` runs a real program,
 `examples/sha256.let`, against the published NIST vector and against the interpreter for runtime
-seeds.
+seeds. `tests/jit.lua` exercises the LuaJIT FFI front end, building and loading an artifact with the
+host compiler.
 
 
 - [syntax.md](syntax.md): Wordlet source syntax and semantic decisions.
@@ -99,6 +100,7 @@ seeds.
 - `ast.asdl`, `ir.asdl`: concrete ASDL schemas, parsed and checked by `tests/schemas.lua`.
 - `vendor/asdl.lua`, `vendor/terralist.lua`: working ASDL and list implementation.
 - `tools/bundle.lua`: working manifest-driven single-file Lua bundler.
+- `wordlet/jit.lua`: the LuaJIT FFI front end that compiles, builds and loads an artifact at run time.
 - `wordletkit.lua`: a tooling API exporting ASDL, List and U32, NOT the Wordlet compiler.
 - `wordletkit/u32.lua`: checked exact concrete U32 operations; [U32.md](U32.md) explains host/C rules.
 - `examples/*.let`: source acceptance fixtures; they type-check and run today, and VALIDATION.md lists
@@ -111,7 +113,16 @@ seeds.
 - [AGENTS.md](AGENTS.md): local implementation and validation instructions for coding agents.
 
 The `wordlet` namespace is the compiler. `wordletkit` remains the bootstrap toolkit (ASDL, List and
-the U32 reference kernel) and is not the compiler.
+the U32 reference kernel) and is not the compiler. `wordlet.syntax` is the language reference text,
+generated from [syntax.md](syntax.md) into `wordlet/docs/syntax.lua` by `tools/embed.lua` and listed
+in the bundle manifest, so a host that loads only `dist/wordlet.lua` can still show the language.
+
+`wordlet.jit` is the LuaJIT FFI front end. `wordlet.jit.loadstring(code)` compiles `.let` code with
+the C backend, builds a shared object with the system `cc`, loads it, and returns the exported words
+as ordinary Lua-callable functions; `loadfile` compiles a file and resolves its own `use` imports,
+`run` calls an implicit or exported `main`, and `install` registers a searcher so `require("a.b")`
+finds `a/b.let`. On Linux the C source and the object are anonymous memory files, so nothing is
+written to disk. It needs LuaJIT and a C11 compiler, not the separate LuaJIT backend.
 
 ## Run the working tooling
 
@@ -127,7 +138,13 @@ luajit dist/wordlet.lua -o /tmp/arithmetic.c examples/arithmetic.let
 The default bundle is `dist/wordlet.lua`: the compiler facade and its CLI. `wordletkit.lua` remains
 the bootstrap toolkit (ASDL, List and U32) and does not compile Wordlet.
 Running tests requires `cp`, `mkdir`, `rm`, and GNU-compatible `timeout`. `LUAJIT` may name the LuaJIT
-executable. The C differential tests need a C11 compiler, selected through `CC` (default `cc`).
+executable. The C differential tests need a C11 compiler, selected through `CC` (default `cc`); the
+generated code is clean under `-Wall -Wextra -Werror` with both GCC and clang. A private function is
+declared `WORDLET_PRIVATE`, which is `static inline __attribute__((always_inline))` on GCC and clang
+and plain `static` on another C11 compiler. The forced inlining is on by default because a residual
+specialization usually has one caller; `--no-inline` (or `inline = false`) leaves the choice to the
+compiler, and a host can define `WORDLET_NO_FORCED_INLINE` to do the same, which is what a debug
+build wants.
 The bootstrap has no LuaRocks, network, external Lua library or C compiler dependency. Its bit module
 is supplied by LuaJIT itself.
 
@@ -155,6 +172,7 @@ return {
     modules = {
         wordlet = "wordlet/init.lua",  -- every bundled module is explicitly listed
         -- ... the rest of wordlet/* and wordletkit/*, in sorted name order
+        -- including wordlet/docs/syntax.lua, the language reference as a module
         ["vendor.asdl"] = "vendor/asdl.lua",
         ["vendor.terralist"] = "vendor/terralist.lua",
     },

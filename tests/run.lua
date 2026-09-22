@@ -21,6 +21,7 @@ dofile(here .. "parse.lua")
 dofile(here .. "eval.lua")
 dofile(here .. "c.lua")
 dofile(here .. "sha256.lua")
+dofile(here .. "jit.lua")
 local L, c = kit.List, kit.ASDL.NewContext()
 c:Define([[
 module T { Value = U32 | Bool
@@ -64,6 +65,8 @@ end
 local temp = os.tmpname(); os.remove(temp)
 command("mkdir -p -- " .. q(temp))
 local lua = q(os.getenv("LUAJIT") or "luajit")
+-- The generated ASDL schema and language-reference modules must match their sources.
+command("cd " .. q(root) .. " && timeout 10s " .. lua .. " tools/embed.lua --check")
 local function run(body)
     command("cd " .. q(temp) .. " && timeout 10s " .. lua .. " -e " .. q(body))
 end
@@ -90,10 +93,13 @@ return { functions = { affine } }]==]
     run([[package.path=''; package.cpath=''; local w=assert(loadfile('isolated.lua'))();
         local r=w.interpret{source=io.open('program.let'):read('*a'), entry='affine', args={3,7,4}};
         assert(r[1]==19); local c=w.compile_file('program.let'):unit();
-        assert(c:find('wordlet_affine',1,true)~=nil)]])
+        assert(c:find('wordlet_affine',1,true)~=nil);
+        assert(type(w.syntax)=='string' and w.syntax:find('Wordlet',1,true)~=nil,
+            'the bundle must carry the syntax reference')]])
     -- Real require mode from a different cwd, with no source search path.
     run([[package.path='./?.lua'; package.cpath=''; local w=require('isolated');
-        assert(type(w.compile)=='function' and type(w.interpret)=='function')]])
+        assert(type(w.compile)=='function' and type(w.interpret)=='function');
+        assert(type(w.syntax)=='string' and w.syntax:find('Wordlet',1,true)~=nil)]])
 
     write(temp .. "/entry.lua", [[return {legacy=require('legacy'), retry=function() return require('unstable') end,
         cycle=function() return require('cycle_a') end, missing=function() return require('unlisted') end}]])

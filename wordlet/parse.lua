@@ -552,11 +552,29 @@ function Parser:export()
     return A.c.Export(asList(types), asList(functions), asList(results)), mergeSpan(open.span, close.span)
 end
 
+-- A file that defines a top-level `main` needs no export configuration: `main` is the entry point,
+-- which is what lets a host run a `.let` string that was written as a program rather than a module.
+function Parser:implicitMain(declarations)
+    for _, decl in ipairs(declarations) do
+        -- Only a word is executable code; a lambda binding is a value and cannot be exported.
+        if decl.kind == "WordDecl" and decl.def.name.text == "main" then
+            return A.c.Export(asList({}), asList({ A.c.ExportName(decl.def.name) }), asList({}))
+        end
+    end
+    return nil
+end
+
 function Parser:program()
     local declarations = {}
     while not self:at("return") do
         if self:peek().kind == "eof" then
-            D.reject("parse", "A module must end with a `return { ... }` export", self:peek().span)
+            local export = self:implicitMain(declarations)
+            if not export then
+                D.reject("parse",
+                    "A module must end with a `return { ... }` export, or define a top-level word `main`",
+                    self:peek().span)
+            end
+            return A.c.Program(asList(declarations), export)
         end
         declarations[#declarations + 1] = self:declaration()
     end

@@ -227,7 +227,9 @@ function Emitter:render(expr)
         if op == "BitAnd" or op == "BitOr" or op == "BitXor" then
             return "(" .. resultType .. ")((" .. left .. ") " .. cOp .. " (" .. right .. "))"
         end
-        return "((" .. left .. ") " .. cOp .. " (" .. right .. "))"
+        -- A comparison keeps its operands parenthesised but not the whole expression: an extra outer
+        -- pair makes clang's -Wparentheses-equality fire when the comparison is a condition.
+        return "(" .. left .. ") " .. cOp .. " (" .. right .. ")"
     elseif kind == "Make" and S.isArray(S.environmentOf(expr.type)) then
         -- An array is a struct holding a C array, so its elements initialise that member.
         local layout = self.layouts.arrayLayout(S.environmentOf(expr.type))
@@ -746,7 +748,14 @@ function M.signatureText(layouts, signature)
     local returns = "void"
     if signature.results.kind == "scalar" then returns = layouts:cType(signature.results.type) end
     if signature.results.kind == "tuple" then returns = signature.results.name end
-    return returns .. " " .. signature.name .. "(" .. table.concat(parameters, ", ") .. ")"
+    -- A private residual function has internal linkage. `WORDLET_PRIVATE` asks GCC and clang to inline
+    -- it and falls back to plain `static` on a C11 compiler without the attribute; an export keeps
+    -- external linkage for the host.
+    local linkage = ""
+    if not signature.exported then
+        linkage = layouts.privateInline == false and "static " or "WORDLET_PRIVATE "
+    end
+    return linkage .. returns .. " " .. signature.name .. "(" .. table.concat(parameters, ", ") .. ")"
 end
 
 local function aliasOf(signature, name)
@@ -1130,6 +1139,54 @@ end
 
 -- Bodies are emitted first: doing so is what registers the views, adapters and nested record
 -- layouts that the declarations have to name.
+-- A private residual function has internal linkage. GCC and clang are asked to inline it, because a
+-- specialization usually has one caller; another C11 compiler, or a host that defines
+-- WORDLET_NO_FORCED_INLINE, gets plain `static`.
+function M.privateLinkage(layouts)
+    if layouts.privateInline == false then return {} end
+    return {
+        "#if defined(__GNUC__) && !defined(WORDLET_NO_FORCED_INLINE)",
+        "#define WORDLET_PRIVATE static inline __attribute__((always_inline))",
+        "#else",
+        "#define WORDLET_PRIVATE static",
+        "#endif",
+    }
+end
+
+-- A `cdef` view: every type declaration and the exported prototypes, with no bodies and no private
+-- symbols. A host feeds this to `ffi.cdef` and then `ffi.load`s the shared object it builds.
+-- A `cdef` view: every type declaration and the exported prototypes, with no bodies and no private
+-- symbols. A host feeds this to `ffi.cdef` and then `ffi.load`s the shared object it builds. Because
+-- `ffi.cdef` is process-global, an optional namespace prefixes every generated type name so several
+-- artifacts can be loaded side by side; the C names in the object are unaffected, since C struct
+-- identity is layout, not spelling.
+function M.cdef(layouts, namespace)
+    -- Naming a type is what registers its layout, so the bodies must be walked first.
+    M.bodies(layouts)
+    local lines = {}
+    for _, line in ipairs(M.typeDeclarations(layouts)) do lines[#lines + 1] = line end
+    lines[#lines + 1] = ""
+    for _, instance in ipairs(layouts.order) do
+        local signature = layouts.signatures[instance.target]
+        if signature.exported then
+            lines[#lines + 1] = M.signatureText(layouts, signature) .. ";"
+        end
+    end
+    local text = table.concat(lines, "\n")
+    if namespace and namespace ~= "" then
+        local names = {}
+        for _, group in ipairs({ layouts.tupleOrder, layouts.recordOrder, layouts.arrayOrder,
+            layouts.sumOrder, layouts.taggedOrder, layouts.viewOrder, layouts.adapterOrder or {} }) do
+            for _, layout in ipairs(group) do names[#names + 1] = layout.name end
+        end
+        for _, exported in ipairs(layouts.typeExports or {}) do names[#names + 1] = exported.name end
+        for _, name in ipairs(names) do
+            text = text:gsub("%f[%w_]" .. name .. "%f[^%w_]", namespace .. name)
+        end
+    end
+    return text
+end
+
 function M.unit(layouts)
     -- Bodies and declarations are built first: naming a type is what decides whether the signed
     -- helpers are needed, and they have to be printed before anything that uses them.
@@ -1138,6 +1195,7 @@ function M.unit(layouts)
     local declarations = M.typeDeclarations(layouts)
     local lines = {}
     for _, line in ipairs(INCLUDES) do lines[#lines + 1] = line end
+    for _, line in ipairs(M.privateLinkage(layouts)) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""
     if layouts.usesSigned then
         for _, line in ipairs(SIGNED_HELPERS) do lines[#lines + 1] = line end
@@ -1173,6 +1231,7 @@ function M.source(layouts, headerName)
     local lines = {}
     if headerName then lines[#lines + 1] = '#include "' .. headerName .. '"' end
     for _, line in ipairs(INCLUDES) do lines[#lines + 1] = line end
+    for _, line in ipairs(M.privateLinkage(layouts)) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""
     if layouts.usesSigned then
         for _, line in ipairs(SIGNED_HELPERS) do lines[#lines + 1] = line end
@@ -1215,7 +1274,7 @@ function M.header(layouts, name)
     local any = false
     for _, instance in ipairs(layouts.order) do
         local signature = layouts.signatures[instance.target]
-        if signature.name:sub(1, 8) == "wordlet_" then
+        if signature.exported then
             any = true
             lines[#lines + 1] = M.signatureText(layouts, signature) .. ";"
             for _, alias in ipairs(signature.aliases) do

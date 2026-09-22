@@ -288,6 +288,12 @@ artifact:header("app")     -- string: include guard, extern "C", reachable types
 artifact:source("app")     -- string: bodies; private prototypes stay here
 artifact:unit()            -- string: one self-contained translation unit (header contents inlined)
 artifact:exports()         -- { functions = {name...}, types = {name...} }
+
+wordlet.syntax             -- string: the language reference, embedded from syntax.md
+wordlet.jit.loadstring(s)   -- compile `.let` text with the C backend and load it (LuaJIT FFI)
+wordlet.jit.loadfile(path)  -- the same for a file, resolving its own `use` imports
+wordlet.jit.run(source)     -- load and call `main`
+wordlet.jit.install()       -- register a searcher so `require("a.b")` finds `a/b.let`
 ```
 
 `compile_file` resolves the module graph first: it reads each `use`d file relative to the importing
@@ -296,7 +302,10 @@ top scope, and then compiles the entry module with its own top. `Eval:compile(pr
 that pre-loaded scope; `Eval:declareNamespace` puts a namespace in it. A source string cannot resolve
 an import, so `compile` rejects a `use` declaration (`import-input`).
 
-Options: `name` (defaults to the path), `limits` (section 9), `target = "c11"`. Compilation errors
+Options: `name` (defaults to the path), `limits` (section 9), `target = "c11"`, `inline` (defaults
+to `true`: a private function is asked to force-inline on GCC and clang, and is plain `static` on
+another C11 compiler), and `symbolPrefix` (defaults to `""`: a prefix for every exported symbol,
+which the FFI front end uses so several artifacts can be loaded in one process). Compilation errors
 raise `Diagnostic`; the facade never returns a partial artifact. `artifact:unit()` exists because the
 bundler's CLI defaults to one file, while `header`/`source` support separate compilation.
 

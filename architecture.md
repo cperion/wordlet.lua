@@ -501,6 +501,21 @@ one closed artifact, not two independent source evaluations. Private prototypes 
 Public reachability includes callable signatures and owned-result environment layouts and invocation
 helpers. No historical helper names or facade signatures are compatibility requirements.
 
+A residual instance that no call, view or adapter names is dead and is not emitted at all, and a
+private function has internal linkage; only exports and the module initialiser stay external. The
+private definition is spelled `WORDLET_PRIVATE`, which is `static inline __attribute__((always_inline))`
+on GCC and clang and plain `static` on another C11 compiler. Forced inlining is the default because a
+residual specialization usually has one caller, and it removes the out-of-line copies a cost model
+keeps for the larger bodies; a host that defines `WORDLET_NO_FORCED_INLINE`, or a caller that passes
+`inline = false`, gets plain `static` and the compiler's own decision instead.
+
+The same artifact is consumable without C glue: `artifact:cdef(namespace)` renders the type
+declarations and the exported prototypes for `ffi.cdef`, and a `symbolPrefix` namespaces every export
+so several artifacts can be loaded in one process. `wordlet.jit` builds the shared object with the
+host C compiler — in memory on Linux, through memfd — loads it with LuaJIT FFI, and returns the
+exports as Lua-callable functions. It is the runtime face of this backend, not the separate LuaJIT
+backend.
+
 | Entity | C representation |
 | --- | --- |
 | U32 / U16 / U8 | uint32_t / uint16_t / uint8_t |

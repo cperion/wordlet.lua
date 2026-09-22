@@ -1,19 +1,22 @@
 -- Command-line entry point. Returns function(api, argv) -> exit status.
 local D = require("wordlet.diag")
 
-local USAGE = [[usage: wordlet [--header NAME] [--unit] [--check] [-o FILE] FILE.let
+local USAGE = [[usage: wordlet [--header NAME] [--unit] [--check] [--no-inline] [-o FILE] FILE.let
   --unit        emit one self-contained translation unit (default)
   --header NAME emit a header/source pair; NAME is the header file name
   --check       parse and compile only; report diagnostics without emitting C
+  --no-inline   give a private function plain internal linkage instead of forced inlining
   -o FILE       write to FILE instead of stdout]]
 
 return function(api, argv)
     local path, output, headerName, checkOnly = nil, nil, nil, false
+    local options = {}
     local index = 1
     while argv[index] do
         local arg = argv[index]
         if arg == "--check" then checkOnly = true
         elseif arg == "--unit" then headerName = nil
+        elseif arg == "--no-inline" then options.inline = false
         elseif arg == "--header" then
             index = index + 1
             headerName = argv[index]
@@ -42,7 +45,7 @@ return function(api, argv)
     end
 
     local ok, result = pcall(function()
-        local artifact = api.compile_file(path)
+        local artifact = api.compile_file(path, options)
         if checkOnly then return true end
         return artifact
     end)

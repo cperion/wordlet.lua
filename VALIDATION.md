@@ -10,7 +10,8 @@ The runner verifies ASDL interning/type checks, non-interned occurrences, actual
 behavior, corrected List equality selectors, and concrete U32 arithmetic against edge cases and an
 independent bit-serial multiplication reference. It copies this project's declared files to a
 temporary path containing spaces and a quote, then builds there from another working directory.
-It compares repeated bundle bytes and loads the bundle with Lua search paths cleared. Fixture modules
+It compares repeated bundle bytes, checks that the generated ASDL and syntax-reference modules match
+their sources (`tools/embed.lua --check`), and loads the bundle with Lua search paths cleared. Fixture modules
 exercise real require-mode embedding, optional CLI dispatch, private package.loaded compatibility,
 failed-load retry, cycles, unlisted dependencies, missing/syntactically invalid source and write errors.
 The runner cleans its temporary directory and reports failures with nonzero exit status.
@@ -18,7 +19,8 @@ The runner cleans its temporary directory and reports failures with nonzero exit
 The same command then runs the compiler suites in order: `tests/schemas.lua` (AST/IR schemas),
 `tests/u64.lua` (the exact 64-bit kernel), `tests/parse.lua` (lexer/parser), `tests/eval.lua`
 (evaluator semantics) and `tests/c.lua` (interpreter/C differential, compiling and running the
-generated C11 under `-Wall -Wextra -Werror -O2`). A failure in any suite stops the run, so a passing
+generated C11 under `-Wall -Wextra -Werror -O2`), and `tests/jit.lua` (the LuaJIT FFI front end, which
+builds and loads an artifact with the host compiler). A failure in any suite stops the run, so a passing
 bundle or ASDL constructor check alone is not a parser/evaluator/C correctness claim; the compiler
 suites are what make that claim. Tests need POSIX tools and a C11 compiler; they are not a sandbox
 for untrusted module source or manifest code.

@@ -795,6 +795,25 @@ end
 
 for _, case in ipairs(CASES) do runCase(case) end
 
+-- A residual instance that nothing calls or points at is dropped before ownership is computed, so a
+-- private function always has a caller and plain internal linkage satisfies -Werror.
+do
+    local closures
+    for _, case in ipairs(CASES) do if case.name == "closures" then closures = case.source end end
+    check(closures ~= nil, "the closures case is missing")
+    local generated = wordlet.compile{ source = closures, name = "closures.let" }:unit()
+    local counts = {}
+    for name in generated:gmatch("(wordletfn_%d+)") do counts[name] = (counts[name] or 0) + 1 end
+    local dead = 0
+    for _, count in pairs(counts) do if count < 3 then dead = dead + 1 end end
+    check(dead == 0, "an unreferenced residual instance was emitted: " .. dead)
+    check(generated:find("#define WORDLET_PRIVATE static inline __attribute__((always_inline))", 1, true) ~= nil,
+        "a private function is asked to inline by default")
+    local plain = wordlet.compile{ source = closures, name = "closures.let", inline = false }:unit()
+    check(plain:find("WORDLET_PRIVATE", 1, true) == nil and plain:find("static ", 1, true) ~= nil,
+        "inline = false gives a private function plain internal linkage")
+end
+
 -- `Builder:intern` shares structurally equal expressions, so a chain that rebuilds each value from
 -- the previous one is a DAG. Naming the shared nodes keeps the generated C linear instead of
 -- exponential; this guards that and runs the result.

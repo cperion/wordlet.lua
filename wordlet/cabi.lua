@@ -12,9 +12,50 @@ end
 
 function M.functionName(name) return "wordlet_" .. M.escape(name) end
 
+-- A residual instance that no call, view or adapter names is dead. Dropping it before ownership is
+-- computed keeps the emitted C free of unreferenced functions, so a private function needs no
+-- `inline` keyword to satisfy `-Wunused-function`.
+local function liveInstances(compilation)
+    local order = compilation.session.order
+    local byTarget = {}
+    for _, instance in ipairs(order) do byTarget[instance.target] = instance end
+    local live, queue = {}, {}
+    local function mark(target)
+        local instance = byTarget[target]
+        if instance and not live[instance] then
+            live[instance] = true
+            queue[#queue + 1] = instance
+        end
+    end
+    -- Every export and the module initialiser is a root; a callable's code is named by a Call or a
+    -- View, and an adapter is generated only for a View that reached emission.
+    for _, entry in ipairs(compilation.functions or {}) do mark(entry.instance.target) end
+    local function walk(list)
+        for _, stmt in ipairs(list) do
+            if stmt.kind == "Call" then mark(stmt.target)
+            elseif stmt.kind == "View" then mark(stmt.entry)
+            elseif stmt.kind == "If" then walk(stmt.yes) walk(stmt.no)
+            elseif stmt.kind == "Loop" then walk(stmt.body)
+            end
+        end
+    end
+    local index = 1
+    while index <= #queue do
+        local instance = queue[index]
+        index = index + 1
+        walk(instance.fn.body)
+    end
+    local result = {}
+    for _, instance in ipairs(order) do if live[instance] then result[#result + 1] = instance end end
+    return result
+end
+
 function M.close(compilation)
+    local order = liveInstances(compilation)
     local layouts = {
         compilation = compilation,
+        -- A private function is asked to inline unless the caller opted out; `signatureText` reads it.
+        privateInline = not (compilation.session.options and compilation.session.options.inline == false),
         -- Named cells are the identity of a recursive type definition; a reference to one resolves
         -- to the definition's layout, which must be named so its forward declaration is emitted.
         typeCells = (compilation.session and compilation.session.typeCells) or {},
@@ -209,10 +250,13 @@ function M.close(compilation)
 
     -- Public names: the first export of an instance uses the export name; extra aliases become
     -- forwarding wrappers emitted by the backend.
+    -- A `symbolPrefix` namespaces every exported symbol, so several artifacts can be loaded side by
+    -- side in one process (the JIT loader uses it); the default keeps the documented `wordlet_` names.
+    local prefix = (compilation.session.options and compilation.session.options.symbolPrefix) or ""
     local exported = {}
     for _, entry in ipairs(compilation.functions) do
         local instance = entry.instance
-        local name = M.functionName(entry.name)
+        local name = prefix .. M.functionName(entry.name)
         if exported[instance.target] then
             exported[instance.target].aliases[#exported[instance.target].aliases + 1] = name
         else
@@ -240,11 +284,12 @@ function M.close(compilation)
             results = resultLayout(fn.results), hidden = hidden or 0 }
     end
 
-    for _, instance in ipairs(compilation.session.order) do
+    for _, instance in ipairs(order) do
         local entry = exported[instance.target]
         local cName = entry and entry.name or instance.target
         signatures[instance.target] = signature(instance.fn, cName)
         signatures[instance.target].aliases = entry and entry.aliases or {}
+        signatures[instance.target].exported = entry ~= nil
     end
 
     -- Exported record types get a public alias so consumers never name a numbered struct.
@@ -257,7 +302,7 @@ function M.close(compilation)
         }
     end
     -- An adapter function's return type must be named before the adapter body is printed.
-    for _, instance in ipairs(compilation.session.order) do
+    for _, instance in ipairs(order) do
         local signature = signatures[instance.target]
         if signature and signature.results.kind == "scalar" and S.runtime(signature.results.type) then
             layouts:cType(signature.results.type)
@@ -265,7 +310,7 @@ function M.close(compilation)
     end
     -- Name every runtime type before emission, so aggregate declarations precede their uses.
     -- A parameter's type is named by `signature`, but a result type is not.
-    for _, instance in ipairs(compilation.session.order) do
+    for _, instance in ipairs(order) do
         local signature = signatures[instance.target]
         for _, param in ipairs(signature.params) do
             if S.runtime(param.type) then layouts:cType(param.type) end
@@ -285,7 +330,8 @@ function M.close(compilation)
         layouts.modules[module.storage] = entry
         layouts.moduleOrder[#layouts.moduleOrder + 1] = entry
     end
-    layouts.order = compilation.session.order
+    layouts.order = order
+    layouts.symbolPrefix = prefix
     return layouts
 end
 

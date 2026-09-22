@@ -131,6 +131,8 @@ end
 function M.artifact(layouts, compilation)
     local artifact = { layouts = layouts, compilation = compilation }
     function artifact:unit() return Lower.unit(self.layouts) end
+    -- The type declarations and exported prototypes, for `ffi.cdef` by the JIT loader.
+    function artifact:cdef(namespace) return Lower.cdef(self.layouts, namespace) end
     function artifact:source(headerName) return Lower.source(self.layouts, headerName) end
     function artifact:header(name) return Lower.header(self.layouts, name) end
     function artifact:exports()
@@ -237,6 +239,10 @@ local function describe(session, value, seen, depth)
 end
 
 M.describe = describe   -- exported so a test can inspect one value directly
+-- The language reference, generated from syntax.md by tools/embed.lua and shipped in the bundle.
+M.syntax = require("wordlet.docs.syntax")
+-- The LuaJIT FFI front end; it requires `ffi` only when something is actually loaded.
+M.jit = require("wordlet.jit")
 
 M.session = Eval.session
 M.diagnostic = D.format
