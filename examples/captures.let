@@ -1,0 +1,7 @@
+let apply(f: (U32): U32, x: U32) : U32 = f(x)
+let make_adder(n: U32) = |x: U32| -> n + x
+let run(n, x: U32) : U32 = do
+  let add = make_adder(n)
+  return apply(add, x)
+end
+return { functions = { make_adder, run } }

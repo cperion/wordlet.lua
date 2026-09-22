@@ -1,0 +1,8 @@
+let affine(a, b, x: U32) : U32 = a * x + b
+let transform = affine(4, 3)
+let divmod(a, b: U32) : (U32, U32) = do return a / b, a % b end
+let consume(a, b: U32) : U32 = do
+  let q, r = divmod(a, b)
+  return q * b + r
+end
+return { functions = { transform, divmod, consume } }

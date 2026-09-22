@@ -1,0 +1,58 @@
+# Wordlet source AST. Checkable with vendor/asdl.lua; see interfaces.md.
+# Spans are attached with ASDL attributes so every expression/statement is diagnosable.
+module Ast {
+  Span = (string file, number line, number start, number finish)
+  Name = (string text, Span span)
+
+  Program = (Decl* declarations, Export export)
+
+  Decl = WordDecl(WordDef def, Span span)
+       | ValueDecl(ValueDef def, Span span)
+       # `use util.helper`: the dotted name names a file next to this one, and the last segment
+       # names the namespace its exports are reached through.
+       | UseDecl(Name name, string path, Span span)
+
+  # let f(a, b: U32): (U32, U32) = body
+  WordDef = (Name name, Param* params, ResultSpec? result, Body body)
+  # let a: U32, b = expr
+  ValueDef = (Binder* binders, Expr* values)
+  Binder = (Name name, Expr? annotation, Span span)
+
+  Param = (Name name, Expr? annotation, Span span)
+  ResultSpec = Single(Expr type) | Many(Expr* types)
+  Body = Expression(Expr value) | Block(Stmt* statements)
+
+  Expr = U32Literal(number value)
+       | U64Literal(number high, number low)
+       | BoolLiteral(boolean value)
+       | UnitLiteral
+       | Reference(Name name)
+       | Apply(Expr callee, Expr* arguments)
+       | FieldSelect(Expr base, Name field)
+       | RecordSupply(Expr schema, FieldSupply* fields)
+       | ArrayExpr(Expr* items)
+       | IndexExpr(Expr base, Expr index)
+       | SchemaExpr(SchemaMember* members)
+       | Lambda(Param* params, Body body)
+       | SignatureExpr(Expr* inputs, ResultSpec results)
+       | UnaryExpr(string operator, Expr operand)
+       | BinaryExpr(string operator, Expr left, Expr right)
+       | Condition(Expr test, Expr yes, Expr no)
+       attributes (Span span)
+
+  FieldSupply = (Name name, Expr value, Span span)
+  SchemaMember = FieldMember(Name name, Expr type, Span span)
+               | MethodMember(WordDef def, Span span)
+
+  Stmt = WordStmt(WordDef def, Span span)
+       | ValueStmt(ValueDef def, Span span)
+       | StoreStmt(Expr target, string operator, Expr value, Span span)
+       | CallStmt(Expr call, Span span)
+       | IfStmt(Expr test, Stmt* yes, Stmt* no, Span span)
+       | ReturnStmt(Expr* values, Span span)
+
+  # Module export configuration; a separate grammar, not a runtime table.
+  Export = (ExportItem* types, ExportItem* functions, ResultEntry* results)
+  ExportItem = ExportName(Name name) | ExportAlias(Name name, Expr value)
+  ResultEntry = (Expr target, ResultSpec result)
+}

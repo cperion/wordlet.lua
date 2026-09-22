@@ -1,0 +1,51 @@
+-- An array is a fixed-length sequence of one element type. The length is part of the type, so a known
+-- index is checked while compiling and only a run-time index needs a guard. An array is a value: it
+-- copies when it crosses a pass, a return or a field store, while a local binding names one instance.
+--
+-- Expected: literal_sum() = 60     local_pick(2) = 9      store(1, 4) = 643
+--           grid(1, 0) = 3         via_parameter(5) = 11  aliased(3) = 99099
+
+let literal_sum(): U32 = do
+  let a = [10, 20, 30]
+  return a[0] + a[1] + a[2]
+end
+
+-- An annotation gives an empty literal its type, and a run-time index its bounds guard.
+let local_pick(i: U32): U32 = do
+  let b: Array(U32, 3) = [7, 8, 9]
+  return b[i]
+end
+
+-- Elements are assignable, including through the compound store forms.
+let store(i: U32, v: U32): U32 = do
+  let b = [1, 2, 3]
+  b[i] = v
+  b[0] += 5
+  return b[0] * 100 + b[1] * 10 + b[2]
+end
+
+-- An element may itself be an array.
+let grid(r: U32, c: U32): U32 = do
+  let g = [[1, 2], [3, 4]]
+  return g[r][c]
+end
+
+-- An array argument is a copy, so the callee cannot write back into the caller's array.
+let sum2(xs: Array(U32, 2)): U32 = xs[0] + xs[1]
+let via_parameter(x: U32): U32 = do
+  let b: Array(U32, 2) = [x, x + 1]
+  return sum2(b)
+end
+
+-- A local binding names the same instance, so a write through one name is visible through the other.
+let aliased(x: U32): U32 = do
+  let b = [x, x + 1]
+  let c = b
+  c[0] = 99
+  return b[0] * 1000 + c[0]
+end
+
+return {
+  types = {  },
+  functions = { literal_sum, local_pick, store, grid, via_parameter, aliased },
+}

@@ -1,0 +1,16 @@
+-- A module may use another with `use <dotted name>`, resolved as a file next to this one. What a
+-- module offers is exactly its export list, so only exported names are reachable, and the last
+-- segment of the dotted name is the namespace they are reached through.
+--
+-- Expected: twice(4) = 8   bumped(4) = 9   sum_point() = 3
+
+use modules_util
+
+let twice(n: U32): U32 = modules_util.helper(n)
+let bumped(n: U32): U32 = modules_util.secret(n)
+
+-- An imported type is a type like any other: it annotates a binding and supplies a record.
+let origin(): modules_util.Point = modules_util.Point { x = 1, y = 2 }
+let sum_point(): U32 = origin().x + origin().y
+
+return { types = {  }, functions = { twice, bumped, sum_point } }

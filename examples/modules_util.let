@@ -1,0 +1,11 @@
+-- A module that another one uses. Only what this file exports is reachable through the namespace,
+-- so `helper` is visible and `private_scale` is not.
+--
+-- Expected: helper(4) = 8   secret(4) = 9
+
+let Point = { x: U32, y: U32 }
+let private_scale(n: U32): U32 = n * 2
+let helper(n: U32): U32 = private_scale(n)
+let secret(n: U32): U32 = helper(n) + 1
+
+return { types = { Point }, functions = { helper, secret } }
