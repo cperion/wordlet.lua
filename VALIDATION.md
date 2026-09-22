@@ -3,7 +3,7 @@
 ## Checks that run now
 
 ```
-timeout --kill-after=2s 30s luajit tests/run.lua
+timeout --kill-after=2s 180s luajit tests/run.lua
 ```
 
 The runner verifies ASDL interning/type checks, non-interned occurrences, actual copied-method
@@ -15,11 +15,19 @@ exercise real require-mode embedding, optional CLI dispatch, private package.loa
 failed-load retry, cycles, unlisted dependencies, missing/syntactically invalid source and write errors.
 The runner cleans its temporary directory and reports failures with nonzero exit status.
 
-These are bootstrap tests, not Wordlet compiler tests. No parser/evaluator/C correctness claim follows
-from a passing bundle or ASDL constructor check. Tests need POSIX tools; they are not a sandbox for
-untrusted module source or manifest code.
+The same command then runs the compiler suites in order: `tests/schemas.lua` (AST/IR schemas),
+`tests/u64.lua` (the exact 64-bit kernel), `tests/parse.lua` (lexer/parser), `tests/eval.lua`
+(evaluator semantics) and `tests/c.lua` (interpreter/C differential, compiling and running the
+generated C11 under `-Wall -Wextra -Werror -O2`). A failure in any suite stops the run, so a passing
+bundle or ASDL constructor check alone is not a parser/evaluator/C correctness claim; the compiler
+suites are what make that claim. Tests need POSIX tools and a C11 compiler; they are not a sandbox
+for untrusted module source or manifest code.
 
-## Source fixtures (not executable yet)
+## Source examples (executable)
+
+Each bullet is the reference-interpreter oracle for that `examples/*.let` file. `tests/c.lua` and
+`tests/eval.lua` exercise the same shapes, and `luajit dist/wordlet.lua --check FILE.let` type-checks
+one directly.
 
 - examples/arithmetic.let: transform(4)=19; divmod(17,5)=(3,2); consume(17,5)=17. Unknown zero
   divisor aborts; statically evaluating a zero divisor rejects.
@@ -42,6 +50,10 @@ untrusted module source or manifest code.
   total(0)=6, total(4)=16, unwrap_or(0,9)=9, unwrap_or(4,9)=4. A known alternative resolves its
   match while compiling; a run-time alternative becomes a C tag test; a Unit alternative carries no
   payload and its handler takes no C argument.
+- examples/sha256.let: a real program. `abc()` equals the published SHA-256("abc") digest
+  `ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad`, and `digest_seed(x)` agrees
+  with the interpreter for a runtime `x`. `tests/sha256.lua` checks the interpreter, the generated C
+  and the published vector together.
 
 ## Implementation gates for the owned-syntax compiler
 

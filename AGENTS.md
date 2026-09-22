@@ -8,13 +8,19 @@ LICENSE and vendor/LICENSE, including in generated bundles.
 
 ## Status and tests
 
-The compiler pipeline is implemented for a subset of `syntax.md`: lexer, parser, evaluator, verifier
-and C11 backend for scalars, Bool, Unit, multiple results, calls, conditionals, static
-specialisation and recursion. Records, methods, lambdas, loops and field stores are parsed but not
-evaluated yet; they raise `todo` diagnostics rather than producing wrong code.
-Only the vendor libraries, U32 reference kernel, bundler, ASDL schemas and bootstrap tests are implemented.
-`wordletkit.lua` is NOT the compiler. The .let examples are acceptance fixtures, not currently runnable.
-Do not claim that toolkit/schema checks validate a parser, evaluator or C backend.
+The compiler is implemented and works end to end for the subset listed in README.md's status
+table: lexer, parser and AST (`ast.asdl`), semantic types and structured IR (`ir.asdl`), a
+static/normalization/residual evaluator, verification, and a C11 backend. Implemented and covered
+by tests: records, schemas, methods and field stores; the integer types (`U8`..`I64`); arrays;
+references and recursive types; sum types; closures, borrowed captures and tagged callables;
+imports; and self-tail calls. `F64` is specified in `syntax.md` §1 but not implemented, and has
+no float literal yet. Some shapes are deliberately rejected rather than miscompiled: nested
+borrowed closures, erasing a runtime-tagged callable into a signature, and the
+`ref-target`/`ref-escape` rules raise diagnostics.
+
+`wordletkit.lua` is NOT the compiler. The `.let` examples under `examples/` compile and run today;
+the expected values in VALIDATION.md are the reference-interpreter oracle. Do not claim that
+toolkit/schema checks validate a parser, evaluator or C backend.
 
 Run `timeout --kill-after=2s 180s luajit tests/run.lua` for everything (it bundles, generates C and
 runs the C under strict warnings). `tests/eval.lua` and `tests/c.lua` can also be run alone. Report actual results and

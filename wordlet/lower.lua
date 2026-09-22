@@ -22,9 +22,10 @@ local UNARY_OP = { Neg = "-", BitNot = "~" }
 
 local Emitter = {}
 Emitter.__index = Emitter
-local function newEmitter(layouts, signature)
+local function newEmitter(layouts, signature, usedStorages)
     return setmetatable({ layouts = layouts, lines = {}, indent = 1,
-        placeParams = (signature and signature.placeParams) or {} }, Emitter)
+        placeParams = (signature and signature.placeParams) or {},
+        usedStorages = usedStorages or {} }, Emitter)
 end
 function Emitter:line(text) self.lines[#self.lines + 1] = string.rep("    ", self.indent) .. text end
 function Emitter:raw(text) self.lines[#self.lines + 1] = text end
@@ -226,9 +227,17 @@ function Emitter:declare(ty, name, initial)
     if initial then
         self:line(cType .. " " .. name .. " = " .. initial .. ";")
     else
-        -- An aggregate without an initialiser still needs a valid C initialiser.
-        local zero = (S.isInteger(ty) and "0") or (ty == S.Bool and "false") or "{0}"
-        self:line(cType .. " " .. name .. " = " .. zero .. ";")
+        -- An aggregate without an initialiser still needs valid storage, because a branch that
+        -- assigns it is not guaranteed to run. A scalar takes a zero initialiser; an aggregate
+        -- is zeroed with an explicit memset rather than `= {0}`, which GCC's
+        -- -Wmaybe-uninitialized misreads when a union-bearing aggregate is later assigned from
+        -- a temporary.
+        if S.isInteger(ty) or ty == S.Bool then
+            self:line(cType .. " " .. name .. " = " .. (S.isInteger(ty) and "0" or "false") .. ";")
+        else
+            self:line(cType .. " " .. name .. ";")
+            self:line("memset(&" .. name .. ", 0, sizeof " .. name .. ");")
+        end
     end
 end
 
@@ -238,7 +247,12 @@ function Emitter:statements(list)
         if kind == "Let" then
             self:declare(stmt.type, self:value(stmt.value.id), self:expr(stmt.expr))
         elseif kind == "Var" then
-            self:declare(stmt.type, self:storage(stmt.storage.id), stmt.initial and self:expr(stmt.initial))
+            -- A loop-carried Var is declared before its Loop, but a specialization's base case may
+            -- never read or store it. An initializer is a pure Expr, so dropping an unreferenced
+            -- Var is safe and keeps the emitted C free of unused locals.
+            if self.usedStorages[stmt.storage.id] then
+                self:declare(stmt.type, self:storage(stmt.storage.id), stmt.initial and self:expr(stmt.initial))
+            end
         elseif kind == "Read" then
             self:declare(stmt.type, self:value(stmt.value.id), self:placeC(stmt.place))
         elseif kind == "Store" then
@@ -693,13 +707,75 @@ function M.prelude()
     }
 end
 
+-- The storage IDs a function actually references through a place. A loop-carried `Var` is declared
+-- before its `Loop`, but a specialization whose base case returns immediately may never read or
+-- store it; since an initializer is a pure `Expr`, such a `Var` is dead.
+local function usedStorages(fn)
+    local used = {}
+    local place, expr
+    local function arg(value)
+        if value.kind == "ValueArg" then expr(value.value)
+        elseif value.kind == "BorrowArg" then place(value.place) end
+    end
+    local function arguments(list)
+        for _, value in ipairs(list) do arg(value) end
+    end
+    local function statements(list)
+        for _, stmt in ipairs(list) do
+            local kind = stmt.kind
+            if kind == "Let" then expr(stmt.expr)
+            elseif kind == "Var" then expr(stmt.initial)
+            elseif kind == "Read" then place(stmt.place)
+            elseif kind == "Store" then place(stmt.place) expr(stmt.value)
+            elseif kind == "BundleDef" or kind == "View" then arguments(stmt.slots)
+            elseif kind == "Call" then arguments(stmt.arguments)
+            elseif kind == "Indirect" then expr(stmt.callable) arguments(stmt.arguments)
+            elseif kind == "If" then expr(stmt.test) statements(stmt.yes) statements(stmt.no)
+            elseif kind == "Loop" then statements(stmt.body)
+            elseif kind == "Trap" then expr(stmt.failure)
+            elseif kind == "ConstructVariant" then expr(stmt.payload)
+            elseif kind == "Return" then for _, value in ipairs(stmt.values) do expr(value) end
+            end
+        end
+    end
+    function place(value)
+        if not value then return end
+        if value.kind == "Local" then used[value.storage.id] = true
+        elseif value.kind == "Project" or value.kind == "Deref" then place(value.base)
+        elseif value.kind == "Index" then place(value.base) expr(value.index) end
+    end
+    function expr(value)
+        if not value then return end
+        local kind = value.kind
+        if kind == "Un" then expr(value.operand)
+        elseif kind == "Bin" then expr(value.left) expr(value.right)
+        elseif kind == "Get" then expr(value.aggregate)
+        elseif kind == "Make" then for _, field in ipairs(value.fields) do expr(field) end
+        elseif kind == "Owned" then expr(value.environment)
+        elseif kind == "Convert" then expr(value.operand)
+        elseif kind == "Addr" then place(value.place)
+        end
+    end
+    statements(fn.body)
+    return used
+end
+
 function M.bodies(layouts)
     local lines = {}
     for _, instance in ipairs(layouts.order) do
         local signature = layouts.signatures[instance.target]
-        local emitter = newEmitter(layouts, signature)
+        local emitter = newEmitter(layouts, signature, usedStorages(instance.fn))
         emitter:raw(M.signatureText(layouts, signature) .. " {")
         emitter:statements(instance.fn.body)
+        -- A residual base case keeps the full ABI, so a parameter it never reads still appears in
+        -- the signature. Mark such a parameter used for `-Wunused-parameter`.
+        local referenced = {}
+        for index = 2, #emitter.lines do
+            for name in emitter.lines[index]:gmatch("[%a_][%w_]*") do referenced[name] = true end
+        end
+        for _, param in ipairs(signature.params) do
+            if param.name and not referenced[param.name] then emitter:line("(void)" .. param.name .. ";") end
+        end
         emitter:raw("}")
         lines[#lines + 1] = table.concat(emitter.lines, "\n")
         for _, alias in ipairs(signature.aliases) do
@@ -713,7 +789,7 @@ function M.bodies(layouts)
     return lines
 end
 
-local INCLUDES = { "#include <stdint.h>", "#include <stdbool.h>", "#include <stdlib.h>" }
+local INCLUDES = { "#include <stdint.h>", "#include <stdbool.h>", "#include <stdlib.h>", "#include <string.h>" }
 
 -- A 64-bit value is a C integer of its own width, but the signed operations still go through helpers
 -- so that the cases C leaves undefined or implementation-defined - an overflowing signed operation,
@@ -776,7 +852,7 @@ function M.wideHelpers(layouts)
         end
     end
     if next(needed) == nil then return {} end
-    local lines = { "#include <string.h>" }
+    local lines = {}
     for _, name in ipairs(WIDE_ORDER) do
         if needed[name] then
             for _, line in ipairs(WIDE_HELPERS[name]) do lines[#lines + 1] = line end
@@ -790,7 +866,6 @@ end
 -- shift are written out so that the two cases C leaves undefined or implementation-defined - the most
 -- negative value divided by -1, and a shift of a negative value - behave as two's complement.
 local SIGNED_HELPERS = {
-    "#include <string.h>",
     "static int32_t wordlet_i32(uint32_t bits) { int32_t value; memcpy(&value, &bits, sizeof value); return value; }",
     "static uint32_t wordlet_u32(int32_t value) { uint32_t bits; memcpy(&bits, &value, sizeof bits); return bits; }",
     "static int32_t wordlet_div_i32(int32_t a, int32_t b) {",

@@ -497,6 +497,96 @@ return { types = {  }, functions = { first, sum, local_pick, store, grid_cell, t
         },
     },
     {
+        -- A call result that is an array or a record exists only as an SSA value until it is indexed
+        -- or written; the spill into storage must be seen by the store and by a later read.
+        name = "callresult",
+        source = [==[
+let make(x: U32): Array(U32, 3) = [x, x + 1, x + 2]
+let at_zero(x: U32): U32 = do let a = make(x) return a[0] end
+let set_one(x: U32): U32 = do
+  let a = make(x)
+  a[1] = 9
+  return a[0] + a[1] + a[2]
+end
+let R = { v: U32, w: U32 }
+let wrap(x: U32): R = R { v = x, w = x + 1 }
+let bump(x: U32): U32 = do
+  let r = wrap(x)
+  r.v = 9
+  return r.v + r.w
+end
+let pick(a: Array(U32, 3), i: U32): U32 = a[i]
+let via_param(x: U32): U32 = do
+  let a = make(x)
+  return pick(a, 2)
+end
+return { types = { R }, functions = { at_zero, set_one, bump, via_param } }
+]==],
+        entries = {
+            { entry = "at_zero", arity = 1, inputs = { { 0 }, { 5 }, { 4294967295 } } },
+            { entry = "set_one", arity = 1, inputs = { { 0 }, { 5 } } },
+            { entry = "bump", arity = 1, inputs = { { 0 }, { 5 } } },
+            { entry = "via_param", arity = 1, inputs = { { 0 }, { 5 } } },
+        },
+    },
+    {
+        -- A top-level initializer is compile-time execution over concrete values, so it can read module
+        -- storage; `wordlet_init` assigns each object its start value and a run-time read sees it.
+        name = "moduleinit",
+        source = [==[
+let shared = [10, 20, 30]
+let base = shared[2]
+let P = { x: U32, y: U32 }
+let point = P { x = 3, y = 4 }
+let field = point.x + point.y
+let pick(i: U32): U32 = shared[i]
+let total(x: U32): U32 = x + base + field
+let via_point(): U32 = point.x * point.y
+return { types = { P }, functions = { pick, total, via_point } }
+]==],
+        entries = {
+            { entry = "pick", arity = 1, inputs = { { 0 }, { 1 }, { 2 } } },
+            { entry = "total", arity = 1, inputs = { { 0 }, { 5 }, { 4294967295 } } },
+            { entry = "via_point", arity = 0, inputs = { {} } },
+        },
+    },
+    {
+        -- Initialization is eager and ordered, so a mutating initializer is supported: the
+        -- interpreter and the generated `wordlet_init` observe the same sequence of reads and writes.
+        name = "modulemut",
+        source = [==[
+let shared = [1, 2, 3]
+let bump(): U32 = do shared[0] = 9 return shared[0] end
+let base = shared[1]
+let changed = bump()
+let pick(i: U32): U32 = shared[i]
+let total(x: U32): U32 = x + base + changed
+return { functions = { pick, total } }
+]==],
+        entries = {
+            { entry = "pick", arity = 1, inputs = { { 0 }, { 1 }, { 2 } } },
+            { entry = "total", arity = 1, inputs = { { 0 }, { 5 } } },
+        },
+    },
+    {
+        -- A top-level result-list binding declares every binder; the generated C sees the same
+        -- starting values from `wordlet_init`, including through module storage.
+        name = "multibind",
+        source = [==[
+let divmod(a, b: U32): (U32, U32) = do return a / b, a % b end
+let q, r = divmod(17, 5)
+let P = { x: U32 }
+let p1, p2 = P { x = q }, P { x = r }
+let pick(i: U32): U32 = if i == 0 then q else r
+let combine(x: U32): U32 = x + q * 100 + r + p1.x * 10 + p2.x
+return { types = { P }, functions = { pick, combine } }
+]==],
+        entries = {
+            { entry = "pick", arity = 1, inputs = { { 0 }, { 1 } } },
+            { entry = "combine", arity = 1, inputs = { { 0 }, { 7 } } },
+        },
+    },
+    {
         -- Narrower integers: arithmetic wraps at the width the type names, widening is implicit, and
         -- a run-time narrowing conversion is checked, which is why each entry has its own inputs.
         name = "widths",
@@ -655,6 +745,8 @@ local function runCase(case)
 
     local main = { "#include <assert.h>", "#include <stdint.h>", "#include <stdbool.h>", "",
         unit, "", "int main(void) {" }
+    -- Module-level storage is assigned by an explicit host call, not implicitly.
+    if unit:find("void wordlet_init(void)", 1, true) then main[#main + 1] = "    wordlet_init();" end
     for _, line in ipairs(checksList) do main[#main + 1] = line end
     main[#main + 1] = "    return 0;"
     main[#main + 1] = "}"
@@ -968,9 +1060,16 @@ let bump_following(): U32 = n0.next {
 }
 return { types = { Counter, Node, Link }, functions = { read_shared, via, via_set, bump_shared, following, bump_following } }
 ]==]
-    local generated = wordlet.compile{ source = source, name = "refmod.let" }:unit()
+    local artifact = wordlet.compile{ source = source, name = "refmod.let" }
+    local generated = artifact:unit()
+    -- Module storages are numbered in first-demand order, so find `shared` by its source name.
+    local sharedPointer
+    for _, entry in ipairs(artifact.layouts.moduleOrder) do
+        if entry.source == "shared" then sharedPointer = "&" .. entry.name end
+    end
+    check(sharedPointer ~= nil, "the shared module storage was not emitted")
     local path = directory .. "/refmod.c"
-    write(path, generated .. [[
+    write(path, generated .. ([[
 
 #include <assert.h>
 int main(void) {
@@ -980,8 +1079,8 @@ int main(void) {
     /* the bump stores the incremented value and returns it plus its argument */
     assert(wordlet_read_5Fshared(UINT32_C(0)) == UINT32_C(6));
     /* a host may pass a pointer for a reference parameter */
-    assert(wordlet_via(&wordletmodule_1) == UINT32_C(6));
-    assert(wordlet_via_5Fset(&wordletmodule_1, UINT32_C(20)) == UINT32_C(20));
+    assert(wordlet_via(%s) == UINT32_C(6));
+    assert(wordlet_via_5Fset(%s, UINT32_C(20)) == UINT32_C(20));
     assert(wordlet_read_5Fshared(UINT32_C(0)) == UINT32_C(20));
     /* a point in a stored structure, reached by a reference and mutated through it */
     assert(wordlet_following() == UINT32_C(10));
@@ -989,7 +1088,7 @@ int main(void) {
     assert(wordlet_following() == UINT32_C(15));
     return 0;
 }
-]])
+]]):format(sharedPointer, sharedPointer))
     local exe = directory .. "/refmod"
     check(shell("timeout --kill-after=2s 30s " .. CC .. " -std=c11 -Wall -Wextra -Werror -O2 -o '"
         .. exe .. "' '" .. path .. "' 2> " .. directory .. "/refmoderr.txt") == 0,

@@ -1,13 +1,14 @@
-# Wordlet — standalone compiler project seed
+# Wordlet — standalone compiler
 
 This directory can be copied to an empty repository. No file above this directory is required.
 The implementation host is **LuaJIT 2.1**, not the speculative LuaJIT 3.0 syntax referenced in earlier
-language discussions. Wordlet source (`.let` files) is parsed by its own future frontend. The target
-backend is C11.
+language discussions. Wordlet source (`.let` files) is parsed by its own frontend under `wordlet/`.
+The target backend is C11.
 
 ## What exists
 
-The compiler is being built in vertical slices; `syntax.md` and `architecture.md` are the target, and
+The compiler was built in vertical slices; `syntax.md` and `architecture.md` are its contract, and
+this section states exactly how much of it runs today.
 this section states exactly how much of it runs today.
 
 | Area | Status |
@@ -86,7 +87,10 @@ emits a local adapter that binds its hidden inputs, and the field stores the res
 adapter lives in the assigning activation, the record holding it is non-retaining: it may be used,
 copied and called locally, but returning it or storing it in module state is rejected.
 
-`tests/eval.lua` (203 checks) and `tests/c.lua` (245 checks, 18 programs) cover this.
+`tests/eval.lua` (457 checks) and `tests/c.lua` (536 checks, 33 programs, compiling and running the
+generated C11 under strict warnings) cover this. `tests/sha256.lua` runs a real program,
+`examples/sha256.let`, against the published NIST vector and against the interpreter for runtime
+seeds.
 
 
 - [syntax.md](syntax.md): Wordlet source syntax and semantic decisions.
@@ -97,10 +101,11 @@ copied and called locally, but returning it or storing it in module state is rej
 - `tools/bundle.lua`: working manifest-driven single-file Lua bundler.
 - `wordletkit.lua`: a tooling API exporting ASDL, List and U32, NOT the Wordlet compiler.
 - `wordletkit/u32.lua`: checked exact concrete U32 operations; [U32.md](U32.md) explains host/C rules.
-- `examples/*.let`: source acceptance fixtures, not programs runnable by the bootstrap.
-- `tests/run.lua`: executable bootstrap and relocation checks.
+- `examples/*.let`: source acceptance fixtures; they type-check and run today, and VALIDATION.md lists
+  their expected values.
+- `tests/run.lua`: runs every suite — the bootstrap/relocation checks and the compiler tests.
 - [ASDL.md](ASDL.md): the actual vendored API, limitations and integration rules.
-- [VALIDATION.md](VALIDATION.md): tooling tests and future compiler acceptance obligations.
+- [VALIDATION.md](VALIDATION.md): executable checks and the remaining compiler obligations.
 - [THIRD_PARTY.md](THIRD_PARTY.md): verified Terra origins, local changes and MIT attribution.
 - [LICENSE](LICENSE) and [vendor/LICENSE](vendor/LICENSE): project and upstream MIT notices.
 - [AGENTS.md](AGENTS.md): local implementation and validation instructions for coding agents.
@@ -115,12 +120,14 @@ From this directory, using LuaJIT and POSIX utilities:
 ```sh
 luajit tests/run.lua
 luajit tools/bundle.lua
-luajit -e 'local k = dofile("dist/wordletkit.lua"); print(k.List{1,2,3})'
+luajit dist/wordlet.lua --check examples/arithmetic.let
+luajit dist/wordlet.lua -o /tmp/arithmetic.c examples/arithmetic.let
 ```
 
-The default bundle is `dist/wordletkit.lua`. It exports the bootstrap API. It does not compile Wordlet.
+The default bundle is `dist/wordlet.lua`: the compiler facade and its CLI. `wordletkit.lua` remains
+the bootstrap toolkit (ASDL, List and U32) and does not compile Wordlet.
 Running tests requires `cp`, `mkdir`, `rm`, and GNU-compatible `timeout`. `LUAJIT` may name the LuaJIT
-executable. Future C tests additionally need a C11 compiler, preferably selected through `CC`.
+executable. The C differential tests need a C11 compiler, selected through `CC` (default `cc`).
 The bootstrap has no LuaRocks, network, external Lua library or C compiler dependency. Its bit module
 is supplied by LuaJIT itself.
 
@@ -142,17 +149,17 @@ embeds them, so single-file distribution keeps the attribution.
 
 ```lua
 return {
-    entry = "wordletkit",              -- required module whose value the bundle returns
-    output = "dist/wordletkit.lua",    -- default output, relative to manifest
+    entry = "wordlet",                 -- required module whose value the bundle returns
+    output = "dist/wordlet.lua",       -- default output, relative to manifest
     licenses = {"LICENSE", "vendor/LICENSE"}, -- embedded as comments in the bundle
     modules = {
-        wordletkit = "wordletkit.lua", -- every bundled module is explicitly listed
-        ["wordletkit.u32"] = "wordletkit/u32.lua",
+        wordlet = "wordlet/init.lua",  -- every bundled module is explicitly listed
+        -- ... the rest of wordlet/* and wordletkit/*, in sorted name order
         ["vendor.asdl"] = "vendor/asdl.lua",
         ["vendor.terralist"] = "vendor/terralist.lua",
     },
     external = {"bit"},                -- built into LuaJIT; used by wordletkit.u32
-    -- cli = "wordlet.cli",            -- OPTIONAL; add only once that module exists
+    cli = "wordlet.cli",               -- OPTIONAL; invoked when run as a script
 }
 ```
 
@@ -184,9 +191,9 @@ it only when executed as the script; require/loadfile usage otherwise returns th
 exercise this using fixtures, not a fictitious compiler. Normal executable dispatch expects the usual
 LuaJIT `arg[0]` and chunk filename agreement; custom launchers can call the CLI module explicitly.
 
-When the real compiler exists, change the release manifest's entry to its `wordlet` facade module,
-list its modules, add `cli = "wordlet.cli"`, and choose `dist/wordlet.lua`. Do not ship empty compiler
-modules simply to make that manifest appear ready.
+The release manifest now does exactly that: entry `wordlet`, `cli = "wordlet.cli"`, output
+`dist/wordlet.lua`, and every compiler module listed explicitly. Do not add empty compiler modules
+to a bundle so that a manifest appears ready.
 
 ## Document authority
 

@@ -20,6 +20,7 @@ dofile(here .. "u64.lua")
 dofile(here .. "parse.lua")
 dofile(here .. "eval.lua")
 dofile(here .. "c.lua")
+dofile(here .. "sha256.lua")
 local L, c = kit.List, kit.ASDL.NewContext()
 c:Define([[
 module T { Value = U32 | Bool

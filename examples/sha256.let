@@ -1,0 +1,100 @@
+-- SHA-256, single-block, integer-only, allocation-free.
+--
+-- This is a real program, not a fixture: it has an external ground truth. For the one-block message
+-- "abc" the digest is the standard NIST vector
+--
+--   ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad
+--
+-- so a correct result exercises the compiler's U32 wrap, bitwise operators and shift semantics rather
+-- than the interpreter alone. `digest_seed` takes a runtime word, so its rounds are emitted as C;
+-- `abc` is fully known and may be folded statically.
+--
+-- Nothing here allocates: the message schedule is built by returning an updated array value, because a
+-- reference to a fresh local would escape this activation (`ref-escape`).
+
+-- The 64 round constants and the eight initial state words.
+let K: Array(U32, 64) = [
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]
+
+let H: Array(U32, 8) = [
+  0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+]
+
+let State = { a: U32, b: U32, c: U32, d: U32, e: U32, f: U32, g: U32, h: U32 }
+
+let rotr(x, n: U32): U32 = (x >> n) | (x << (32 - n))
+let ch(x, y, z: U32): U32 = (x & y) ~ ((~x) & z)
+let maj(x, y, z: U32): U32 = (x & y) ~ (x & z) ~ (y & z)
+let big_sigma0(x: U32): U32 = rotr(x, 2) ~ rotr(x, 13) ~ rotr(x, 22)
+let big_sigma1(x: U32): U32 = rotr(x, 6) ~ rotr(x, 11) ~ rotr(x, 25)
+let small_sigma0(x: U32): U32 = rotr(x, 7) ~ rotr(x, 18) ~ (x >> 3)
+let small_sigma1(x: U32): U32 = rotr(x, 17) ~ rotr(x, 19) ~ (x >> 10)
+
+-- Words 16..63 of the schedule. A parameter array is the callee's copy, so writing an element does
+-- not touch the caller, and the updated value is returned to the next round.
+let expand(w: Array(U32, 64), t: U32): Array(U32, 64) = do
+  if t == 64 then return w end
+  w[t] = small_sigma1(w[t - 2]) + w[t - 7] + small_sigma0(w[t - 15]) + w[t - 16]
+  return expand(w, t + 1)
+end
+
+-- The 64 compression rounds. Tail position, so this is a back edge, not C stack growth.
+let rounds(s: State, t: U32, k: Array(U32, 64), w: Array(U32, 64)): State = do
+  if t == 64 then return s end
+  let t1 = s.h + big_sigma1(s.e) + ch(s.e, s.f, s.g) + k[t] + w[t]
+  let t2 = big_sigma0(s.a) + maj(s.a, s.b, s.c)
+  return rounds(
+    State {
+      a = t1 + t2, b = s.a, c = s.b, d = s.c,
+      e = s.d + t1, f = s.e, g = s.f, h = s.g,
+    },
+    t + 1, k, w)
+end
+
+-- A module-level array is module storage, which cannot be indexed directly; the `let k = K` snapshot
+-- is the supported route to a runtime element.
+let compress(block: Array(U32, 16)): State = do
+  let k = K
+  let h = H
+  let w: Array(U32, 64) = [
+    block[0], block[1], block[2], block[3], block[4], block[5], block[6], block[7],
+    block[8], block[9], block[10], block[11], block[12], block[13], block[14], block[15],
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  ]
+  let sched = expand(w, 16)
+  let out = rounds(
+    State { a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], h = h[7] },
+    0, k, sched)
+  return State {
+    a = out.a + h[0], b = out.b + h[1], c = out.c + h[2], d = out.d + h[3],
+    e = out.e + h[4], f = out.f + h[5], g = out.g + h[6], h = out.h + h[7],
+  }
+end
+
+-- The single padded block for "abc": 0x61626380, zeros, then the 24-bit length in the last word.
+let abc(): State = compress([
+  0x61626380, 0x00000000, 0x00000000, 0x00000000,
+  0x00000000, 0x00000000, 0x00000000, 0x00000000,
+  0x00000000, 0x00000000, 0x00000000, 0x00000000,
+  0x00000000, 0x00000000, 0x00000000, 0x00000018,
+])
+
+-- A block whose first word is a runtime input, so the rounds reach the C backend.
+let digest_seed(x: U32): State = compress([
+  x,          0x00000000, 0x00000000, 0x00000000,
+  0x00000000, 0x00000000, 0x00000000, 0x00000000,
+  0x00000000, 0x00000000, 0x00000000, 0x00000000,
+  0x00000000, 0x00000000, 0x00000000, 0x00000010,
+])
+
+return { types = { State }, functions = { abc, digest_seed, compress } }

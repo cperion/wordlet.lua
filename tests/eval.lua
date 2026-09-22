@@ -479,16 +479,46 @@ rejects("duplicate", "let P = { x: U32 }\nlet f(a: U32) : U32 = do"
 local moduleBinding = wordlet.compile{ source = "let P = { x: U32 }\nlet m = P { x = 1 }\n"
     .. "let f(a: U32): U32 = do m.x += a return m.x end\nreturn { functions = { f } }" }
 check(moduleBinding:unit():find("wordletmodule_1", 1, true) ~= nil, "a module binding gets its own storage")
--- Module storage is runtime state: mutating it while compiling would drop the store from the
--- generated code, so reaching it in normalize code rejects. The C tests cover the runtime path.
-do
-    local ok, err = pcall(function()
-        return interpret("f", { 4 }, "let P = { x: U32 }\nlet m = P { x = 1 }\n"
-            .. "let f(a: U32): U32 = do m.x += a return m.x end\nreturn { functions = { f } }")
-    end)
-    check(not ok and D.is(err) and err.code == "runtime-in-normalization",
-        "a module field store is rejected while compiling and only runs at run time")
-end
+-- Module storage is runtime state. Compile-time normalization must not write it, because the store
+-- would drop out of the generated code; the reference interpreter executes the program and does
+-- write it. The C tests cover the generated runtime path.
+local moduleStore = "let P = { x: U32 }\nlet m = P { x = 1 }\n"
+    .. "let f(a: U32): U32 = do m.x += a return m.x end\nreturn { functions = { f } }"
+check(interpret("f", { 4 }, moduleStore)[1] == 5, "the interpreter runs a module field store")
+-- A module array is storage too: an element store persists, and a direct or run-time index reads it.
+local moduleArray = "let scratch: Array(U32, 3) = [0, 0, 0]\n"
+    .. "let put(i, v: U32): U32 = do scratch[i] = v return scratch[0] + scratch[1] + scratch[2] end\n"
+    .. "let get(i: U32): U32 = scratch[i]\nreturn { functions = { put, get } }"
+check(interpret("put", { 1, 9 }, moduleArray)[1] == 9, "a module array element store persists")
+check(interpret("get", { 2 }, moduleArray)[1] == 0, "a run-time index reads a module array element")
+check(interpret("f", {}, "let K = [10, 20, 30]\nlet f(): U32 = K[2]\nreturn { functions = { f } }")[1] == 30,
+    "a constant index reads a module array element")
+-- A top-level initializer is compile-time execution over concrete values, so it reads module storage.
+check(interpret("f", {}, "let shared = [10, 20, 30]\nlet b = shared[2]\n"
+    .. "let f(): U32 = b\nreturn { functions = { f } }")[1] == 30,
+    "a top-level initializer reads a module array")
+check(interpret("f", {}, "let P = { x: U32 }\nlet base = P { x = 3 }\nlet s = base.x + 1\n"
+    .. "let f(): U32 = s\nreturn { types = { P }, functions = { f } }")[1] == 4,
+    "a top-level initializer reads a module record field")
+-- Initialization runs once, eagerly, in declaration order, so a mutating initializer is supported and
+-- the interpreter observes the same state the generated `wordlet_init` bakes.
+local mutating = "let shared = [1, 2, 3]\n"
+    .. "let bump(): U32 = do shared[0] = 9 return shared[0] end\n"
+    .. "let b = bump()\nlet f(): U32 = b\n"
+    .. "let g(): U32 = shared[0] + b\nreturn { functions = { f, g } }"
+check(interpret("f", {}, mutating)[1] == 9, "a mutating top-level initializer runs once")
+check(interpret("g", {}, mutating)[1] == 18, "top-level initialization follows declaration order")
+check(compile(mutating) ~= nil, "a mutating top-level initializer compiles")
+-- A top-level result-list binding declares every binder and distributes the result vector, exactly
+-- as a local binding does.
+local multi = "let a, b = 1, 2\nlet f(): U32 = a * 10 + b\nreturn { functions = { f } }"
+check(interpret("f", {}, multi)[1] == 12, "a top-level result-list binding binds every name")
+check(interpret("g", {}, "let divmod(a, b: U32): (U32, U32) = do return a / b, a % b end\n"
+    .. "let q, r = divmod(17, 5)\nlet g(): U32 = q * 100 + r\nreturn { functions = { g } }")[1] == 302,
+    "a top-level result-list binding distributes a call's results")
+check(interpret("f", {}, "let a, b: U32 = 1, 2\nlet f(): U32 = a + b\n"
+    .. "return { functions = { f } }")[1] == 3, "each top-level binder carries its own annotation")
+rejects("duplicate", "let a, a = 1, 2\nlet f(): U32 = a\nreturn { functions = { f } }")
 
 
 -- Sum types (variants) --------------------------------------------------------------------------

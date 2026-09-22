@@ -1,0 +1,5 @@
+# Generated single-file bundles. Rebuild with `luajit tools/bundle.lua`.
+dist/
+
+# Local agent tooling state.
+.pi/

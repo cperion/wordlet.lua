@@ -156,13 +156,20 @@ function Eval:load(program)
             -- The loader resolves every import before this runs and declares the namespace itself.
             goto continue
         else
-            local binder = decl.def.binders[1]
-            local slot = declare(top, binder.name.text,
-                { kind = "value", name = binder.name.text, decl = decl, scope = top }, decl.span)
-            -- A file-scope binding outlives every activation, which is what makes it a legal
-            -- reference target in both modes: residual code promotes it to named module storage and
-            -- the interpreter already holds its record.
-            slot.atTop = true
+            -- Every binder of a top-level `let` gets a slot, and the slots of one definition share its
+            -- evaluation so a result vector is distributed exactly as a local binding's is.
+            local slots = {}
+            for index, binder in ipairs(decl.def.binders) do
+                local slot = declare(top, binder.name.text,
+                    { kind = "value", name = binder.name.text, decl = decl, scope = top, binderIndex = index },
+                    binder.span)
+                -- A file-scope binding outlives every activation, which is what makes it a legal
+                -- reference target in both modes: residual code promotes it to named module storage and
+                -- the interpreter already holds its record.
+                slot.atTop = true
+                slots[index] = slot
+            end
+            for _, slot in ipairs(slots) do slot.binders = slots end
         end
         ::continue::
     end
@@ -226,6 +233,8 @@ end
 function Eval:compile(program, loadedTop)
     local top = loadedTop or self:load(program)
     self.top = top
+    -- Initialization is explicit and ordered, not an accident of which binding residual code reads first.
+    self:initializeModule(program, top)
     local exports = { functions = {}, types = {} }
     local resolve = function(item) return self:resolveExportItem(item, top) end
 
@@ -385,23 +394,52 @@ end
 
 function Eval:demand(slot, span)
     if slot.kind ~= "value" or slot.value ~= nil then return slot end
+    local siblings = slot.binders or { slot }
     if slot.demanding then D.reject("initializer-cycle", "Eager value cycle through " .. slot.name, span) end
-    slot.demanding = true
-    -- A binding that its own type computation demands reserves a cell, so the definition can refer
-    -- to itself through an indirection instead of forcing its layout.
-    if slot.cell == nil then
-        self.nextTypeCell = self.nextTypeCell + 1
-        slot.cell = slot.name .. "#" .. tostring(self.nextTypeCell)
+    for _, sibling in ipairs(siblings) do
+        sibling.demanding = true
+        -- A binding that its own type computation demands reserves a cell, so the definition can refer
+        -- to itself through an indirection instead of forcing its layout.
+        if sibling.cell == nil then
+            self.nextTypeCell = self.nextTypeCell + 1
+            sibling.cell = sibling.name .. "#" .. tostring(self.nextTypeCell)
+        end
+        sibling.open = true
     end
-    slot.open = true
     local ctx = self:context("normalize", slot.scope, slot.decl.span)
+    -- A top-level initializer is compile-time execution over concrete values, so module storage is
+    -- readable and writable here even though residual specialization must not touch it. Nested
+    -- demands keep the flag set and the outermost demand restores it.
+    local savedDemand = self.moduleDemand
+    self.moduleDemand = true
     local ok, result = pcall(self.evalValueDef, self, ctx, slot.decl.def)
-    slot.demanding = nil
-    slot.open = false
+    self.moduleDemand = savedDemand
+    for _, sibling in ipairs(siblings) do
+        sibling.demanding = nil
+        sibling.open = false
+    end
     if not ok then error(result, 0) end
-    slot.value = result
-    self:sealCell(slot, span)
+    -- Several binders produce a result vector; distribute it as a local result-list binding does,
+    -- filling a missing value with Unit.
+    local values = self:expand(result)
+    for index, sibling in ipairs(siblings) do
+        sibling.value = values[index] or V.unit()
+    end
+    for _, sibling in ipairs(siblings) do self:sealCell(sibling, span) end
     return slot
+end
+
+-- Top-level initialization runs once, eagerly, in declaration order. The reference interpreter and
+-- the compiler both call this, so they observe the same sequence of reads and mutations, and a
+-- mutating initializer cannot depend on which binding happened to be referenced first.
+function Eval:initializeModule(program, top)
+    for _, decl in ipairs(program.declarations) do
+        if decl.kind == "ValueDecl" then
+            local binder = decl.def.binders[1]
+            local slot = binder and lookup(top, binder.name.text)
+            if slot and slot.atTop then self:demand(slot, decl.span) end
+        end
+    end
 end
 
 -- Seals a reserved cell with the type the binding computed. A cell that nothing referred to needs no
@@ -893,6 +931,18 @@ function Eval:arrayPlace(ctx, value, span)
     return value.place
 end
 
+-- The place a record value's fields live at. A record that only exists as an SSA value is spilled
+-- into storage once, which is what lets a call result be written through its fields.
+function Eval:recordPlace(ctx, value, span)
+    if value.place then return value.place end
+    if ctx.mode ~= "residual" then
+        D.reject("runtime-in-normalization", "A runtime record needs runtime code", span)
+    end
+    local storage = ctx.builder:var(ctx.body, value.ty, self:expression(ctx, value, value.ty))
+    value.place = Ir.Local(storage)
+    return value.place
+end
+
 -- An array expression. A value backed by storage is read whole, which is a struct copy in C; a
 -- compile-time array is built from its elements.
 function Eval:arrayExpr(ctx, value)
@@ -956,7 +1006,11 @@ function Eval:placeOf(ctx, expr, span)
         local target = self:resolveType(S.environmentOf(container.ty))
         local ty = S.field(target, name)
         if not ty then D.reject("unknown-member", "Record has no field " .. name, expr.field.span) end
-        local place = container.place and Ir.Project(container.place, Ir.Field(name)) or nil
+        local base = container.place
+        if not base and ctx.mode == "residual" and container.value then
+            base = self:recordPlace(ctx, container.value, expr.span)
+        end
+        local place = base and Ir.Project(base, Ir.Field(name)) or nil
         local held = container.concrete
         if type(held) == "table" and held.tag == "record" and held.fields then
             return { concrete = "field", record = held, name = name, ty = ty,
@@ -986,8 +1040,12 @@ function Eval:placeOf(ctx, expr, span)
             end
             -- A place needs a builder, so only residual code builds one; normalize code either uses
             -- the value it names or reports that this storage is runtime-only.
-            local place = (container.place and ctx.mode == "residual")
-                and Ir.Index(container.place, ctx.builder:u32(index.n), element) or nil
+            local base = container.place
+            if not base and ctx.mode == "residual" and container.value then
+                base = self:arrayPlace(ctx, container.value, expr.span)
+            end
+            local place = (base and ctx.mode == "residual")
+                and Ir.Index(base, ctx.builder:u32(index.n), element) or nil
             local held = container.concrete
             if type(held) == "table" and held.tag == "array" and held.items then
                 return { concrete = "index", array = held, index = index.n, ty = element,
@@ -1072,10 +1130,12 @@ end
 -- `a[i]`: an element read, through the place it names.
 function Eval:evalIndex(ctx, expr)
     local reached = self:placeOf(ctx, expr, expr.span)
-    -- Residual code reads the storage it names; normalize code reads the value directly, but only
-    -- for storage this activation or an enclosing one owns. Module storage is runtime state, so
-    -- reading it while compiling would bake in a snapshot.
-    if ctx.mode ~= "residual" and self:placeOrigin(ctx, expr) ~= "module" then
+    -- Residual code reads the storage it names; normalize code reads the value directly. Residual
+    -- specialization must not bake a snapshot of module storage, but the reference interpreter
+    -- (`session.run`) and a top-level initializer demand (`session.moduleDemand`) both execute over
+    -- concrete state, so they read it directly.
+    if ctx.mode ~= "residual" and (ctx.session.run or ctx.session.moduleDemand
+        or self:placeOrigin(ctx, expr) ~= "module") then
         if reached.concrete == "index" then return reached.array.items[reached.index + 1] end
         if reached.concrete == "field" then return reached.record.fields[reached.name] or V.unit() end
     end
@@ -2024,6 +2084,13 @@ function Eval:evalFieldSelect(ctx, expr)
         if ctx.mode ~= "residual" then
             D.reject("runtime-in-normalization", "Cannot read a runtime record field here", expr.span)
         end
+        -- A record value spilled into storage for a store must read through that storage, so a store
+        -- and a later read observe the same instance instead of the pre-spill value.
+        if base.place then
+            local place = Ir.Project(base.place, Ir.Field(name))
+            local read = ctx.builder:read(ctx.body, ty, place)
+            return V.ir(ctx.builder:ref(read, ty), ty, nil, place)
+        end
         return V.ir(ctx.builder:get(base.expr, name, ty), ty)
     end
     D.reject("member-required", "Cannot select from " .. S.encode(base.ty or S.Unit), expr.span)
@@ -2110,11 +2177,21 @@ function Eval:storeTarget(ctx, target)
         end
     end
     local reached = self:placeOf(ctx, target, target.span)
-    -- A store in residual code goes to storage; normalize code writes the value it names, so a later
-    -- read in this mode observes it. Module storage is runtime state and only residual code writes
-    -- it, because a store performed while compiling would not appear in the generated code.
+    -- A store in residual code goes to storage. Normalize code writes the concrete value it names so
+    -- a later read observes it: a local or enclosing aggregate, or module storage under the reference
+    -- interpreter (`session.run`), which executes the program rather than specialising it. Module
+    -- storage is runtime state, so compile-time initialization and residual specialization never
+    -- write it; a mutating top-level initializer rejects instead of baking a moved start value.
     local origin = ctx.mode ~= "residual" and self:placeOrigin(ctx, target) or nil
-    if ctx.mode ~= "residual" and origin ~= "module" then
+    -- Module storage is runtime state: residual specialization never writes it, because such a store
+    -- would not appear in the generated code. Initialization (`session.moduleDemand`) and the reference
+    -- interpreter (`session.run`) execute over concrete state and do write it.
+    if ctx.mode ~= "residual" and origin == "module"
+        and not (ctx.session.run or ctx.session.moduleDemand) then
+        D.reject("runtime-in-normalization",
+            "Module storage is runtime state, so only module initialization may write it", target.span)
+    end
+    if ctx.mode ~= "residual" then
         if reached.concrete == "field" then
             return { kind = "concrete-field", name = reached.name, record = reached.record,
                 ty = reached.ty }, nil

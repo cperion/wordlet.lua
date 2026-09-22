@@ -95,8 +95,9 @@ let identity(T: Type, x: T) = x
 T must be known before checking x's requirement. This is ordinary type demand, not an implicit type
 parameter or a new `static` keyword.
 
-Top-level binding names are mutually visible; their initializers are demanded lazily and evaluated
-once. A cycle demanding a value before its initializer completes rejects. Creating a word does not
+Top-level binding names are mutually visible; their initializers are evaluated once, eagerly, during
+module initialization in declaration order. A forward reference demands a later initializer early,
+and a cycle demanding a value before its initializer completes rejects. Creating a word does not
 execute its body, so mutually recursive word definitions need no forward declaration.
 
 Local bindings are visible after their initializer, not throughout the block. A local named word
@@ -705,12 +706,16 @@ specialization and compiler-derived refinements. Explicitly partial-specialized 
 contracts; implementation must check all applicable contracts and reject contradictions, never silently
 override an annotation. No static-result assertion syntax is introduced by this table.
 
-Module initialization is compile-time interpreter execution. It may build concrete temporary records
-and use them during initialization; it does not declare runtime globals or emit a hidden C initializer.
+Module initialization is compile-time interpreter execution over concrete values, so an initializer
+may read module storage and build temporary records. A module-level mutable instance that runtime
+code refers to also gets named file-scope storage, and the artifact emits an exported
+`void wordlet_init(void)` that assigns each such object its start value; the host calls it explicitly.
+An initializer may also write module storage, so a mutable instance's start value can depend on the
+initialization that preceded it.
 Returned exported code cannot retain a mutable module instance without a specified runtime storage
 interface. Immutable scalar snapshots and static definitions are valid captured metadata. Top-level
-initializers are demanded in declaration order after names are registered; dependency demands may
-force a later initializer first. Each initializer executes once, and dependency cycles reject.
+initializers are evaluated once, eagerly, in declaration order; a forward reference demands a later
+initializer early. Dependency cycles reject.
 
 A module may use another with `use <dotted name>` at the top of the file. The name is a path next to
 the importing file with dots as separators and `.let` implied, so `use util.helper` reads

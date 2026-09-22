@@ -114,8 +114,8 @@ Capture classification is a language rule, not an optimization:
 
 ```lua
 EvalContext = {
-  purpose   = "run" | "normalize" | "residual",  -- Run/Normalize/Residualize
-  instance  = InstanceRef?,                      -- nil under Run/Normalize
+  mode      = "normalize" | "residual",          -- Normalize/Residualize
+  instance  = InstanceRef?,                      -- nil while normalizing
   fn        = Ir.Fn?,                            -- the Fn under construction (residual only)
   body      = Stmt[]?,                           -- statement list under construction, innermost last
   exprs     = { [ExprKey] = Ir.Expr }?,          -- per-function E memo (interning)
@@ -129,10 +129,19 @@ EvalContext = {
 
 Key points:
 
-- **Normalization has no builder.** `purpose = "normalize"` runs the same expression walker but
+- **Normalization has no builder.** `mode = "normalize"` runs the same expression walker but
   `ctx.fn`, `ctx.body` and `ctx.next` are nil. A static attempt therefore cannot leave partial IR
-  behind: it either yields a `Value` or raises the private `NeedsRuntime` signal *before* performing
-  the operation. That closes the "abandoned static attempt" hole in `architecture.md` §5.2.
+  behind: an operation that needs runtime storage raises `runtime-in-normalization` rather than
+  emitting half a statement. Compile-time normalization never reads or writes module storage, so it
+  cannot bake a snapshot or drop a store.
+- **The reference interpreter runs the program.** `session.run` marks a session whose purpose is to
+  execute rather than to specialise. Under it, normalize code reads and writes module storage through
+  the concrete value it names, so a module array element or record field behaves exactly as the
+  generated C does.
+- **Initialization is eager and ordered.** `initializeModule` demands every top-level value binding
+  once, in declaration order; a forward reference pulls a later initializer early. `demand` sets
+  `session.moduleDemand` while it runs, so an initializer may read and write module storage — it is
+  compile-time execution over concrete values. Residual specialization still rejects touching it.
 - `exprs` implements per-function E interning, as required by `architecture.md` §7. ASDL does not
   intern `Ir.Expr` because `Value` IDs are function-local.
 - Each nested `Lambda`/`MethodMember` body creates a fresh `Ir.Fn` with its own `next`, `body` and

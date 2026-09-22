@@ -95,6 +95,8 @@ local function loadModule(engine, path, stack, cache)
     for _, item in ipairs(imports) do
         engine:declareNamespace(top, item.decl.name.text, item.module.namespace, item.decl.span)
     end
+    -- A module's initializers run once its imports' namespaces are visible, in declaration order.
+    engine:initializeModule(program, top)
     local members = {}
     for _, item in ipairs(program.export.functions) do
         members[item.name.text] = engine:resolveExportItem(item, top)
@@ -145,7 +147,11 @@ function M.interpret(options)
     local options = options or {}
     local program = Parse.source(options.source, options.name or "<source>")
     local session = Eval.session(options)
+    -- The reference interpreter executes the program, so unlike compile-time normalization it may
+    -- read and write module storage through the concrete value it names.
+    session.run = true
     session:load(program)
+    session:initializeModule(program, session.top)
     if type(options.entry) ~= "string" then D.reject("interpret-input", "interpret needs an `entry` name") end
     local word = session:exportedValue(program, options.entry, session.top)
     if V.tag(word) ~= "word" then
