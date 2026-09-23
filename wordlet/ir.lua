@@ -260,6 +260,14 @@ function Builder:emit(list, stmt)
     list[#list + 1] = stmt
     return stmt
 end
+-- A trap whose condition an identical adjacent trap already checked is redundant. The condition is
+-- a pure expression over immutable SSA values, so the two checks agree; `/` and `%` by one run-time
+-- divisor are the common case.
+function Builder:trap(list, failure, tag)
+    local last = list[#list]
+    if last and last.kind == "Trap" and last.failure == failure then return last end
+    return self:emit(list, Ir.Trap(failure, tag))
+end
 function Builder:let(list, ty, expr)
     local value = self:valueId()
     self:emit(list, Ir.Let(value, ty, expr))

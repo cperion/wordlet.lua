@@ -648,6 +648,9 @@ end
 
 -- A record value or object becomes an immutable Make of its fields.
 function Eval:recordExpr(ctx, value)
+    -- A record that has not demanded a place is already its construction expression, so crossing a
+    -- boundary copies that immutable Make instead of reading each field back and rebuilding it.
+    if value.expr then return value.expr end
     local ty = value.ty
     local fields = {}
     for index, field in ipairs(ty.fields) do
@@ -671,6 +674,9 @@ end
 function Eval:fieldExpr(ctx, value, name)
     if V.tag(value) == "record" then return self:expression(ctx, value.fields[name]) end
     local ty = S.field(value.ty, name)
+    -- A field of an unmaterialised record is a pure projection of its construction expression; once a
+    -- demand clears that expression, and for a spilled SSA value, storage is read instead.
+    if value.expr then return V.ir(ctx.builder:get(value.expr, name, ty), ty) end
     local place = Ir.Project(value.place, Ir.Field(name))
     local read = ctx.builder:read(ctx.body, ty, place)
     return ctx.builder:ref(read, ty)
@@ -751,6 +757,22 @@ end
 
 -- The opaque case: test the tag for each alternative, projecting the payload inside its own arm,
 -- and join the results through one slot. The last alternative needs no test.
+-- Whether two values are the same fully-known scalar. Only scalars have a comparison here; an
+-- aggregate's knownness is structural and would not make its components interchangeable.
+function Eval:sameKnownScalar(a, b)
+    if not (V.isKnown(a) and V.isKnown(b)) or a.ty ~= b.ty then return false end
+    local tag = a.tag
+    if tag == "int" then
+        if a.high ~= nil or b.high ~= nil then return a.high == b.high and a.low == b.low end
+        return a.n == b.n
+    end
+    if tag == "bool" then return a.b == b.b end
+    if tag == "float" then return a.n == b.n end
+    if tag == "unit" then return true end
+    if tag == "string" then return a.bytes == b.bytes end
+    return false
+end
+
 function Eval:matchResidual(ctx, base, handlers, span)
     local builder = ctx.builder
     local variant = sumValueId(base)
@@ -1153,9 +1175,9 @@ function Eval:evalArray(ctx, expr, expected)
         exprs[index] = self:expression(ctx, item, ty.element)
         if self:isBorrowed(item) then borrowed = true end
     end
-    local storage = ctx.builder:var(ctx.body, ty, ctx.builder:make(ty, exprs))
-    -- A residual array's storage is authoritative, so no stale element values are kept with it.
-    return V.array(ty, nil, Ir.Local(storage), borrowed)
+    -- The Make is the value until an element is addressed (an index or a view). `body` is where that
+    -- spill goes, so a demand from inside an arm still reaches storage from the outer scope.
+    return V.array(ty, nil, nil, borrowed, ctx.builder:make(ty, exprs), ctx.body)
 end
 
 -- The place an array value's elements live at. A value that only exists as an SSA value is spilled
@@ -1236,30 +1258,57 @@ function Eval:sliceElement(value, index)
 end
 
 function Eval:arrayPlace(ctx, value, span)
-    if value.place then return value.place end
+    if value.place then
+        -- A demand for a place invalidates the construction expression; storage is authoritative.
+        value.expr = nil
+        return value.place
+    end
     if ctx.mode ~= "residual" then
         D.reject("runtime-in-normalization", "A runtime array needs runtime code", span)
     end
-    local storage = ctx.builder:var(ctx.body, value.ty, self:expression(ctx, value, value.ty))
-    value.place = Ir.Local(storage)
-    return value.place
+    -- The spill goes into the list the value was built in, so it dominates every use even when the
+    -- demand comes from inside an arm.
+    local storage = ctx.builder:var(value.body or ctx.body, value.ty,
+        self:expression(ctx, value, value.ty))
+    local place = Ir.Local(storage)
+    -- A compile-time value is shared and immutable, so it never remembers a spill: another mode or
+    -- capture reading the same value must not see a `place` a residual compilation gave it.
+    if not value.items then value.place = place end
+    value.expr = nil
+    return place
 end
 
 -- The place a record value's fields live at. A record that only exists as an SSA value is spilled
 -- into storage once, which is what lets a call result be written through its fields.
 function Eval:recordPlace(ctx, value, span)
-    if value.place then return value.place end
+    if value.place then
+        -- A demand for a place invalidates the construction expression: storage is authoritative
+        -- from here on, so a later store must be visible to every read. A spilled `ir` keeps its SSA
+        -- expression as its representation.
+        if V.tag(value) == "object" then value.expr = nil end
+        return value.place
+    end
     if ctx.mode ~= "residual" then
         D.reject("runtime-in-normalization", "A runtime record needs runtime code", span)
     end
-    local storage = ctx.builder:var(ctx.body, value.ty, self:expression(ctx, value, value.ty))
-    value.place = Ir.Local(storage)
-    return value.place
+    -- A value that only exists as an SSA value is spilled once; the place is initialized from its
+    -- expression and storage is authoritative afterwards. The spill goes into the list the value was
+    -- built in, so it dominates every use even when the demand comes from inside an arm.
+    local storage = ctx.builder:var(value.body or ctx.body, value.ty,
+        self:expression(ctx, value, value.ty))
+    local place = Ir.Local(storage)
+    -- A compile-time record is shared and immutable, so it never remembers a spill: another mode or
+    -- capture reading the same value must not see a `place` a residual compilation gave it.
+    if not value.fields then value.place = place end
+    if V.tag(value) == "object" then value.expr = nil end
+    return place
 end
 
 -- An array expression. A value backed by storage is read whole, which is a struct copy in C; a
 -- compile-time array is built from its elements.
 function Eval:arrayExpr(ctx, value)
+    -- A residual literal that has not demanded a place is already its construction expression.
+    if value.expr then return value.expr end
     if not value.items then
         D.bug("array-value", "An array with neither storage nor elements has no representation")
     end
@@ -1331,7 +1380,8 @@ function Eval:placeOf(ctx, expr, span)
         local ty = S.field(target, name)
         if not ty then D.reject("unknown-member", "Record has no field " .. name, expr.field.span) end
         local base = container.place
-        if not base and ctx.mode == "residual" and container.value then
+        if ctx.mode == "residual" and container.value
+            and (not base or (V.tag(container.value) == "object" and container.value.expr)) then
             base = self:recordPlace(ctx, container.value, expr.span)
         end
         local place = base and Ir.Project(base, Ir.Field(name)) or nil
@@ -1407,7 +1457,8 @@ function Eval:placeOf(ctx, expr, span)
             -- A place needs a builder, so only residual code builds one; normalize code either uses
             -- the value it names or reports that this storage is runtime-only.
             local base = container.place
-            if not base and ctx.mode == "residual" and container.value then
+            if ctx.mode == "residual" and container.value
+                and (not base or (V.tag(container.value) == "array" and container.value.expr)) then
                 base = self:arrayPlace(ctx, container.value, expr.span)
             end
             local place = (base and ctx.mode == "residual")
@@ -2022,11 +2073,12 @@ function Eval:evalReference(ctx, expr)
     if slot.kind == "value" then
         local demanded = self:demand(slot, expr.name.span)
         if demanded.value == nil then D.reject("value-required", name .. " has no value", expr.name.span) end
-        if ctx.mode == "residual"
+        if slot.atTop and ctx.mode == "residual"
             and (V.tag(demanded.value) == "record"
                 or (V.tag(demanded.value) == "array" and demanded.value.place == nil)) then
-            -- Runtime code reaches a file-scope binding through its named storage. Normalize code
-            -- keeps the value itself, so it can still specialise a call that reads one.
+            -- Runtime code reaches a *file-scope* binding through its named storage. A local
+            -- aggregate keeps its value and spills to local storage only when demanded. Normalize
+            -- code keeps the value itself, so it can still specialise a call that reads one.
             return self:moduleObject(demanded, expr.name.span)
         end
         return demanded.value
@@ -2062,6 +2114,11 @@ function Eval:readFieldValue(ctx, slot, span)
             return held
         end
         D.reject("runtime-in-normalization", "Field " .. slot.name .. " is runtime storage", span)
+    end
+    -- A field of a record that still holds its construction expression is a pure projection; a
+    -- record that demanded a place reads storage so a store is observed.
+    if slot.record and slot.record.expr then
+        return V.ir(ctx.builder:get(slot.record.expr, slot.name, slot.ty), slot.ty)
     end
     local read = ctx.builder:read(ctx.body, slot.ty, slot.place)
     -- The place travels with the value: a reference read from storage needs it to reach its target.
@@ -2180,6 +2237,20 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
         end
         return V.ir(ctx.builder:bin(COMPARE[op], self:expression(ctx, left), self:expression(ctx, right),
             S.Bool), S.Bool)
+    end
+    if (op == "==" or op == "!=") and S.isBool(left.ty) and S.isBool(right.ty) then
+        -- A Bool compares by value. The operation is not ordered: section 7 offers Bool only
+        -- equality, exactly as it offers only equality for Unit.
+        if V.isKnown(left) and V.isKnown(right) then
+            return V.bool((left.b == right.b) == (op == "=="))
+        end
+        return V.ir(ctx.builder:bin(COMPARE[op], self:expression(ctx, left),
+            self:expression(ctx, right), S.Bool), S.Bool)
+    end
+    if (op == "==" or op == "!=") and S.isUnit(left.ty) and S.isUnit(right.ty) then
+        -- Unit has one value and no runtime representation, so both operands already ran for their
+        -- effects and the answer is known: Unit equals Unit.
+        return V.bool(op == "==")
     end
     if COMPARE[op] then
         -- A comparison widens both sides, which is always safe and never narrows.
@@ -2316,7 +2387,7 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
         end
     end
     if (op == "/" or op == "%") and not V.isInteger(right) then
-        builder:emit(ctx.body, Ir.Trap(builder:bin("Eq", rightExpr, builder:u32(0), S.Bool), "division-zero"))
+        builder:trap(ctx.body, builder:bin("Eq", rightExpr, builder:u32(0), S.Bool), "division-zero")
     end
     return V.ir(builder:bin(irOp, leftExpr, rightExpr, ty), ty)
 end
@@ -2398,6 +2469,17 @@ function Eval:evalCondition(ctx, expr, expected)
             D.reject("branch-result", "Conditional arms have different types: "
                 .. S.encode(yesValue.ty) .. " and " .. S.encode(noValue.ty), expr.span)
         end
+    end
+    -- When both continuing arms agree on one known scalar, the value is that scalar whatever the
+    -- test. The arms still run for their effects, but there is no join slot to allocate and no read
+    -- to copy back out.
+    if not yesTerminated and not noTerminated and self:sameKnownScalar(yesValue, noValue) then
+        -- The test expression is pure, so an arm list that is empty on both sides has no effect to
+        -- keep: there is no `If` to emit at all.
+        if #yesList > 0 or #noList > 0 then
+            builder:emit(ctx.body, Ir.If(testExpr, S.list(yesList), S.list(noList)))
+        end
+        return yesValue
     end
     local ty = yesTerminated and noValue.ty or yesValue.ty
     local storage = builder:var(ctx.body, ty, nil)
@@ -2573,8 +2655,10 @@ function Eval:constructRecord(ctx, ty, values, def)
         -- instance holding one is itself tied to this activation.
         if self:isBorrowed(fieldValue) or S.isView(field.type) then borrowed = true end
     end
-    local storage = ctx.builder:var(ctx.body, ty, ctx.builder:make(ty, exprs))
-    return V.object(ty, Ir.Local(storage), def, borrowed)
+    -- The Make is the value until a place is demanded (a field store, a reference, or a borrowed
+    -- receiver). `body` is where that spill goes, so a demand from inside an arm still names storage
+    -- the outer scope remembers. No storage exists until something needs an address.
+    return V.object(ty, nil, def, borrowed, nil, ctx.builder:make(ty, exprs), ctx.body)
 end
 
 function Eval:evalFieldSelect(ctx, expr)
@@ -2880,7 +2964,7 @@ function Eval:makeView(ctx, value, sig)
                 .. " does not match the required signature", ctx.span)
         end
         entry = instance.target
-        slots[#slots + 1] = Ir.BorrowArg(value.receiver.place)
+        slots[#slots + 1] = Ir.BorrowArg(self:recordPlace(ctx, value.receiver, ctx.span))
         borrowed = true
     else
         D.bug("c-view", "Only known code can be bound into a view")
@@ -3019,24 +3103,40 @@ function Eval:evalLambda(ctx, expr, expected)
         local tag = V.tag(value)
         if V.isStatic(value) then
             plan.static[name] = value
-        elseif tag == "object" or tag == "method" or tag == "record" then
+        elseif tag == "object" or tag == "method" or tag == "record" or tag == "array" then
             -- A mutable instance or a method view is borrowed, never copied: the closure is tied to
             -- the activation that created it. In residual code the place travels as a place input;
-            -- under the interpreter a concrete record is simply referred to.
+            -- under the interpreter a concrete aggregate is simply referred to. An array is a mutable
+            -- instance too, so it borrows like a record rather than travelling by value.
             local object = tag == "method" and value.receiver or value
             if not object then
                 D.reject("missing-receiver", "A captured method needs its receiver", expr.span)
             end
-            local schema = object.schema or object.schema
+            -- A borrow needs an address, so a value still carrying its construction expression
+            -- materialises here. The closure is then non-retaining, and returning it escapes.
+            local place = object.place
+            if ctx.mode == "residual" then
+                if S.isArray(object.ty) then
+                    place = self:arrayPlace(ctx, object, expr.span)
+                else
+                    place = self:recordPlace(ctx, object, expr.span)
+                end
+            end
             plan.borrowedOrder[#plan.borrowedOrder + 1] = name
-            plan.borrowed[name] = {
-                kind = tag == "method" and "method" or "object",
-                ty = object.ty, schema = schema or { id = 0, fields = S.fieldsOf(object.ty),
-                    fieldNames = S.fieldNames(object.ty), statics = {}, readonly = {}, methods = {} },
-                place = object.place, record = object.place == nil and object or nil,
-                method = tag == "method" and value.def or nil,
-            }
-            if ctx.mode == "residual" and not plan.borrowed[name].place then
+            if S.isArray(object.ty) then
+                plan.borrowed[name] = { kind = "array", ty = object.ty, place = place,
+                    record = place == nil and object or nil }
+            else
+                local schema = object.schema
+                plan.borrowed[name] = {
+                    kind = tag == "method" and "method" or "object",
+                    ty = object.ty, schema = schema or { id = 0, fields = S.fieldsOf(object.ty),
+                        fieldNames = S.fieldNames(object.ty), statics = {}, readonly = {}, methods = {} },
+                    place = place, record = place == nil and object or nil,
+                    method = tag == "method" and value.def or nil,
+                }
+            end
+            if ctx.mode == "residual" and not place then
                 D.reject("runtime-in-normalization", "Cannot capture runtime storage " .. name, expr.span)
             end
         elseif tag == "closure" then
@@ -3092,7 +3192,10 @@ function Eval:evalLambda(ctx, expr, expected)
     for _, capture in ipairs(order) do
         local static, borrowed = plan.static[capture], plan.borrowed[capture]
         if borrowed then
-            local shape = tostring(borrowed.kind) .. ":" .. tostring(borrowed.schema.id)
+            -- A record borrow is keyed by its schema identity; an array borrow has no schema, so its
+            -- type is the identity.
+            local shape = tostring(borrowed.kind) .. ":"
+                .. (borrowed.schema and tostring(borrowed.schema.id) or S.encode(borrowed.ty))
             if borrowed.method then shape = shape .. ":" .. tostring(borrowed.method.id) end
             plan.key = plan.key .. "|" .. capture .. "=@" .. shape
         else
@@ -3241,12 +3344,17 @@ function Eval:buildCallableInstance(key, callable, args, span)
         paramTypes[#paramTypes + 1] = borrowed.ty
         instance.inputTypes[#instance.inputTypes + 1] = borrowed.ty
         -- The place parameter belongs to the caller, so the object is an enclosing owner here.
-        local object = V.object(borrowed.ty, Ir.Local(storage), borrowed.schema, nil, true)
-        if borrowed.kind == "method" then
+        if S.isArray(borrowed.ty) then
             declare(sc, name, { kind = "value", name = name,
-                value = V.method(borrowed.method, object) }, span)
+                value = V.array(borrowed.ty, nil, Ir.Local(storage), true) }, span)
         else
-            declare(sc, name, { kind = "value", name = name, value = object }, span)
+            local object = V.object(borrowed.ty, Ir.Local(storage), borrowed.schema, nil, true)
+            if borrowed.kind == "method" then
+                declare(sc, name, { kind = "value", name = name,
+                    value = V.method(borrowed.method, object) }, span)
+            else
+                declare(sc, name, { kind = "value", name = name, value = object }, span)
+            end
         end
     end
     for name, value in pairs(plan.static) do
@@ -3313,11 +3421,10 @@ function Eval:buildCallableInstance(key, callable, args, span)
                 paramTypes[#paramTypes + 1] = ty
                 instance.paramPositions[#instance.paramPositions + 1] = index
                 if S.isRecord(ty) then
-                    local storage = builder:storageId()
-                    setup[#setup + 1] = Ir.Var(storage, ty, builder:ref(value, ty))
                     declare(sc, param.name.text, { kind = "value", name = param.name.text,
-                        value = V.object(ty, Ir.Local(storage), { fields = S.fieldsOf(ty),
-                            fieldNames = S.fieldNames(ty), statics = {}, readonly = {}, methods = {}, type = ty }) },
+                        value = V.object(ty, nil, { fields = S.fieldsOf(ty),
+                            fieldNames = S.fieldNames(ty), statics = {}, readonly = {}, methods = {}, type = ty },
+                            nil, false, builder:ref(value, ty), setup) },
                         param.span)
                 else
                     declare(sc, param.name.text, { kind = "value", name = param.name.text,
@@ -3516,7 +3623,9 @@ function Eval:execIfStatement(ctx, stmt)
     local yesList, noList = {}, {}
     local yesReturned = self:execBlock(ctx:arm(yesList), stmt.yes)
     local noReturned = self:execBlock(ctx:arm(noList), stmt.no)
-    ctx.builder:emit(ctx.body, Ir.If(testExpr, S.list(yesList), S.list(noList)))
+    if #yesList > 0 or #noList > 0 then
+        ctx.builder:emit(ctx.body, Ir.If(testExpr, S.list(yesList), S.list(noList)))
+    end
     return yesReturned and noReturned
 end
 
@@ -4203,7 +4312,9 @@ function Eval:emitCall(ctx, instance, values, span, receiver)
     local args = {}
     for index, input in ipairs(instance.inputPlan) do
         if input.kind == "place" then
-            args[#args + 1] = Ir.BorrowArg(receiver.place)
+            -- A borrowed receiver must be a place; a record still carrying its construction
+            -- expression materialises once here.
+            args[#args + 1] = Ir.BorrowArg(self:recordPlace(ctx, receiver, span))
         else
             args[#args + 1] = Ir.ValueArg(self:expression(ctx, values[input.position],
                 instance.inputTypes[index]))
@@ -4384,22 +4495,26 @@ function Eval:buildInstance(key, def, values, span, receiver)
             -- are maintained together.
             instance.inputTypes[#instance.inputTypes + 1] = ty
             if S.isArray(ty) then
-                -- A by-value array parameter owns fresh local storage for the same reason.
-                local storage = builder:storageId()
-                setup[#setup + 1] = Ir.Var(storage, ty, builder:ref(value, ty))
+                -- A by-value array parameter owns fresh storage only when an element is addressed;
+                -- a whole-value use reads the input directly.
                 declare(sc, param.name.text, { kind = "value", name = param.name.text,
-                    value = V.array(ty, nil, Ir.Local(storage)) }, param.span)
+                    value = V.array(ty, nil, nil, false, builder:ref(value, ty), setup) }, param.span)
             elseif S.isRecord(ty) then
-                -- A by-value record parameter owns fresh local storage, so field writes and method
-                -- calls do not touch the caller's instance.
-                local storage = builder:storageId()
-                setup[#setup + 1] = Ir.Var(storage, ty, builder:ref(value, ty))
-                declare(sc, param.name.text, { kind = "value", name = param.name.text,
-                    value = V.object(ty, Ir.Local(storage), { fields = S.fieldsOf(ty),
-                        fieldNames = S.fieldNames(ty), statics = {}, readonly = {}, methods = {}, type = ty }) },
-                    param.span)
+                -- A by-value record parameter owns fresh storage only when a write or an address
+                -- demands one, so a read-only parameter reads the input directly. A loop-carried
+                -- parameter needs its storage up front because the back edge names it.
+                local fields = { fields = S.fieldsOf(ty),
+                    fieldNames = S.fieldNames(ty), statics = {}, readonly = {}, methods = {}, type = ty }
                 if def.tailSelf then
+                    local storage = builder:storageId()
+                    setup[#setup + 1] = Ir.Var(storage, ty, builder:ref(value, ty))
+                    declare(sc, param.name.text, { kind = "value", name = param.name.text,
+                        value = V.object(ty, Ir.Local(storage), fields) }, param.span)
                     self:loopTarget(instance, index, storage, ty)
+                else
+                    declare(sc, param.name.text, { kind = "value", name = param.name.text,
+                        value = V.object(ty, nil, fields, nil, false, builder:ref(value, ty), setup) },
+                        param.span)
                 end
             elseif def.tailSelf then
                 -- Loop-carried parameters need mutable storage so a back edge can rebind them.

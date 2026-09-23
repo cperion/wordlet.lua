@@ -91,6 +91,22 @@ do
     compile(source)
 end
 
+-- Equality is offered for Bool and Unit (syntax.md §7): Bool compares by value, and Unit has one
+-- value. Ordering is not offered for either.
+do
+    local source = "let beq(a: Bool, b: Bool): Bool = a == b\n"
+        .. "let bne(a: Bool, b: Bool): Bool = a != b\n"
+        .. "let ueq(): Bool = Unit() == Unit()\n"
+        .. "let une(): Bool = Unit() != Unit()\n"
+        .. "return { functions = { beq, bne, ueq, une } }"
+    check(interpret("beq", { true, true }, source)[1] == true, "true == true")
+    check(interpret("beq", { true, false }, source)[1] == false, "true == false")
+    check(interpret("bne", { true, false }, source)[1] == true, "true != false")
+    check(interpret("ueq", {}, source)[1] == true, "Unit() == Unit()")
+    check(interpret("une", {}, source)[1] == false, "Unit() != Unit()")
+    compile(source)
+end
+
 -- Free-name analysis walks the schema, so a name captured inside any expression position is found.
 -- A hand-written child table once missed record fields, array literals and indexes.
 do
@@ -351,12 +367,20 @@ let read_through(n: U32): U32 = do
   c.value += 5
   return peek(100)
 end
-return { types = { Counter }, functions = { local_bumps, method_view, read_through } }
+let array_bumps(i: U32): U32 = do
+  let a = [1, 2, 3]
+  let f = |k: U32| -> do a[k] = 9 return a[k] end
+  return f(i) * 100 + a[0]
+end
+return { types = { Counter }, functions = { local_bumps, method_view, read_through, array_bumps } }
 ]==]
 check(interpret("local_bumps", { 5 }, BORROWED)[1] == 16, "a captured receiver mutates through the closure")
 check(interpret("method_view", { 5 }, BORROWED)[1] == 16, "a captured method view keeps its receiver")
 check(interpret("read_through", { 1 }, BORROWED)[1] == 106,
     "a borrowed receiver is live, unlike a captured field snapshot")
+check(interpret("array_bumps", { 0 }, BORROWED)[1] == 909,
+    "a captured array is borrowed, so a mutation through the closure is visible afterward")
+compile(BORROWED)
 
 rejects("borrow-escape", "let C = { v: U32, bump(): U32 = v }\n"
     .. "let bad(n: U32): (U32): U32 = do let c = C { v = n } return |k: U32| -> c.bump() + k end\n"
