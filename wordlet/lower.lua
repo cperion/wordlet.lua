@@ -5,6 +5,7 @@ local M = {}
 
 local Ir = S.Ir
 local U64Kernel = require("wordletkit.u64")
+local Analysis = require("wordlet.analysis")
 
 -- Same injective escape as the ABI layer: every non-alphanumeric byte becomes _XX.
 function M.escape(name)
@@ -20,14 +21,8 @@ local BINARY_OP = {
 }
 local UNARY_OP = { Neg = "-", BitNot = "~" }
 
--- The expression operands of an expression, and the expressions a place names. The traversal
--- itself is `Ir.Expr:each`/`Ir.Place:each`, so a pass cannot disagree with a node about what
--- it contains.
-local function collectPlaceExprs(place, out)
-    if not place then return end
-    place:each(function(expr) out[#out + 1] = expr end)
-end
-
+-- The expression operands of an expression. The traversal itself is `Ir.Expr:each`, so a pass
+-- cannot disagree with a node about what it contains.
 local function collectExprs(expr, out)
     expr:each(function(operand) out[#out + 1] = operand end)
 end
@@ -53,24 +48,19 @@ end
 
 local Emitter = {}
 Emitter.__index = Emitter
-local function newEmitter(layouts, signature, usedStorages, usedValues, plan)
-    -- The value ids of the function's by-value parameters: a storage initialized from one of them can
-    -- alias the parameter when the function never writes it.
-    local paramValues = {}
-    for _, param in ipairs(signature and signature.fn and signature.fn.params or {}) do
-        if param.kind == "ValueParam" and param.binding then paramValues[param.binding.id] = true end
-    end
+-- One emitter per function, reading the analysis that `wordlet/analysis.lua` computed for it.
+local function newEmitter(layouts, signature, analysis)
     return setmetatable({ layouts = layouts, lines = {}, indent = 1,
         placeParams = (signature and signature.placeParams) or {},
-        usedStorages = usedStorages or {},
-        usedValues = usedValues or {},
-        mutatedStorages = plan and plan.mutatedStorages or nil,
-        paramValues = paramValues,
+        usedStorages = analysis.storageUses,
+        usedValues = analysis.valueUses,
+        mutatedStorages = analysis.mutatedStorages,
+        paramValues = analysis.paramValues,
         storageAlias = {},
-        shared = plan and plan.shared or nil,
-        decls = plan and plan.decls or nil,
-        inline = plan and plan.inline or nil,
-        useCount = plan and plan.useCount or nil,
+        shared = analysis.shared,
+        decls = analysis.sharedDecls,
+        inline = analysis.inline,
+        useCount = analysis.useCount,
         assigned = {}, nextTemp = 0 }, Emitter)
 end
 function Emitter:line(text) self.lines[#self.lines + 1] = string.rep("    ", self.indent) .. text end
@@ -1058,493 +1048,13 @@ function M.stringDeclarations(layouts)
     return lines
 end
 
--- The storage IDs a function actually references through a place. A loop-carried `Var` is declared
--- before its `Loop`, but a specialization whose base case returns immediately may never read or
--- store it; since an initializer is a pure `Expr`, such a `Var` is dead.
-local function usedStorages(fn)
-    local used = {}
-    local place, expr
-    local function arg(value)
-        if value.kind == "ValueArg" then expr(value.value)
-        elseif value.kind == "BorrowArg" then place(value.place) end
-    end
-    local function arguments(list)
-        for _, value in ipairs(list) do arg(value) end
-    end
-    local function statements(list)
-        for _, stmt in ipairs(list) do
-            local kind = stmt.kind
-            if kind == "Let" then expr(stmt.expr)
-            elseif kind == "Var" then expr(stmt.initial)
-            elseif kind == "Read" then place(stmt.place)
-            elseif kind == "Store" then place(stmt.place) expr(stmt.value)
-            elseif kind == "View" then arguments(stmt.slots)
-            elseif kind == "Call" then arguments(stmt.arguments)
-            elseif kind == "Indirect" then expr(stmt.callable) arguments(stmt.arguments)
-            elseif kind == "If" then expr(stmt.test) statements(stmt.yes) statements(stmt.no)
-            elseif kind == "Loop" then statements(stmt.body)
-            elseif kind == "Trap" then expr(stmt.failure)
-            elseif kind == "ConstructVariant" then expr(stmt.payload)
-            elseif kind == "Switch" then for _, case in ipairs(stmt.cases) do statements(case.body) end
-            elseif kind == "Return" then for _, value in ipairs(stmt.values) do expr(value) end
-            end
-        end
-    end
-    function place(value)
-        if not value then return end
-        if value.kind == "Local" then used[value.storage.id] = true
-        elseif value.kind == "Project" or value.kind == "Deref" then place(value.base)
-        elseif value.kind == "Index" then place(value.base) expr(value.index)
-        elseif value.kind == "SliceIndex" or value.kind == "PtrIndex" then
-            expr(value.view) expr(value.index) end
-    end
-    function expr(value)
-        if not value then return end
-        local kind = value.kind
-        if kind == "Un" then expr(value.operand)
-        elseif kind == "Bin" then expr(value.left) expr(value.right)
-        elseif kind == "Get" then expr(value.aggregate)
-        elseif kind == "Make" then for _, field in ipairs(value.fields) do expr(field) end
-        elseif kind == "Convert" then expr(value.operand)
-        elseif kind == "Addr" then place(value.place)
-        elseif kind == "SliceLength" then expr(value.view)
-        end
-    end
-    statements(fn.body)
-    return used
-end
-
--- The value IDs a function references. Unlike storage, a value is named by a `Ref` expression, so a
--- `Read` whose id no `Ref` names can be dropped. Places are pure, so skipping the read evaluates
--- nothing that had an effect.
-local function usedValues(fn)
-    local used = {}
-    local place, expr
-    local function arg(value)
-        if value.kind == "ValueArg" then expr(value.value)
-        elseif value.kind == "BorrowArg" then place(value.place) end
-    end
-    local function arguments(list) for _, value in ipairs(list) do arg(value) end end
-    local function statements(list)
-        for _, stmt in ipairs(list) do
-            local kind = stmt.kind
-            if kind == "Let" then expr(stmt.expr)
-            elseif kind == "Var" then expr(stmt.initial)
-            elseif kind == "Read" then place(stmt.place)
-            elseif kind == "Store" then place(stmt.place) expr(stmt.value)
-            elseif kind == "View" then arguments(stmt.slots)
-            elseif kind == "Call" then arguments(stmt.arguments)
-            elseif kind == "Indirect" then expr(stmt.callable) arguments(stmt.arguments)
-            elseif kind == "If" then expr(stmt.test) statements(stmt.yes) statements(stmt.no)
-            elseif kind == "Loop" then statements(stmt.body)
-            elseif kind == "Trap" then expr(stmt.failure)
-            elseif kind == "ConstructVariant" then expr(stmt.payload)
-            elseif kind == "Switch" then
-                used[stmt.variant.id] = true
-                for _, case in ipairs(stmt.cases) do statements(case.body) end
-            elseif kind == "VariantMatches" or kind == "VariantPayload" then used[stmt.variant.id] = true
-            elseif kind == "Return" then for _, value in ipairs(stmt.values) do expr(value) end
-            end
-        end
-    end
-    function place(value)
-        if not value then return end
-        if value.kind == "Project" or value.kind == "Deref" then place(value.base)
-        elseif value.kind == "Index" then place(value.base) expr(value.index)
-        elseif value.kind == "SliceIndex" or value.kind == "PtrIndex" then
-            expr(value.view) expr(value.index) end
-    end
-    function expr(value)
-        if not value then return end
-        local kind = value.kind
-        if kind == "Ref" then used[value.value.id] = true
-        elseif kind == "Un" then expr(value.operand)
-        elseif kind == "Bin" then expr(value.left) expr(value.right)
-        elseif kind == "Get" then expr(value.aggregate)
-        elseif kind == "Make" then for _, field in ipairs(value.fields) do expr(field) end
-        elseif kind == "Convert" then expr(value.operand)
-        elseif kind == "Addr" then place(value.place)
-        elseif kind == "SliceLength" then expr(value.view)
-        end
-    end
-    statements(fn.body)
-    return used
-end
-
--- The storages a function writes through, borrows, or takes the address of. A storage none of those
--- touches is read-only, so a copy of a by-value parameter that only exists to give it a place can
--- alias the parameter itself.
-local function mutatedStorages(fn)
-    local mutated = {}
-    local function root(place)
-        while place do
-            if place.kind == "Local" then return place.storage.id end
-            if place.kind == "Project" or place.kind == "Deref" or place.kind == "Index" then
-                place = place.base
-            else
-                return nil   -- a slice/pointer element names a view value, not a local root
-            end
-        end
-        return nil
-    end
-    local function mark(place)
-        local id = root(place)
-        if id then mutated[id] = true end
-    end
-    local function walkExpr(value)
-        if not value then return end
-        if value.kind == "Addr" then mark(value.place) end
-        local children = {}
-        collectExprs(value, children)
-        for _, child in ipairs(children) do walkExpr(child) end
-    end
-    local function walkPlace(place)
-        if not place then return end
-        if place.kind == "Index" then walkExpr(place.index) walkPlace(place.base)
-        elseif place.kind == "SliceIndex" or place.kind == "PtrIndex" then
-            walkExpr(place.view) walkExpr(place.index)
-        elseif place.kind == "Project" or place.kind == "Deref" then walkPlace(place.base) end
-    end
-    local function walkArgs(list)
-        for _, arg in ipairs(list) do
-            if arg.kind == "ValueArg" then walkExpr(arg.value)
-            elseif arg.kind == "BorrowArg" then mark(arg.place) walkPlace(arg.place) end
-        end
-    end
-    local function statements(list)
-        for _, stmt in ipairs(list) do
-            local kind = stmt.kind
-            if kind == "Let" then walkExpr(stmt.expr)
-            elseif kind == "Var" then walkExpr(stmt.initial)
-            elseif kind == "Read" then walkPlace(stmt.place)
-            elseif kind == "Store" then mark(stmt.place) walkPlace(stmt.place) walkExpr(stmt.value)
-            elseif kind == "View" then walkArgs(stmt.slots)
-            elseif kind == "Call" then walkArgs(stmt.arguments)
-            elseif kind == "Indirect" then walkExpr(stmt.callable) walkArgs(stmt.arguments)
-            elseif kind == "If" then walkExpr(stmt.test) statements(stmt.yes) statements(stmt.no)
-            elseif kind == "Loop" then statements(stmt.body)
-            elseif kind == "Trap" then walkExpr(stmt.failure)
-            elseif kind == "ConstructVariant" then walkExpr(stmt.payload)
-            elseif kind == "Switch" then for _, case in ipairs(stmt.cases) do statements(case.body) end
-            elseif kind == "Return" then for _, value in ipairs(stmt.values) do walkExpr(value) end
-            end
-        end
-    end
-    statements(fn.body)
-    return mutated
-end
-
--- A definition with one use is lowered where it is used instead of through a local. A pure
--- definition may move to its use freely; a `Read` is a snapshot of storage, so it may only move to a
--- use that no store or call can reach in between. This is how the evaluator's explicit definitions
--- become expressions at emission, not a general optimizer.
-local function analyzeInlining(fn)
-    local useCount = {}
-    local function bump(id) useCount[id] = (useCount[id] or 0) + 1 end
-    local function countExpr(value)
-        if not value then return end
-        if value.kind == "Ref" then bump(value.value.id) end
-        local children = {}
-        collectExprs(value, children)
-        for _, child in ipairs(children) do countExpr(child) end
-    end
-    local function countPlace(place)
-        if not place then return end
-        local exprs = {}
-        collectPlaceExprs(place, exprs)
-        for _, expr in ipairs(exprs) do countExpr(expr) end
-    end
-    local function countArgs(list)
-        for _, arg in ipairs(list) do
-            if arg.kind == "ValueArg" then countExpr(arg.value)
-            elseif arg.kind == "BorrowArg" then countPlace(arg.place) end
-        end
-    end
-    local defs = {}
-    local function walk(list)
-        for _, stmt in ipairs(list) do
-            local kind = stmt.kind
-            if kind == "Let" then defs[stmt.value.id] = stmt countExpr(stmt.expr)
-            elseif kind == "Var" then countExpr(stmt.initial)
-            elseif kind == "Read" then defs[stmt.value.id] = stmt countPlace(stmt.place)
-            elseif kind == "Store" then countPlace(stmt.place) countExpr(stmt.value)
-            elseif kind == "View" then countArgs(stmt.slots)
-            elseif kind == "Call" then countArgs(stmt.arguments)
-            elseif kind == "Indirect" then countExpr(stmt.callable) countArgs(stmt.arguments)
-            elseif kind == "If" then countExpr(stmt.test) walk(stmt.yes) walk(stmt.no)
-            elseif kind == "Loop" then walk(stmt.body)
-            elseif kind == "Trap" then countExpr(stmt.failure)
-            elseif kind == "ConstructVariant" then
-                defs[stmt.value.id] = stmt
-                countExpr(stmt.payload)
-            elseif kind == "VariantMatches" or kind == "VariantPayload" then
-                defs[stmt.value.id] = stmt
-                bump(stmt.variant.id)
-            elseif kind == "Switch" then
-                bump(stmt.variant.id)
-                for _, case in ipairs(stmt.cases) do walk(case.body) end
-            elseif kind == "Return" then
-                for _, value in ipairs(stmt.values) do countExpr(value) end
-            end
-        end
-    end
-    walk(fn.body)
-
-    -- A pure definition with one use moves to that use wherever it is.
-    local inline = {}
-    for id, stmt in pairs(defs) do
-        if useCount[id] == 1 and (stmt.kind == "Let" or stmt.kind == "ConstructVariant"
-            or stmt.kind == "VariantMatches" or stmt.kind == "VariantPayload") then
-            inline[id] = { stmt = stmt }
-        end
-    end
-
-    -- The value IDs one statement reads. Used to find the single use of a pending `Read`.
-    local function usedIds(stmt, out)
-        local function markExpr(value)
-            if not value then return end
-            if value.kind == "Ref" then out[value.value.id] = true end
-            local children = {}
-            collectExprs(value, children)
-            for _, child in ipairs(children) do markExpr(child) end
-        end
-        local function markPlace(place)
-            if not place then return end
-            local exprs = {}
-            collectPlaceExprs(place, exprs)
-            for _, expr in ipairs(exprs) do markExpr(expr) end
-        end
-        local function markArgs(list)
-            for _, arg in ipairs(list) do
-                if arg.kind == "ValueArg" then markExpr(arg.value)
-                elseif arg.kind == "BorrowArg" then markPlace(arg.place) end
-            end
-        end
-        local kind = stmt.kind
-        if kind == "Let" then markExpr(stmt.expr)
-        elseif kind == "Var" then markExpr(stmt.initial)
-        elseif kind == "Read" then markPlace(stmt.place)
-        elseif kind == "Store" then markPlace(stmt.place) markExpr(stmt.value)
-        elseif kind == "View" then markArgs(stmt.slots)
-        elseif kind == "Call" then markArgs(stmt.arguments)
-        elseif kind == "Indirect" then markExpr(stmt.callable) markArgs(stmt.arguments)
-        elseif kind == "Trap" then markExpr(stmt.failure)
-        elseif kind == "ConstructVariant" then markExpr(stmt.payload)
-        elseif kind == "VariantMatches" or kind == "VariantPayload" then out[stmt.variant.id] = true
-        elseif kind == "Switch" then out[stmt.variant.id] = true
-        elseif kind == "Return" then for _, value in ipairs(stmt.values) do markExpr(value) end
-        end
-    end
-    local function effectful(stmt)
-        local kind = stmt.kind
-        return kind == "Store" or kind == "Call" or kind == "Indirect"
-            or kind == "If" or kind == "Loop" or kind == "Switch"
-    end
-    -- A `Read` may move to its single use only within its own list and only past pure statements.
-    local function scan(list)
-        local pending = {}
-        for _, stmt in ipairs(list) do
-            local used = {}
-            usedIds(stmt, used)
-            for id in pairs(used) do
-                if pending[id] and useCount[id] == 1 then
-                    inline[id] = { place = pending[id] }
-                    pending[id] = nil
-                end
-            end
-            if stmt.kind == "Read" then pending[stmt.value.id] = stmt.place end
-            if effectful(stmt) then
-                for id in pairs(pending) do pending[id] = nil end
-            end
-            if stmt.kind == "If" then scan(stmt.yes) scan(stmt.no)
-            elseif stmt.kind == "Loop" then scan(stmt.body)
-            elseif stmt.kind == "Switch" then
-                for _, case in ipairs(stmt.cases) do scan(case.body) end
-            end
-        end
-    end
-    scan(fn.body)
-    return { inline = inline, useCount = useCount }
-end
-
--- The IR is a DAG: `Builder:intern` unifies structurally equal expressions, so one node can be
--- referenced many times, and `Emitter:render` is a tree walk that would print every reference. This
--- finds the nodes used more than once and the innermost statement list containing all of their
--- uses, so the emitter can bind each to one local and print names instead.
-local function analyzeSharing(fn, usedStorages, usedValues)
-    -- A `Var` or `Read` the emitter drops contributes no emitted expression, so it must not make a
-    -- construction expression look shared. Counting it would name a copy of an expression that the
-    -- dead declaration never prints.
-    local function dropped(stmt)
-        if stmt.kind == "Var" then return not usedStorages[stmt.storage.id] end
-        if stmt.kind == "Read" then return not usedValues[stmt.value.id] end
-        return false
-    end
-    local seen, nodes, edges, roots = {}, {}, {}, {}
-    local paths, pathList, chains = {}, {}, {}
-
-    local function chainOf(path)
-        local chain = chains[path]
-        if chain then return chain end
-        local reversed = {}
-        local current = path
-        while current do reversed[#reversed + 1] = current; current = current.parent end
-        chain = {}
-        for index = #reversed, 1, -1 do chain[#chain + 1] = reversed[index] end
-        chains[path] = chain
-        return chain
-    end
-
-    local function collect(expr)
-        if not expr or seen[expr] then return end
-        seen[expr] = true
-        nodes[#nodes + 1] = expr
-        local children = {}
-        collectExprs(expr, children)
-        local list, position = {}, {}
-        for _, child in ipairs(children) do
-            if not position[child] then
-                position[child] = #list + 1
-                list[#list + 1] = { node = child, count = 0 }
-            end
-            list[position[child]].count = list[position[child]].count + 1
-        end
-        edges[expr] = list
-        for _, edge in ipairs(list) do collect(edge.node) end
-    end
-
-    local function statementExprs(stmt, out)
-        local kind = stmt.kind
-        local function arg(value)
-            if value.kind == "ValueArg" then out[#out + 1] = value.value
-            elseif value.kind == "BorrowArg" then collectPlaceExprs(value.place, out) end
-        end
-        if kind == "Let" then out[#out + 1] = stmt.expr
-        elseif kind == "Var" then out[#out + 1] = stmt.initial
-        elseif kind == "Read" then collectPlaceExprs(stmt.place, out)
-        elseif kind == "Store" then collectPlaceExprs(stmt.place, out); out[#out + 1] = stmt.value
-        elseif kind == "View" then for _, value in ipairs(stmt.slots) do arg(value) end
-        elseif kind == "Call" then for _, value in ipairs(stmt.arguments) do arg(value) end
-        elseif kind == "Indirect" then
-            out[#out + 1] = stmt.callable
-            for _, value in ipairs(stmt.arguments) do arg(value) end
-        elseif kind == "If" then out[#out + 1] = stmt.test
-        elseif kind == "Trap" then out[#out + 1] = stmt.failure
-        elseif kind == "ConstructVariant" then out[#out + 1] = stmt.payload
-        elseif kind == "Return" then for _, value in ipairs(stmt.values) do out[#out + 1] = value end
-        end
-    end
-
-    local stack = {}
-    local function walkList(list)
-        for index, stmt in ipairs(list) do
-            local path = { list = list, index = index, parent = stack[#stack] }
-            stack[#stack + 1] = path
-            if not dropped(stmt) then
-                local exprs = {}
-                statementExprs(stmt, exprs)
-                for _, expr in ipairs(exprs) do
-                    if expr then
-                        collect(expr)
-                        roots[#roots + 1] = { node = expr, path = path }
-                    end
-                end
-            end
-            if stmt.kind == "If" then walkList(stmt.yes); walkList(stmt.no)
-            elseif stmt.kind == "Loop" then walkList(stmt.body)
-            elseif stmt.kind == "Switch" then
-                for _, case in ipairs(stmt.cases) do walkList(case.body) end
-            end
-            stack[#stack] = nil
-        end
-    end
-    walkList(fn.body)
-
-    -- Reference counts and use positions propagate from the statement roots through the DAG, so the
-    -- walk is linear in the DAG and never expands the shared tree.
-    local order, marked = {}, {}
-    local function orderVisit(node)
-        if marked[node] then return end
-        marked[node] = true
-        for _, edge in ipairs(edges[node]) do orderVisit(edge.node) end
-        order[#order + 1] = node
-    end
-    for _, root in ipairs(roots) do orderVisit(root.node) end
-
-    local uses = {}
-    for _, root in ipairs(roots) do
-        uses[root.node] = math.min(2, (uses[root.node] or 0) + 1)
-        if not paths[root.node] then paths[root.node] = {}; pathList[root.node] = {} end
-        if not paths[root.node][root.path] then
-            paths[root.node][root.path] = true
-            pathList[root.node][#pathList[root.node] + 1] = root.path
-        end
-    end
-    for index = #order, 1, -1 do
-        local node = order[index]
-        local count = uses[node] or 0
-        if count > 0 then
-            for _, edge in ipairs(edges[node]) do
-                local child = edge.node
-                uses[child] = math.min(2, (uses[child] or 0) + count * edge.count)
-                if pathList[node] then
-                    if not paths[child] then paths[child] = {}; pathList[child] = {} end
-                    for _, path in ipairs(pathList[node]) do
-                        if not paths[child][path] then
-                            paths[child][path] = true
-                            pathList[child][#pathList[child] + 1] = path
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    -- A node used twice or more is shared; its declaration goes in the innermost list that contains
-    -- every use, before the earliest statement in that list that uses it.
-    local shared, decls = {}, {}
-    for _, node in ipairs(nodes) do
-        if uses[node] and uses[node] >= 2 and node.kind ~= "Const" and node.kind ~= "Ref" then
-            shared[node] = true
-            local list = pathList[node]
-            local first = chainOf(list[1])
-            local depth = #first
-            for _, path in ipairs(list) do
-                local chain = chainOf(path)
-                local matched = 0
-                while matched < depth and matched < #chain
-                    and chain[matched + 1].list == first[matched + 1].list do
-                    matched = matched + 1
-                end
-                if matched < depth then depth = matched end
-            end
-            local target = first[depth].list
-            local earliest = first[depth].index
-            for _, path in ipairs(list) do
-                local index = chainOf(path)[depth].index
-                if index < earliest then earliest = index end
-            end
-            decls[target] = decls[target] or {}
-            decls[target][earliest] = decls[target][earliest] or {}
-            local pending = decls[target][earliest]
-            pending[#pending + 1] = node
-        end
-    end
-    return { shared = shared, decls = decls }
-end
 
 function M.bodies(layouts)
     local lines = {}
     for _, instance in ipairs(layouts.order) do
         local signature = layouts.signatures[instance.target]
-        local storages = usedStorages(instance.fn)
-        local values = usedValues(instance.fn)
-        local sharing = analyzeSharing(instance.fn, storages, values)
-        local inlining = analyzeInlining(instance.fn)
-        local emitter = newEmitter(layouts, signature, storages, values,
-            { shared = sharing.shared, decls = sharing.decls,
-                inline = inlining.inline, useCount = inlining.useCount,
-                mutatedStorages = mutatedStorages(instance.fn) })
+        local analysis = Analysis.analyze(instance.fn)
+        local emitter = newEmitter(layouts, signature, analysis)
         emitter:raw(M.signatureText(layouts, signature) .. " {")
         emitter:statements(instance.fn.body)
         -- A residual base case keeps the full ABI, so a parameter it never reads still appears in
@@ -1553,7 +1063,8 @@ function M.bodies(layouts)
         -- exactly the sets the emitter already consulted.
         for _, param in ipairs(signature.params) do
             local used
-            if param.pointer then used = storages[param.binding] else used = values[param.binding] end
+            if param.pointer then used = analysis.storageUses[param.binding]
+            else used = analysis.valueUses[param.binding] end
             if param.name and not used then emitter:line("(void)" .. param.name .. ";") end
         end
         emitter:raw("}")

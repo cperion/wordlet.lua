@@ -44,6 +44,7 @@ Lua-level signatures. `Diag` values are raised with `error`, not returned.
 | `wordlet/eval.lua` | `compile(program, loadedTop) -> Compilation` | a session method: keys, instances, IR, type application |
 | `wordlet/check.lua` | `program(fnList, modules, foreigns)` | raises `bug` diagnostics only |
 | `wordlet/cabi.lua` | `close(compilation) -> Layouts` | record layouts, callable ABIs, C names |
+| `wordlet/analysis.lua` | `analyze(fn) -> Analysis` | one walk per `Ir.Fn`: storage/value uses, mutations, the inlining rule and the sharing rule (structure.md §3.5) |
 | `wordlet/lower.lua` | `close(layouts)` then `unit(layouts)`, `cdef(layouts, ns)`, `source(layouts, headerName)`, `header(layouts, name)` | `close` computes the emission once; the four views read one closed artifact |
 | `wordlet/diag.lua` | `reject/bug/todo/resource/internal(...)`, `format(Diagnostic) -> string` | diagnostic construction |
 | `wordlet/init.lua` | `compile(options) -> Artifact`, `compile_file(path, options)` | public facade |
