@@ -9,7 +9,6 @@ local function S(span)
     if span == nil then return nil end
     return A.c.Span(span.file, span.line, span.start, span.finish)
 end
-M.spanFrom = S
 
 local function mergeSpan(a, b)
     if not a then return b end

@@ -41,13 +41,6 @@ function M.format(err)
     return string.format("%s [%s]%s %s", err.kind:upper(), err.code, where, err.message)
 end
 
--- Run a function, annotating any diagnostic with an enclosing span.
-function M.protect(span, fn, ...)
-    local results = table.pack(pcall(fn, ...))
-    if results[1] then return table.unpack(results, 2, results.n) end
-    error(M.at(results[2], span), 0)
-end
-
 M.status = function(err) return M.is(err) and err.status or KINDS.internal end
 
 return M

@@ -1,5 +1,8 @@
--- Values: concrete (u32/bool/unit/type/record), structural (schema/method) or residual (Ir.Expr,
--- a storage-backed object).
+-- Values: concrete (u32/bool/unit/type/record), structural (schema/method/namespace) or residual
+-- (a runtime expression, a storage-backed object, a callable). Not an ASDL sum, because many
+-- variants hold `Ir.Expr` pointers, live environments and references into the current activation,
+-- none of which should be interned; `tag` is the constructor name and is what every consumer
+-- reads (structure.md §3.1).
 local S = require("wordlet.schema")
 local D = require("wordlet.diag")
 local M = {}
@@ -29,8 +32,8 @@ function M.unit() return make{ tag = "unit", ty = S.Unit } end
 function M.type(ty) return make{ tag = "type", ty = S.Type, value = ty } end
 -- `place` is the place the value was read from, when there is one: a reference read from storage
 -- needs it to reach its target.
-function M.ir(expr, ty, borrowed, place)
-    return make{ tag = "ir", ty = ty, expr = expr, borrowed = borrowed, place = place }
+function M.runtime(expr, ty, borrowed, place)
+    return make{ tag = "runtime", ty = ty, expr = expr, borrowed = borrowed, place = place }
 end
 function M.results(values) return make{ tag = "results", values = values } end
 function M.word(def, args, span) return make{ tag = "word", def = def, args = args or {}, span = span } end
@@ -112,13 +115,12 @@ function M.callable(t, code) return make{ tag = "callable", ty = t, code = code 
 
 function M.is(v) return getmetatable(v) == V end
 function M.tag(v) return M.is(v) and v.tag or nil end
-function M.isIr(v) return M.is(v) and v.tag == "ir" end
 
 -- Fully concrete: every component is known, so a static invocation can be evaluated now.
 function M.isKnown(v)
     if not M.is(v) then return false end
     local tag = v.tag
-    if tag == "ir" or tag == "object" or tag == "schema" or tag == "callable"
+    if tag == "runtime" or tag == "object" or tag == "schema" or tag == "callable"
         or tag == "namespace" then
         return false
     end
@@ -256,7 +258,7 @@ function M.describe(v)
     if M.is(v) and v.tag == "float" then return string.format("%.17g", v.n) end
     if not M.is(v) then return tostring(v) end
     if v.tag == "type" then return "Type(" .. S.encode(v.value) .. ")" end
-    if v.tag == "ir" then return "residual<" .. S.encode(v.ty) .. ">#" .. tostring(v.expr.kind) end
+    if v.tag == "runtime" then return "residual<" .. S.encode(v.ty) .. ">#" .. tostring(v.expr.kind) end
     if v.tag == "object" then return "object<" .. S.encode(v.ty) .. ">" end
     if v.tag == "record" then return "record<" .. S.encode(v.ty) .. ">" end
     if v.tag == "string" then return string.format("string<%d bytes>", #v.bytes) end

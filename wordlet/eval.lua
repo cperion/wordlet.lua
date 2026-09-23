@@ -42,7 +42,7 @@ function become(value, ty, high, low)
     -- another operand's type, but `I32(2)` is already I32, so `I32(2) + 3` must let 3 adopt I32
     -- rather than treating both sides as literals and refusing to widen across signedness.
     value.literal = nil
-    if V.tag(value) == "ir" then
+    if V.tag(value) == "runtime" then
         value.ty = ty
         return value
     end
@@ -259,7 +259,7 @@ function Eval:load(program)
                 D.reject("runtime-in-normalization",
                     "A null pointer exists only in compiled code", span)
             end
-            return V.ir(ctx.builder:nullPtr(pointer), pointer)
+            return V.runtime(ctx.builder:nullPtr(pointer), pointer)
         end) })
     declare(top, "Ref", { kind = "word", name = "Ref", def = refBuiltin })
     -- `OneOf(cases)` builds a sum type; the cases are a keyed schema whose fields are the
@@ -363,7 +363,6 @@ function Eval:compile(program, loadedTop)
         compilation.modules.initialiser = self:moduleInitialiser(compilation.modules, program.span)
         compilation.functions[#compilation.functions + 1] = {
             name = "init", instance = compilation.modules.initialiser, span = program.span,
-            initialiser = true,
         }
     end
     return compilation
@@ -394,7 +393,7 @@ function Eval:moduleInitialiser(modules, span)
     end
     builder:emit(body, Ir.Return(S.list({})))
     local instance = { key = "module-init", def = nil, target = target, status = "done",
-        results = {}, inputTypes = {}, inputPlan = {}, fn = fn, initialiser = true }
+        results = {}, inputTypes = {}, inputPlan = {}, fn = fn }
     self.instances[instance.key] = instance
     self.order[#self.order + 1] = instance
     return instance
@@ -628,7 +627,7 @@ function Eval:fieldExpr(ctx, value, name)
     local ty = S.field(value.ty, name)
     -- A field of an unmaterialised record is a pure projection of its construction expression; once a
     -- demand clears that expression, and for a spilled SSA value, storage is read instead.
-    if value.expr then return V.ir(ctx.builder:get(value.expr, name, ty), ty) end
+    if value.expr then return V.runtime(ctx.builder:get(value.expr, name, ty), ty) end
     local place = Ir.Project(value.place, Ir.Field(name))
     local read = ctx.builder:read(ctx.body, ty, place)
     return ctx.builder:ref(read, ty)
@@ -729,7 +728,7 @@ function Eval:matchResidual(ctx, base, handlers, span)
         else
             local id = builder:valueId()
             builder:emit(arm, Ir.VariantPayload(id, variant, base.ty, name))
-            args = { V.ir(builder:ref(id, caseType), caseType) }
+            args = { V.runtime(builder:ref(id, caseType), caseType) }
         end
         -- A handler is a callable, so it may return a result vector; the match forwards it.
         local values = self:expand(self:supply(armCtx, handlers[name], args, span))
@@ -773,7 +772,7 @@ function Eval:matchResidual(ctx, base, handlers, span)
     builder:emit(ctx.body, Ir.Switch(variant, base.ty, S.list(cases)))
     local out = {}
     for index, ty in ipairs(resultTypes) do
-        out[index] = V.ir(builder:ref(builder:read(ctx.body, ty, places[index]), ty), ty)
+        out[index] = V.runtime(builder:ref(builder:read(ctx.body, ty, places[index]), ty), ty)
     end
     if #out == 1 then return out[1] end
     return V.results(out)
@@ -996,7 +995,7 @@ function Eval:evalPtr(ctx, expr)
     end
     local target = self:canonicalize(reached.ty)
     local pointer = S.ptr(target)
-    return V.ir(ctx.builder:addr(reached.place, pointer), pointer)
+    return V.runtime(ctx.builder:addr(reached.place, pointer), pointer)
 end
 
 function Eval:evalRef(ctx, expr)
@@ -1179,7 +1178,7 @@ function Eval:evalSlice(ctx, expr)
     local data = ctx.builder:addr(Ir.Index(container.place, ctx.builder:u32(0), ty.element),
         S.ref(ty.element))
     local view = ctx.builder:make(S.slice(ty.element), { data, ctx.builder:u32(ty.length) })
-    return V.ir(view, S.slice(ty.element), tied, container.place)
+    return V.runtime(view, S.slice(ty.element), tied, container.place)
 end
 
 -- The length of a slice value, when the compiler knows it.
@@ -1434,7 +1433,7 @@ function Eval:derefContainer(ctx, container, span)
         return { concrete = object.backing, value = object.backing, place = object.place,
             ty = object.ty, container = object }
     end
-    if held and held.ty and held.ty:isRef() and V.tag(held) == "ir" then
+    if held and held.ty and held.ty:isRef() and V.tag(held) == "runtime" then
         local target = self:pointeeType(held.ty)
         local place = ctx.residual and self:derefPlace(ctx, held, span) or nil
         return { place = place, ty = target, container = { retaining = true } }
@@ -1524,7 +1523,7 @@ function Eval:evalIndex(ctx, expr)
         D.reject("runtime-in-normalization", "Element is runtime storage", expr.span)
     end
     local read = ctx.builder:read(ctx.body, reached.ty, reached.place)
-    return V.ir(ctx.builder:ref(read, reached.ty), reached.ty, nil, reached.place)
+    return V.runtime(ctx.builder:ref(read, reached.ty), reached.ty, nil, reached.place)
 end
 
 -- Callable arms of a tagged callable -----------------------------------------------------------
@@ -1658,7 +1657,7 @@ function Eval:expression(ctx, value, want)
         end
         return self:makeView(ctx, value, want:isView() and want.visible or want)
     end
-    if tag == "ir" then
+    if tag == "runtime" then
         if value.cast then
             value.cast = nil
             value.expr = ctx.builder:convert(value.expr, value.ty)
@@ -1795,7 +1794,7 @@ function Eval:requireAgainst(value, ty, span)
         end
         return
     end
-    if ty:isView() and V.tag(value) == "ir" and value.ty == ty then return end
+    if ty:isView() and V.tag(value) == "runtime" and value.ty == ty then return end
     self:requireType(value, ty, span)
 end
 
@@ -1807,7 +1806,7 @@ function Eval:isBorrowed(value)
     -- A slice is a view of storage, so it is as tied to its activation as the place it views.
     if tag == "slice" then return value.tied == true end
     if tag == "array" then return value.borrowed == true end
-    if tag == "object" or tag == "record" or tag == "ir" then return value.borrowed == true end
+    if tag == "object" or tag == "record" or tag == "runtime" then return value.borrowed == true end
     if tag == "closure" then return #(value.plan.borrowedOrder or {}) > 0 end
     return false
 end
@@ -1842,7 +1841,7 @@ function Eval:convert(value, ty, span)
         end
         if from:isWide() then return nil end
         -- Every value of a 32-bit or narrower type is exactly a double.
-        if V.tag(value) == "ir" then
+        if V.tag(value) == "runtime" then
             value.cast = true
             value.ty = S.F64
             return value
@@ -1855,13 +1854,13 @@ function Eval:convert(value, ty, span)
     if S.widthOf(from) == S.widthOf(ty) then
         -- The same width with a different signedness: the bits are the value.
         if from:isSigned() == ty:isSigned() then return nil end
-        if V.tag(value) == "ir" then value.cast = true end
+        if V.tag(value) == "runtime" then value.cast = true end
         if V.isKnown(value) then return become(value, ty, wordsOf(value)) end
         return become(value, ty, 0, 0)
     end
     if fitsAlways(from, ty) then
         -- Nothing can be lost, so the conversion is applied where the value is materialised.
-        if V.tag(value) == "ir" then value.cast = true end
+        if V.tag(value) == "runtime" then value.cast = true end
         if V.isKnown(value) then return become(value, ty, wordsOf(value)) end
         return become(value, ty, 0, 0)
     end
@@ -1968,7 +1967,7 @@ function Eval:evalReference(ctx, expr)
             D.reject("runtime-in-normalization", "Parameter " .. slot.name .. " is runtime storage", expr.name.span)
         end
         local read = ctx.builder:read(ctx.body, slot.ty, Ir.Local(slot.storage))
-        return V.ir(ctx.builder:ref(read, slot.ty), slot.ty)
+        return V.runtime(ctx.builder:ref(read, slot.ty), slot.ty)
     end
     D.bug("binding", "Unknown binding kind " .. tostring(slot.kind))
 end
@@ -1993,11 +1992,11 @@ function Eval:readFieldValue(ctx, slot, span)
     -- A field of a record that still holds its construction expression is a pure projection; a
     -- record that demanded a place reads storage so a store is observed.
     if slot.record and slot.record.expr then
-        return V.ir(ctx.builder:get(slot.record.expr, slot.name, slot.ty), slot.ty)
+        return V.runtime(ctx.builder:get(slot.record.expr, slot.name, slot.ty), slot.ty)
     end
     local read = ctx.builder:read(ctx.body, slot.ty, slot.place)
     -- The place travels with the value: a reference read from storage needs it to reach its target.
-    return V.ir(ctx.builder:ref(read, slot.ty), slot.ty, nil, slot.place)
+    return V.runtime(ctx.builder:ref(read, slot.ty), slot.ty, nil, slot.place)
 end
 
 -- Arithmetic and comparison on IEEE-754 doubles. Both sides must be F64 once a literal has adopted the
@@ -2038,7 +2037,7 @@ function Eval:floatOp(ctx, op, left, right, leftSpan, rightSpan, span)
         return V.bool(result)
     end
     local ty = COMPARE[op] and S.Bool or S.F64
-    return V.ir(ctx.builder:bin(irOp, self:expression(ctx, left), self:expression(ctx, right), ty), ty)
+    return V.runtime(ctx.builder:bin(irOp, self:expression(ctx, left), self:expression(ctx, right), ty), ty)
 end
 
 function Eval:evalUnary(ctx, expr)
@@ -2047,7 +2046,7 @@ function Eval:evalUnary(ctx, expr)
     if op == "not" then
         self:requireType(value, S.Bool, expr.operand.span)
         if V.tag(value) == "bool" then return V.bool(not value.b) end
-        return V.ir(ctx.builder:un("Not", self:expression(ctx, value), S.Bool), S.Bool)
+        return V.runtime(ctx.builder:un("Not", self:expression(ctx, value), S.Bool), S.Bool)
     end
     if value.ty:isF64() then
         -- Only negation applies to a float; complement and shift are integer operations.
@@ -2056,7 +2055,7 @@ function Eval:evalUnary(ctx, expr)
                 expr.operand.span)
         end
         if V.isKnown(value) then return V.f64(-value.n) end
-        return V.ir(ctx.builder:un("Neg", self:expression(ctx, value), S.F64), S.F64)
+        return V.runtime(ctx.builder:un("Neg", self:expression(ctx, value), S.F64), S.F64)
     end
     if not value.ty:isInteger() then
         D.reject("type-mismatch", "Expected an integer but found " .. S.encode(value.ty), expr.operand.span)
@@ -2071,7 +2070,7 @@ function Eval:evalUnary(ctx, expr)
         local n = op == "-" and wrap(ty, -value.n) or wrap(ty, bit.bnot(value.n))
         return V.int(ty, n)
     end
-    return V.ir(ctx.builder:un(op == "-" and "Neg" or "BitNot", self:expression(ctx, value), ty), ty)
+    return V.runtime(ctx.builder:un(op == "-" and "Neg" or "BitNot", self:expression(ctx, value), ty), ty)
 end
 
 function Eval:evalBinary(ctx, expr)
@@ -2094,7 +2093,7 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
         if not ctx.residual then
             D.reject("runtime-in-normalization", "A pointer comparison needs runtime code", span)
         end
-        return V.ir(ctx.builder:bin(COMPARE[op], self:expression(ctx, left),
+        return V.runtime(ctx.builder:bin(COMPARE[op], self:expression(ctx, left),
             self:expression(ctx, right), S.Bool), S.Bool)
     end
     if left.ty:isF64() or right.ty:isF64() then
@@ -2110,7 +2109,7 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
         if not ctx.residual then
             D.reject("runtime-in-normalization", "A run-time string comparison needs runtime code", span)
         end
-        return V.ir(ctx.builder:bin(COMPARE[op], self:expression(ctx, left), self:expression(ctx, right),
+        return V.runtime(ctx.builder:bin(COMPARE[op], self:expression(ctx, left), self:expression(ctx, right),
             S.Bool), S.Bool)
     end
     if (op == "==" or op == "!=") and left.ty:isBool() and right.ty:isBool() then
@@ -2119,7 +2118,7 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
         if V.isKnown(left) and V.isKnown(right) then
             return V.bool((left.b == right.b) == (op == "=="))
         end
-        return V.ir(ctx.builder:bin(COMPARE[op], self:expression(ctx, left),
+        return V.runtime(ctx.builder:bin(COMPARE[op], self:expression(ctx, left),
             self:expression(ctx, right), S.Bool), S.Bool)
     end
     if (op == "==" or op == "!=") and left.ty:isUnit() and right.ty:isUnit() then
@@ -2161,7 +2160,7 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
             else result = a >= b end
             return V.bool(result)
         end
-        return V.ir(ctx.builder:bin(COMPARE[op], self:expression(ctx, left), self:expression(ctx, right), S.Bool),
+        return V.runtime(ctx.builder:bin(COMPARE[op], self:expression(ctx, left), self:expression(ctx, right), S.Bool),
             S.Bool)
     end
     local irOp = ARITH[op]
@@ -2264,7 +2263,7 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
     if (op == "/" or op == "%") and not V.isInteger(right) then
         builder:trap(ctx.body, builder:bin("Eq", rightExpr, builder:u32(0), S.Bool), "division-zero")
     end
-    return V.ir(builder:bin(irOp, leftExpr, rightExpr, ty), ty)
+    return V.runtime(builder:bin(irOp, leftExpr, rightExpr, ty), ty)
 end
 
 function Eval:evalShortCircuit(ctx, expr)
@@ -2289,7 +2288,7 @@ function Eval:evalShortCircuit(ctx, expr)
     builder:store(yesList, place, self:expression(yesCtx, yesValue))
     builder:store(noList, place, builder:bool(isOr))
     builder:emit(ctx.body, Ir.If(test, S.list(yesList), S.list(noList)))
-    return V.ir(builder:ref(builder:read(ctx.body, S.Bool, place), S.Bool), S.Bool)
+    return V.runtime(builder:ref(builder:read(ctx.body, S.Bool, place), S.Bool), S.Bool)
 end
 
 -- Evaluates an expression in an expected-signature position. Only a lambda (or a conditional
@@ -2365,7 +2364,7 @@ function Eval:evalCondition(ctx, expr, expected)
     if not yesTerminated then builder:store(yesList, place, self:expression(yesCtx, yesValue)) end
     if not noTerminated then builder:store(noList, place, self:expression(noCtx, noValue)) end
     builder:emit(ctx.body, Ir.If(testExpr, S.list(yesList), S.list(noList)))
-    return V.ir(builder:ref(builder:read(ctx.body, ty, place), ty), ty)
+    return V.runtime(builder:ref(builder:read(ctx.body, ty, place), ty), ty)
 end
 
 -- Schemas and records -------------------------------------------------------------------------
@@ -2456,7 +2455,7 @@ function Eval:evalSupply(ctx, expr)
         end
         return self:makeVariant(ctx, base, self:constructRecord(ctx, base.caseType, values, nil), expr.span)
     end
-    if V.tag(base) == "variant" or (V.tag(base) == "ir" and base.ty:isSum()) then
+    if V.tag(base) == "variant" or (V.tag(base) == "runtime" and base.ty:isSum()) then
         return self:evalMatch(ctx, base, expr, nil)
     end
     if V.tag(base) == "word" and base.def.keyed then
@@ -2548,7 +2547,7 @@ function Eval:evalFieldSelect(ctx, expr)
         if not ctx.residual then
             D.reject("runtime-in-normalization", "A runtime slice length needs runtime code", expr.span)
         end
-        return V.ir(ctx.builder:sliceLength(self:expression(ctx, base, base.ty), S.U32), S.U32)
+        return V.runtime(ctx.builder:sliceLength(self:expression(ctx, base, base.ty), S.U32), S.U32)
     end
     local tag = V.tag(base)
     if tag == "object" then
@@ -2577,7 +2576,7 @@ function Eval:evalFieldSelect(ctx, expr)
         local caseType = S.caseOf(base.value, name)
         if not caseType then D.reject("unknown-member", "Sum type has no alternative " .. name, expr.field.span) end
         return V.ctor(base.value, name, caseType)
-    elseif tag == "ir" and (base.ty:isRef() or base.ty:isPtr()) then
+    elseif tag == "runtime" and (base.ty:isRef() or base.ty:isPtr()) then
         -- A reference and a raw pointer reach the record they address the same way, so the field is
         -- the same projection one dereference on; only the lifetime rule differs, and a pointer has
         -- none to check.
@@ -2586,8 +2585,8 @@ function Eval:evalFieldSelect(ctx, expr)
         if not ty then D.reject("unknown-member", "Record has no field " .. name, expr.field.span) end
         local place = Ir.Project(self:derefPlace(ctx, base, expr.span), Ir.Field(name))
         local read = ctx.builder:read(ctx.body, ty, place)
-        return V.ir(ctx.builder:ref(read, ty), ty)
-    elseif tag == "ir" and base.ty:isRecord() then
+        return V.runtime(ctx.builder:ref(read, ty), ty)
+    elseif tag == "runtime" and base.ty:isRecord() then
         local ty = S.field(base.ty, name)
         if not ty then D.reject("unknown-member", "Record has no field " .. name, expr.field.span) end
         if not ctx.residual then
@@ -2598,9 +2597,9 @@ function Eval:evalFieldSelect(ctx, expr)
         if base.place then
             local place = Ir.Project(base.place, Ir.Field(name))
             local read = ctx.builder:read(ctx.body, ty, place)
-            return V.ir(ctx.builder:ref(read, ty), ty, nil, place)
+            return V.runtime(ctx.builder:ref(read, ty), ty, nil, place)
         end
-        return V.ir(ctx.builder:get(base.expr, name, ty), ty)
+        return V.runtime(ctx.builder:get(base.expr, name, ty), ty)
     end
     D.reject("member-required", "Cannot select from " .. S.encode(base.ty or S.Unit), expr.span)
 end
@@ -2630,7 +2629,7 @@ function Eval:execStore(ctx, stmt)
     local binary = COMPOUND[operator]
     if not binary then D.bug("operator", "Unknown assignment operator " .. tostring(operator)) end
     -- The target is evaluated once, the old value read once, then the RHS runs.
-    local old = self:readSlot(ctx, slot, place, stmt.target.span)
+    local old = self:readSlot(ctx, slot, stmt.target.span)
     local value = self:evalExpr(ctx, stmt.value)
     local combined = self:binaryOp(ctx, binary, old, value, stmt.target.span, stmt.value.span, stmt.span)
     return self:writeSlot(ctx, slot, place, combined)
@@ -2698,8 +2697,9 @@ function Eval:storeTarget(ctx, target)
             and true or false }, reached.place
 end
 
--- Either a residual IR place or a concrete interpreter field.
-function Eval:readSlot(ctx, slot, place, span)
+-- Either a residual IR place or a concrete interpreter field. The span is only consulted by the
+-- residual branch: a concrete read has no IR to reject.
+function Eval:readSlot(ctx, slot, span)
     if slot.kind == "concrete-field" then return slot.record.fields[slot.name] or V.unit() end
     if slot.kind == "concrete-index" then return slot.array.items[slot.index + 1] end
     return self:readFieldValue(ctx, slot, span)
@@ -2811,7 +2811,7 @@ end
 -- three former entry points (`applyOwned`, `applyView`, `applyTagged`) each had in front of them.
 function Eval:invokeRuntime(ctx, value, args, span)
     local tag, ty = V.tag(value), value.ty
-    if tag == "ir" and ty and ty:isOwned() then
+    if tag == "runtime" and ty and ty:isOwned() then
         local plan = self:planOf(ty, span)
         if #plan.borrowedOrder > 0 then
             D.bug("borrowed-callable-value",
@@ -2829,7 +2829,7 @@ function Eval:invokeRuntime(ctx, value, args, span)
         end
         return self:invokeClosure(ctx, plan, envExprs, args, span, nil)
     end
-    if tag == "ir" and ty and ty:isView() then
+    if tag == "runtime" and ty and ty:isView() then
         -- An opaque callable is invoked through its view: the environment pointer plus the argument
         -- list.
         if not ctx.residual then
@@ -2850,15 +2850,15 @@ function Eval:invokeRuntime(ctx, value, args, span)
         ctx.builder:emit(ctx.body, Ir.Indirect(S.list(results), value.expr, S.list(operands)))
         if #sig.results == 0 then return V.unit() end
         if #sig.results == 1 then
-            return V.ir(ctx.builder:ref(results[1], sig.results[1]), sig.results[1])
+            return V.runtime(ctx.builder:ref(results[1], sig.results[1]), sig.results[1])
         end
         local out = {}
         for index, resultTy in ipairs(sig.results) do
-            out[index] = V.ir(ctx.builder:ref(results[index], resultTy), resultTy)
+            out[index] = V.runtime(ctx.builder:ref(results[index], resultTy), resultTy)
         end
         return V.results(out)
     end
-    if (tag == "ir" or tag == "variant") and ty and ty:isTagged() then
+    if (tag == "runtime" or tag == "variant") and ty and ty:isTagged() then
         -- A call on a tagged callable: test the tag, then run that arm's code directly. Every arm
         -- shares the one visible signature, so the results join through a slot per result.
         if not ctx.residual then
@@ -2908,7 +2908,7 @@ function Eval:invokeRuntime(ctx, value, args, span)
         local out = {}
         for index, resultTy in ipairs(results) do
             local place = Ir.Local(slots[index])
-            out[index] = V.ir(builder:ref(builder:read(ctx.body, resultTy, place), resultTy), resultTy)
+            out[index] = V.runtime(builder:ref(builder:read(ctx.body, resultTy, place), resultTy), resultTy)
         end
         if #out == 0 then return V.unit() end
         if #out == 1 then return out[1] end
@@ -2973,7 +2973,7 @@ function Eval:captureValue(ctx, name, span)
         -- Reading a field captures its value; the field path must not be flattened to the root.
         local place = slot.kind == "field" and slot.place or Ir.Local(slot.storage)
         local read = ctx.builder:read(ctx.body, slot.ty, place)
-        return V.ir(ctx.builder:ref(read, slot.ty), slot.ty)
+        return V.runtime(ctx.builder:ref(read, slot.ty), slot.ty)
     elseif slot.kind == "word" then
         return V.word(slot.def, {}, span)
     end
@@ -3184,7 +3184,7 @@ function Eval:emitCallableCall(ctx, instance, envArgs, args, span)
     builder:emit(ctx.body, Ir.Call(S.list(results), instance.target, S.list(operands)))
     local ir = {}
     for index, ty in ipairs(runtime) do
-        ir[index] = V.ir(builder:ref(results[index], ty), ty)
+        ir[index] = V.runtime(builder:ref(results[index], ty), ty)
     end
     local out = self:logicalResults(instance.results, ir)
     if #out == 0 then return V.unit() end
@@ -3243,7 +3243,7 @@ function Eval:constructCallableInstance(key, callable, args, span)
         inputs[#inputs + 1] = S.inValue(ty)
         paramTypes[#paramTypes + 1] = ty
         instance.inputTypes[#instance.inputTypes + 1] = ty
-        declare(sc, name, { kind = "value", name = name, value = V.ir(builder:ref(value, ty), ty) }, span)
+        declare(sc, name, { kind = "value", name = name, value = V.runtime(builder:ref(value, ty), ty) }, span)
     end
     for _, name in ipairs(plan.borrowedOrder) do
         local borrowed = plan.borrowed[name]
@@ -3298,9 +3298,9 @@ function Eval:constructCallableInstance(key, callable, args, span)
                 -- A method borrows its receiver, so it is non-retaining for the same reason a
                 -- borrowing closure is: the parameter takes a view.
                 ty = S.view(ty)
-            elseif supplied ~= nil and V.tag(supplied) == "ir" and supplied.ty:isOwned() then
+            elseif supplied ~= nil and V.tag(supplied) == "runtime" and supplied.ty:isOwned() then
                 ty = supplied.ty
-            elseif supplied ~= nil and V.tag(supplied) == "ir" and supplied.ty:isView() then
+            elseif supplied ~= nil and V.tag(supplied) == "runtime" and supplied.ty:isView() then
                 ty = supplied.ty
             elseif supplied == nil then
                 -- An entry face with no call site: the callable arrives from outside, so it needs
@@ -3337,7 +3337,7 @@ function Eval:constructCallableInstance(key, callable, args, span)
                         param.span)
                 else
                     declare(sc, param.name.text, { kind = "value", name = param.name.text,
-                        value = V.ir(builder:ref(value, ty), ty) }, param.span)
+                        value = V.runtime(builder:ref(value, ty), ty) }, param.span)
                 end
             end
         end
@@ -3660,10 +3660,10 @@ function Eval:evalArguments(ctx, exprs, callee)
     for index, expr in ipairs(exprs) do
         local param = sc and def.params[index] or nil
         if param and param.isType then
-            -- A builtin parameter that names a type is resolved on the type path, which is the path that
-            -- hands back the cell an open definition reserved instead of demanding its layout. Without
-            -- this, `Array(Node, 2)` inside Node's own definition was refused as an eager initializer
-            -- cycle before the cycle checker could say what was actually wrong.
+            -- A builtin parameter that names a type is resolved on the type path, which is the path
+            -- that hands back the cell an open definition reserved instead of demanding its layout.
+            -- That is what lets `Array(Node, 2)` inside Node's own definition reach the cycle checker
+            -- rather than being refused as an eager initializer.
             local held = V.type(self:typeOf(expr, sc, expr.span))
             values[#values + 1] = held
             if param.name and param.name.text then
@@ -3711,7 +3711,7 @@ function Eval:roundToFloat(ctx, value, span)
         if from:isWide() then return V.f64(U64Kernel.tofloat(high, low)) end
         return V.f64(value.n)
     end
-    return V.ir(ctx.builder:convert(self:expression(ctx, value), S.F64), S.F64)
+    return V.runtime(ctx.builder:convert(self:expression(ctx, value), S.F64), S.F64)
 end
 
 -- A float becomes an integer by truncation toward zero. A value the target cannot hold rejects when it
@@ -3736,7 +3736,7 @@ function Eval:truncateToInt(ctx, ty, value, span)
         "numeric-range"))
     builder:emit(ctx.body, Ir.Trap(builder:bin("Ge", expr, builder:float(S.F64, maxDouble), S.Bool),
         "numeric-range"))
-    return V.ir(builder:convert(expr, ty), ty)
+    return V.runtime(builder:convert(expr, ty), ty)
 end
 
 -- `F64(x)` rounds an integer to the nearest double, and `U32(f)` truncates a float toward zero with
@@ -3764,7 +3764,7 @@ function Eval:applyConversion(ctx, ty, args, span)
     if reinterprets then
         -- The same width read the other way keeps every bit, so nothing is checked.
         if V.isKnown(value) then return become(value, ty, wordsOf(value)) end
-        return V.ir(ctx.builder:convert(self:expression(ctx, value), ty), ty)
+        return V.runtime(ctx.builder:convert(self:expression(ctx, value), ty), ty)
     end
     -- A known value has already returned above, so a narrowing that reaches here is a run-time one:
     -- it is refused when it is converted, not at the assignment. A bound only needs a check when the
@@ -3785,7 +3785,7 @@ function Eval:applyConversion(ctx, ty, args, span)
         ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Gt", expr,
             self:constInt(ctx, value.ty, maxHigh, maxLow), S.Bool), "numeric-range"))
     end
-    return V.ir(ctx.builder:convert(expr, ty), ty)
+    return V.runtime(ctx.builder:convert(expr, ty), ty)
 end
 
 -- An integer constant of a type, which a 64-bit one holds as its two words.
@@ -4175,7 +4175,7 @@ function Eval:emitCall(ctx, instance, values, span, receiver)
     builder:emit(ctx.body, Ir.Call(S.list(results), instance.target, S.list(args)))
     local ir = {}
     for index, ty in ipairs(runtime) do
-        ir[index] = V.ir(builder:ref(results[index], ty), ty)
+        ir[index] = V.runtime(builder:ref(results[index], ty), ty)
     end
     local out = self:logicalResults(instance.results, ir)
     if #out == 0 then return V.unit() end
@@ -4316,9 +4316,9 @@ function Eval:constructInstance(key, def, values, span, receiver)
                 -- A method borrows its receiver, so it is non-retaining for the same reason a
                 -- borrowing closure is: the parameter takes a view.
                 ty = S.view(ty)
-            elseif supplied ~= nil and V.tag(supplied) == "ir" and supplied.ty:isOwned() then
+            elseif supplied ~= nil and V.tag(supplied) == "runtime" and supplied.ty:isOwned() then
                 ty = supplied.ty
-            elseif supplied ~= nil and V.tag(supplied) == "ir" and supplied.ty:isView() then
+            elseif supplied ~= nil and V.tag(supplied) == "runtime" and supplied.ty:isView() then
                 ty = supplied.ty
             elseif supplied == nil then
                 -- An entry face with no call site: the callable arrives from outside, so it needs
@@ -4347,9 +4347,10 @@ function Eval:constructInstance(key, def, values, span, receiver)
         end
         do
         local supplied = values[index]
-        -- A supplied argument is checked against the requirement here whichever branch binds it. The
-        -- static branch below already did; a run-time argument used to reach the IR checker unchecked,
-        -- where a wrong type was reported as a compiler bug instead of a source error.
+        -- A supplied argument is checked against the requirement whichever branch binds it. The
+        -- static branch below checks the type as well; without this line a run-time argument would
+        -- reach the IR checker unchecked, where a wrong type is a compiler bug instead of a source
+        -- error.
         if supplied ~= nil then self:requireAgainst(supplied, ty, param.span) end
         if supplied ~= nil and V.isStatic(supplied) then
             self:requireType(supplied, ty, param.span)
@@ -4397,10 +4398,10 @@ function Eval:constructInstance(key, def, values, span, receiver)
                 instance.loopHeader = instance.loopHeader or {}
                 instance.loopHeader[#instance.loopHeader + 1] = Ir.Read(read, ty, Ir.Local(storage))
                 declare(sc, param.name.text, { kind = "value", name = param.name.text,
-                    value = V.ir(builder:ref(read, ty), ty) }, param.span)
+                    value = V.runtime(builder:ref(read, ty), ty) }, param.span)
             else
                 declare(sc, param.name.text, { kind = "value", name = param.name.text,
-                    value = V.ir(builder:ref(value, ty), ty) }, param.span)
+                    value = V.runtime(builder:ref(value, ty), ty) }, param.span)
             end
         end
         end

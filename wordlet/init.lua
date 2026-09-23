@@ -11,7 +11,7 @@ local V = require("wordlet.value")
 
 local M = {}
 
--- options: name, limits, session
+-- options: name, limits
 function M.compile(options)
     local options = options or {}
     if type(options.source) ~= "string" then
@@ -28,11 +28,7 @@ function M.compile(options)
                 .. decl.path .. "` can be resolved next to it", decl.span)
         end
     end
-    local session = options.session or Eval.new(options)
-    if options.session and options.session.instances then
-        -- A fresh session per compilation is the supported entry point.
-        D.bug("compile-session", "Reuse of an existing session is not supported yet")
-    end
+    local session = Eval.new(options)
     local compilation = session:compile(program)
     local functions = {}
     for _, instance in ipairs(session.order) do functions[#functions + 1] = instance.fn end

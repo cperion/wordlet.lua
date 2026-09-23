@@ -298,7 +298,7 @@ function M.close(compilation)
     end
 
     local signatures = {}
-    local function signature(fn, cName, hidden)
+    local function signature(fn, cName)
         local params, placeParams = {}, {}
         for _, param in ipairs(fn.params) do
             if param.kind == "ValueParam" then
@@ -316,7 +316,7 @@ function M.close(compilation)
             end
         end
         return { fn = fn, name = cName, params = params, placeParams = placeParams,
-            results = resultLayout(fn.results), hidden = hidden or 0 }
+            results = resultLayout(fn.results) }
     end
 
     for _, instance in ipairs(order) do
