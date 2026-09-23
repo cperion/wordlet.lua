@@ -396,7 +396,7 @@ end
 -- before any exported function; it is never called implicitly.
 function Eval:moduleInitialiser(modules, span)
     local target = "wordletinit"
-    local builder = IR.builder({ id = target })
+    local builder = IR.builder()
     local body = {}
     local fn = { id = target, role = Ir.Body, hidden = 0, inputs = {}, params = {}, results = {},
         body = body }
@@ -3243,7 +3243,7 @@ function Eval:buildCallableInstance(key, callable, args, span)
     self.order[#self.order + 1] = instance
 
     local body, setup = {}, {}
-    local builder = IR.builder({ id = instance.target })
+    local builder = IR.builder()
     local sc = scope(plan.def.lexical)
     local params, paramTypes, inputs = {}, {}, {}
 
@@ -3987,11 +3987,9 @@ function Eval:apply(ctx, word, args, span)
         -- the rejection is the signal to compile it; normalize code has no runtime code to fall
         -- back to, so for it the same rejection is the answer.
         if ctx.mode == "residual" then
-            -- The attempt may have nested other folds, so the depth is restored either way before
-            -- the call is compiled instead.
-            local savedDepth = self.staticDepth
+            -- Folding is an optimization here, so a failed fold is compiled instead. The depth the
+            -- attempt used is restored by `applyStatically` itself, whatever the attempt did.
             local ok, value = pcall(self.applyStatically, self, def, bound, span, nil)
-            self.staticDepth = savedDepth
             if ok then return value end
             if not (D.is(value) and (value.code == "runtime-in-normalization"
                 or value.code == "static-depth" or value.code == "foreign-effect")) then
@@ -4079,9 +4077,7 @@ function Eval:applyMethod(ctx, method, args, span)
         -- A method body that needs runtime storage is compiled rather than folded, for the same
         -- reason a word call is.
         if ctx.mode == "residual" then
-            local savedDepth = self.staticDepth
             local ok, value = pcall(self.applyStatically, self, def, bound, span, receiver)
-            self.staticDepth = savedDepth
             if ok then return value end
             if not (D.is(value) and (value.code == "runtime-in-normalization"
                 or value.code == "static-depth" or value.code == "foreign-effect")) then
@@ -4141,8 +4137,18 @@ function Eval:copyArgument(value)
     return V.record(value.ty, fields, value.schema)
 end
 
+-- Static folding is a budget, so the depth is restored however the attempt ends. A fold reached
+-- through a probe that swallows a diagnostic must not leave the session believing it is deeper than
+-- it is, and one place owning that restore is what lets the residual fold sites stay plain pcalls.
 function Eval:applyStatically(def, values, span, receiver)
     self:enterStatic(def, span)
+    local ok, result = pcall(self.evaluateStatically, self, def, values, span, receiver)
+    self:leaveStatic()
+    if not ok then error(result, 0) end
+    return result
+end
+
+function Eval:evaluateStatically(def, values, span, receiver)
     local sc = self:parameterScope(def, values, receiver)
     local declared, requirements = self:declaredResult(def, sc, span)
     local ctx = self:context("normalize", sc, span)
@@ -4163,7 +4169,6 @@ function Eval:applyStatically(def, values, span, receiver)
             self:requireResultSignature(actual, requirement, span)
         end
     end
-    self:leaveStatic()
     if #result == 0 then return V.unit() end
     if #result == 1 then return result[1] end
     return V.results(result)
@@ -4298,7 +4303,7 @@ function Eval:buildInstance(key, def, values, span, receiver)
     self.order[#self.order + 1] = instance
 
     local body, setup = {}, {}
-    local builder = IR.builder({ id = instance.target })
+    local builder = IR.builder()
     local sc = scope(def.lexical)
     local params, paramTypes, inputs = {}, {}, {}
 

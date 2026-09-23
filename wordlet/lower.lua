@@ -1121,7 +1121,6 @@ local function usedStorages(fn)
         elseif kind == "Bin" then expr(value.left) expr(value.right)
         elseif kind == "Get" then expr(value.aggregate)
         elseif kind == "Make" then for _, field in ipairs(value.fields) do expr(field) end
-        elseif kind == "Owned" then expr(value.environment)
         elseif kind == "Convert" then expr(value.operand)
         elseif kind == "Addr" then place(value.place)
         elseif kind == "SliceLength" then expr(value.view)
@@ -1179,7 +1178,6 @@ local function usedValues(fn)
         elseif kind == "Bin" then expr(value.left) expr(value.right)
         elseif kind == "Get" then expr(value.aggregate)
         elseif kind == "Make" then for _, field in ipairs(value.fields) do expr(field) end
-        elseif kind == "Owned" then expr(value.environment)
         elseif kind == "Convert" then expr(value.operand)
         elseif kind == "Addr" then place(value.place)
         elseif kind == "SliceLength" then expr(value.view)
@@ -1566,13 +1564,13 @@ function M.bodies(layouts)
         emitter:raw(M.signatureText(layouts, signature) .. " {")
         emitter:statements(instance.fn.body)
         -- A residual base case keeps the full ABI, so a parameter it never reads still appears in
-        -- the signature. Mark such a parameter used for `-Wunused-parameter`.
-        local referenced = {}
-        for index = 2, #emitter.lines do
-            for name in emitter.lines[index]:gmatch("[%a_][%w_]*") do referenced[name] = true end
-        end
+        -- the signature. Whether the body names it is a fact of the IR, not of the emitted text: a
+        -- value parameter is named by a `Ref`, a place parameter by a `Local` place, and those are
+        -- exactly the sets the emitter already consulted.
         for _, param in ipairs(signature.params) do
-            if param.name and not referenced[param.name] then emitter:line("(void)" .. param.name .. ";") end
+            local used
+            if param.pointer then used = storages[param.binding] else used = values[param.binding] end
+            if param.name and not used then emitter:line("(void)" .. param.name .. ";") end
         end
         emitter:raw("}")
         lines[#lines + 1] = table.concat(emitter.lines, "\n")

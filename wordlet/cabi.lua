@@ -302,12 +302,14 @@ function M.close(compilation)
         local params, placeParams = {}, {}
         for _, param in ipairs(fn.params) do
             if param.kind == "ValueParam" then
-                -- The C parameter is named after the SSA value so Ref() lowers directly.
-                params[#params + 1] = { name = "v" .. param.binding.id, type = param.type, input = param.input }
+                -- The C parameter is named after the SSA value so Ref() lowers directly, and the
+                -- binding it names is recorded so the emitter can ask the IR whether the body uses it.
+                params[#params + 1] = { name = "v" .. param.binding.id, type = param.type,
+                    input = param.input, binding = param.binding.id }
             elseif param.kind == "PlaceParam" then
                 -- A borrowed receiver is a pointer; its storage id names the pointed-to object.
                 params[#params + 1] = { name = "s" .. param.binding.id, type = param.type,
-                    input = param.input, pointer = true }
+                    input = param.input, pointer = true, binding = param.binding.id }
                 placeParams[param.binding.id] = true
             else
                 D.todo("c-input", "Only by-value and borrowed inputs have a C representation yet")

@@ -458,7 +458,6 @@ function M.place(place, storages, locals)
         if not ty then D.bug("ir-place", "Place refers to undeclared storage " .. place.storage.id) end
         return ty
     end
-    if kind == "Captured" then return nil end
     if kind == "Project" then
         local base = M.place(place.base, storages, locals)
         if base == nil then return nil end

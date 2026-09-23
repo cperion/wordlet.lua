@@ -226,7 +226,7 @@ function M.hasNamed(t, seen)
     if M.isRef(t) or M.isPtr(t) then return M.hasNamed(t.target, seen) end
     if M.isSlice(t) then return M.hasNamed(t.element, seen) end
     if M.isArray(t) then return M.hasNamed(t.element, seen) end
-    if M.isRecord(t) or M.isTuple(t) then
+    if M.isRecord(t) then
         for _, field in ipairs(t.fields) do
             if M.hasNamed(field.type, seen) then return true end
         end
