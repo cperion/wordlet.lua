@@ -1361,6 +1361,20 @@ check(interpret("shift", { 4294967295 }, SIGNED)[1] == 4294967295,
 check(interpret("reinterpret", { 4294967295 }, SIGNED)[1] == 4294967295,
     "changing signedness at one width reinterprets the bits")
 check(interpret("negate", { 1 }, SIGNED)[1] == 4294967295, "negation wraps in two's complement")
+-- An explicit conversion produces a value of the target type, not a source literal: `I32(2)` is
+-- already I32, so `I32(2) + 3` lets 3 adopt I32 instead of treating both sides as literals and
+-- refusing to cross signedness.
+local CONVERTED = [==[
+let add(n: U32): I32 = I32(n) + 3
+let add_left(n: U32): I32 = 3 + I32(n)
+let power(n: U32): I32 = I32(n) ^ 31
+return { types = {  }, functions = { add, add_left, power } }
+]==]
+check(interpret("add", { 2 }, CONVERTED)[1] == 5, "a converted operand is not a literal")
+check(interpret("add_left", { 2 }, CONVERTED)[1] == 5, "adoption works with the literal on the left")
+check(interpret("power", { 2 }, CONVERTED)[1] == -2147483648,
+    "a signed power wraps at 32 bits instead of overflowing a Lua number")
+compile(CONVERTED)
 local signedUnit = compile(SIGNED):unit()
 check(signedUnit:find("int32_t", 1, true) ~= nil, "I32 lowers to its C type")
 check(signedUnit:find("wordlet_i32", 1, true) ~= nil,
@@ -1572,6 +1586,18 @@ do
     rejects("type-cycle", "let Bad = Array(Bad, 2)\nreturn { functions = { } }")
     rejects("type-cycle", "let A = { b: Array(B, 2) }\nlet B = { a: Array(A, 2) }\n"
         .. "return { functions = { } }")
+    -- An alias of a type constructor is a constructor too, so the recursion knot is still found.
+    check(compile("let MyRef = Ref\nlet Node = { value: U32, next: MyRef(Node) }\n"
+        .. "return { functions = { } }") ~= nil,
+        "an alias of Ref still recognises a recursive type")
+    -- A bare reference or pointer is not a nominal type: it has no record or sum anchoring a finite
+    -- C alias, so it is a cycle rather than a stack overflow.
+    rejects("type-cycle", "let Bad = Ref(Bad)\nreturn { functions = { } }")
+    rejects("type-cycle", "let Bad = Ptr(Bad)\nreturn { functions = { } }")
+    rejects("type-cycle", "let A = Ref(B)\nlet B = Ref(A)\nreturn { functions = { } }")
+    -- A slice is a nominal layout that names its element through a pointer, so it is finite.
+    check(compile("let Bad = Slice(Bad)\nlet f(b: Bad): U32 = 0\nreturn { functions = { f } }")
+        ~= nil, "a self-referential slice has a finite layout")
     -- A type declared later is not a cycle, and an indirection inside the array is a boundary.
     check(compile("let Good = { items: Array(Node, 2) }\nlet Node = { value: U32 }\n"
         .. "return { functions = { } }") ~= nil,

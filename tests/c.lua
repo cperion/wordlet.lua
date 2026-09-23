@@ -694,7 +694,12 @@ let negate(n: U32): U32 = do
   let a: I32 = I32(n)
   return U32(-a)
 end
-return { types = {  }, functions = { round, quotient, shift, bits, negate } }
+-- A converted operand is already I32, so 3 adopts I32 rather than the two sides being read as two
+-- literals that cannot be widened across signedness, and a signed power stays exact at 32 bits.
+let add_lit(n: U32): I32 = I32(n) + 3
+let add_left(n: U32): I32 = 3 + I32(n)
+let power(n: U32): I32 = I32(n) ^ 31
+return { types = {  }, functions = { round, quotient, shift, bits, negate, add_lit, add_left, power } }
 ]==],
         entries = {
             { entry = "round", arity = 1, inputs = { { 0 }, { 5 }, { 4294967295 } } },
@@ -702,6 +707,9 @@ return { types = {  }, functions = { round, quotient, shift, bits, negate } }
             { entry = "shift", arity = 1, inputs = { { 0 }, { 1 }, { 4294967295 }, { 2147483648 } } },
             { entry = "bits", arity = 1, inputs = { { 0 }, { 130 }, { 4294967295 } } },
             { entry = "negate", arity = 1, inputs = { { 0 }, { 1 }, { 2147483648 } } },
+            { entry = "add_lit", arity = 1, inputs = { { 0 }, { 2 }, { 4294967295 } } },
+            { entry = "add_left", arity = 1, inputs = { { 0 }, { 2 }, { 4294967295 } } },
+            { entry = "power", arity = 1, inputs = { { 0 }, { 1 }, { 2 }, { 3 } } },
         },
     },
     {
@@ -1101,6 +1109,37 @@ do
         "shared-expression C produced the wrong value")
 end
 
+-- Each aggregate is named once: a forward `typedef struct X X;` and then a plain `struct X {...};`.
+-- That is valid C99 as well as C11, so a program exercising every aggregate shape must compile under
+-- `-std=c99 -pedantic` without a repeated-typedef warning. The program has no recursion, so the
+-- forced-inlining attribute is never asked to inline a recursive function.
+do
+    local source = table.concat({
+        "let Point = { x: U32, y: U32 }",
+        "let Shape = OneOf { dot: Point, empty: Unit }",
+        "let area(s: Shape): U32 = s {",
+        "  dot = |p: Point| -> p.x * p.y,",
+        "  empty = |u: Unit| -> 0,",
+        "}",
+        "let first(a: Array(U32, 3)): U32 = a[0]",
+        "let at(s: Slice(U32), i: U32): U32 = s[i]",
+        "let apply(f: (U32): U32, x: U32): U32 = f(x)",
+        "let pair(a: U32, b: U32): (U32, U32) = do return a, b end",
+        "let inc(x: U32): U32 = x + 1",
+        "let dec(x: U32): U32 = x - 1",
+        "let choose(c: Bool, x: U32): U32 = (if c then inc else dec)(x)",
+        "return { types = { Point, Shape }, functions = { area, first, at, apply, pair, choose } }",
+    }, "\n")
+    local generated = wordlet.compile{ source = source, name = "c99.let" }:unit()
+    check(not generated:find("typedef struct [%w_]+ {"),
+        "a struct body must not repeat the typedef that already declared its tag")
+    local path = directory .. "/c99.c"
+    write(path, generated)
+    check(shell("timeout --kill-after=2s 30s " .. CC .. " -std=c99 -pedantic -Wall -Wextra -Werror"
+        .. " -O2 -c -o /dev/null '" .. path .. "' 2> " .. directory .. "/c99err.txt") == 0,
+        "emitted C is not C99-pedantic clean:\n" .. read(directory .. "/c99err.txt"))
+end
+
 -- A self-tail call must not consume C stack. Without the loop rewrite this overflows; with it,
 -- the call is a back edge and the depth is constant. This runs only in C because the reference
 -- interpreter would recurse in Lua.
@@ -1137,6 +1176,7 @@ do
     write(path, generated .. [[
 
 #include <assert.h>
+#include <stddef.h>
 static uint32_t plus1(const void *e, uint32_t x) { (void)e; return x + 1u; }
 static uint32_t times3(const void *e, uint32_t x) { (void)e; return x * 3u; }
 static uint32_t seen = 0;
@@ -1348,6 +1388,7 @@ return { types = { C }, functions = { mk, pure, run } }
     write(path, generated .. [[
 
 #include <assert.h>
+#include <stddef.h>
 int main(void) {
     wordletview_1 f = wordlet_mk();
     assert(f.environment == NULL);
@@ -1569,6 +1610,7 @@ return { functions = { sum, missing, present, at, set, total, raised, chain, not
     write(path, generated .. ([[
 
 #include <assert.h>
+#include <stddef.h>
 #include <string.h>
 static unsigned char arena[16];
 static unsigned char slot[64];
@@ -1848,6 +1890,125 @@ int main(void) {
         "conversion C failed to compile:\n" .. read(directory .. "/narrowErr.txt"))
     check(shell("timeout --kill-after=2s 10s '" .. exe .. "' 2> " .. directory
         .. "/narrowRun.txt") ~= 0, "a run-time conversion that does not fit must abort")
+end
+
+-- Bool and Unit equality are documented (syntax.md section 7) and used to reject. Bool compares by
+-- value; Unit has one value, so its answer is known. Ordering is still not offered for either.
+do
+    local source = "let bool_eq(a: Bool, b: Bool): Bool = a == b\n"
+        .. "let bool_ne(a: Bool, b: Bool): Bool = a != b\n"
+        .. "let unit_eq(): Bool = Unit() == Unit()\n"
+        .. "let unit_ne(): Bool = Unit() != Unit()\n"
+        .. "let use(a: Bool, b: Bool): U32 = do\n"
+        .. "  if bool_eq(a, b) then return 1 end\n"
+        .. "  if bool_ne(a, b) then return 2 end\n"
+        .. "  return 3\nend\n"
+        .. "return { functions = { use, unit_eq, unit_ne } }"
+    local generated = wordlet.compile{ source = source, name = "boolunit.let" }:unit()
+    local path = directory .. "/boolunit.c"
+    write(path, generated .. [[
+
+#include <assert.h>
+int main(void) {
+    assert(wordlet_use(true, true) == UINT32_C(1));
+    assert(wordlet_use(true, false) == UINT32_C(2));
+    assert(wordlet_use(false, false) == UINT32_C(1));
+    assert(wordlet_unit_5Feq() == true);
+    assert(wordlet_unit_5Fne() == false);
+    return 0;
+}
+]])
+    local exe = directory .. "/boolunit"
+    check(shell("timeout --kill-after=2s 30s " .. CC .. " -std=c11 -Wall -Wextra -Werror -O2 -o '"
+        .. exe .. "' '" .. path .. "' 2> " .. directory .. "/buerror.txt") == 0,
+        "Bool/Unit equality C failed to compile:\n" .. read(directory .. "/buerror.txt"))
+    check(shell("timeout --kill-after=2s 10s '" .. exe .. "'") == 0,
+        "Bool/Unit equality produced the wrong value")
+    local ok, err = pcall(function()
+        return wordlet.compile{ source = "let f(a: Bool, b: Bool): Bool = a < b\n"
+            .. "return { functions = { f } }", name = "boolorder.let" }
+    end)
+    check(not ok and D.is(err) and err.code == "type-mismatch", "ordering Bool is still rejected")
+end
+
+-- A non-tail self-call leaves a genuinely recursive function, which GCC refuses to force-inline.
+-- The function keeps plain `static` linkage so the program compiles under -Werror and still runs.
+do
+    local source = "let sum_from(n: U32): U32 = do\n"
+        .. "  if n == 0 then return 0 end\n"
+        .. "  let rest = sum_from(n - 1)\n"
+        .. "  return n + rest\nend\n"
+        .. "let sum(n: U32): U32 = sum_from(n)\n"
+        .. "return { functions = { sum } }"
+    local generated = wordlet.compile{ source = source, name = "recur.let" }:unit()
+    check(generated:find("static uint32_t wordletfn_", 1, true) ~= nil,
+        "a non-tail self-recursive private function must not be force-inlined")
+    local path = directory .. "/recur.c"
+    write(path, generated .. "\n#include <assert.h>\n"
+        .. "int main(void) { assert(wordlet_sum(UINT32_C(10)) == UINT32_C(55)); return 0; }\n")
+    local exe = directory .. "/recur"
+    check(shell("timeout --kill-after=2s 30s " .. CC .. " -std=c11 -Wall -Wextra -Werror -O2 -o '"
+        .. exe .. "' '" .. path .. "' 2> " .. directory .. "/recurerr.txt") == 0,
+        "non-tail self-recursion C failed to compile:\n" .. read(directory .. "/recurerr.txt"))
+    check(shell("timeout --kill-after=2s 10s '" .. exe .. "'") == 0,
+        "a non-tail self-recursive function did not run correctly")
+end
+
+-- A definition used once is lowered at its use: no `(void)` cast, a returned call inlined, and a
+-- record conditional stores its construction instead of reading each field back and rebuilding it.
+do
+    local source = "let inc(x: U32): U32 = x + 1\n"
+        .. "let use(x: U32): U32 = inc(x)\n"
+        .. "let Point = { x: U32, y: U32 }\n"
+        .. "let make(c: Bool, x: U32): Point = if c then Point { x = x, y = 0 } else Point { x = 0, y = x }\n"
+        .. "return { types = { Point }, functions = { use, make } }"
+    local generated = wordlet.compile{ source = source, name = "clean.let" }:unit()
+    check(not generated:find("(void)", 1, true), "a used call result must not need a `(void)` cast")
+    check(generated:find("return wordletfn_", 1, true) ~= nil,
+        "a call returned immediately must inline into the return")
+    check(not generated:find("%u+32_t v%d+ = s%d+%.f_"),
+        "a record arm must store its construction, not read its fields back")
+end
+
+-- An array is materialised on demand too: a read-only by-value parameter reads the C parameter
+-- directly, a nested literal builds one Make instead of spilling and copying each inner array, and a
+-- conditional whose arms agree on one known value needs neither a join slot nor an `If`.
+do
+    local source = "let sum2(a: Array(U32, 2)): U32 = a[0] + a[1]\n"
+        .. "let agree(c: Bool): U32 = if c then 7 else 7\n"
+        .. "let nested(): U32 = do\n  let a = [1, 2]\n  let c = [a, a]\n"
+        .. "  return c[0][0] + c[1][1]\nend\n"
+        .. "return { functions = { sum2, agree, nested } }"
+    local generated = wordlet.compile{ source = source, name = "arraysclean.let" }:unit()
+    check(not generated:find("wordletarray_1 s%d+ = v1;"),
+        "a read-only array parameter must not copy the parameter")
+    check(generated:find("v1.f_data[UINT32_C(0)]", 1, true) ~= nil,
+        "a read-only array parameter indexes the parameter directly")
+    check(generated:find("wordlet_agree(bool v1) {\n    return UINT32_C(7);", 1, true) ~= nil,
+        "a conditional whose arms agree folds to the value")
+    check(not generated:find("wordletarray_1 v%d+ = s%d+;"),
+        "a nested array literal must not copy an inner array out of storage")
+end
+
+-- A captured local array is a mutable instance, so the closure borrows it as a place rather than
+-- taking a by-value copy. A mutation through the closure is therefore visible afterward.
+do
+    local source = "let f(): U32 = do\n  let a = [1, 2, 3]\n"
+        .. "  let g = |i: U32| -> do a[i] = 9 return a[i] end\n"
+        .. "  let x = g(0)\n  return x * 100 + a[0]\nend\n"
+        .. "return { functions = { f } }"
+    local generated = wordlet.compile{ source = source, name = "borrowarray.let" }:unit()
+    check(generated:find("wordletarray_1 *s", 1, true) ~= nil,
+        "a captured array is borrowed as a place, not passed by value")
+    local path = directory .. "/borrowarray.c"
+    write(path, generated .. "\n#include <assert.h>\n"
+        .. "int main(void) { assert(wordlet_f() == UINT32_C(909)); return 0; }\n")
+    local exe = directory .. "/borrowarray"
+    check(shell("timeout --kill-after=2s 30s " .. CC .. " -std=c11 -Wall -Wextra -Werror -O2 -o '"
+        .. exe .. "' '" .. path .. "' 2> " .. directory .. "/borrowerr.txt") == 0,
+        "borrowed array capture C failed to compile:\n" .. read(directory .. "/borrowerr.txt"))
+    check(shell("timeout --kill-after=2s 10s '" .. exe .. "'") == 0,
+        "a captured array must be borrowed, so its mutation is visible")
 end
 
 -- Single-file distribution: bundle the compiler, then compile a program through the bundle's CLI.

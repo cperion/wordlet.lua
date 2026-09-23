@@ -37,6 +37,10 @@ end
 -- Retags a value with a new type and representation. A runtime value keeps its expression, which is
 -- where its value lives; a type that fits a Lua number also keeps a number.
 function become(value, ty, high, low)
+    -- A conversion produces a value of the target type, not a source literal: a literal may adopt
+    -- another operand's type, but `I32(2)` is already I32, so `I32(2) + 3` must let 3 adopt I32
+    -- rather than treating both sides as literals and refusing to widen across signedness.
+    value.literal = nil
     if V.tag(value) == "ir" then
         value.ty = ty
         return value
@@ -577,6 +581,31 @@ function Eval:sealCell(slot, span)
         self.namedByMeaning[S.encode(ty)] = S.named(slot.cell)
     end
     if ty and self.referencedCells[slot.cell] then
+        -- A recursive alias must be nominal. A reference, pointer or slice chain that unfolds to
+        -- the cell itself is an infinite type with no record or sum to name, and it has no finite
+        -- layout: follow the chain before the ordinary value-cycle walk, which treats every
+        -- indirection as a boundary.
+        local function reachesCell(current, seen)
+            if S.isNamed(current) then
+                if current.cell == slot.cell then return true end
+                local resolved = self.typeCells[current.cell]
+                if resolved and not (seen and seen[current.cell]) then
+                    seen = seen or {}
+                    seen[current.cell] = true
+                    return reachesCell(resolved, seen)
+                end
+                return false
+            end
+            if S.isRef(current) or S.isPtr(current) then return reachesCell(current.target, seen) end
+            -- A slice is a nominal layout that names its element through a pointer and registers
+            -- itself before doing so, so a slice self-reference is finite; a bare reference or
+            -- pointer chain has no record or sum to anchor and no finite C alias.
+            return false
+        end
+        if reachesCell(ty) then
+            D.reject("type-cycle", "Type " .. slot.name .. " refers to itself with no record or sum "
+                .. "to give it a finite layout; a recursive type needs a record or sum boundary", span)
+        end
         self:checkNoValueCycle(ty, slot, span)
     end
     return ty
@@ -951,13 +980,30 @@ end
 -- initializer cycle.
 local TYPE_CONSTRUCTORS = { Ref = true, Ptr = true, Slice = true, Array = true, OneOf = true }
 
+-- A binding that is a direct alias of a type constructor -- `let MyRef = Ref` -- is a type
+-- constructor too, so `let Node = MyRef(Node)` still recognises the recursion knot. The alias is
+-- followed structurally rather than demanded, so this decides without evaluating anything.
+local function isTypeConstructor(scope, name, seen)
+    if TYPE_CONSTRUCTORS[name] then return true end
+    seen = seen or {}
+    if seen[name] then return false end
+    seen[name] = true
+    local slot = lookup(scope, name)
+    if not slot or slot.kind ~= "value" or not slot.decl then return false end
+    local def = slot.decl.def
+    if #def.binders ~= 1 or #def.values ~= 1 then return false end
+    local value = def.values[1]
+    if value.kind ~= "Reference" then return false end
+    return isTypeConstructor(scope, value.name.text, seen)
+end
+
 function Eval:isTypeDefinition(slot)
     local def = slot.decl and slot.decl.def
     if not def or #def.binders ~= 1 or #def.values ~= 1 then return false end
     local value = def.values[1]
     if value.kind == "SchemaExpr" then return true end
     return value.kind == "Apply" and value.callee.kind == "Reference"
-        and TYPE_CONSTRUCTORS[value.callee.name.text] == true
+        and isTypeConstructor(slot.scope or self.top, value.callee.name.text)
 end
 
 -- Where a place expression's storage comes from: "module" for a file-scope binding, "enclosing" for
