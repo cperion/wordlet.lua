@@ -16,11 +16,11 @@ text ──lex──► Token[] ──parse──► Ast.Program
                                      │
                           resolve ───┤► Resolution (side tables over AST; AST not mutated)
                                      │
-                            eval ────┤► Compilation { Ir.Program, Meta }
+                            eval ────┤► Compilation { exports, functions, types, modules, ... }
                                      │
-                           check ────┤► verified Ir.Program  (else bug)
+                           check ────┤► the Ir.Fn list, verified (else bug)
                             cabi ────┤► Layouts
-                           lower ────┴► header bytes, source bytes
+                           lower ────┴► one closed artifact, four views (unit, source, header, cdef)
 ```
 
 Rules:
@@ -201,24 +201,36 @@ The reversal (`architecture.md` §6.3) is ordinary `Call` + `Return`. No separat
 analysis is needed, since tail position is already resolved. When the instance has no loop-carried
 storage (all parameters unchanged) the rewrite is a plain `Next`.
 
-## 5. Instances, keys and projections
+## 5. Instances, keys and module storage
 
 ```lua
-InstanceRef = { key; fn_id; role; params; hidden; results }
-Meta = {
-  instances  = { [fn_id] = InstanceRef },
-  projections= { [fn_id] = Projection },   -- source result slots -> runtime slots
-  exports    = { FunctionExport*, TypeExport* },
-  policies   = { [reason] = "abort" },
-  spans      = { [fn_id] = Ast.Span },
+Compilation = { session, exports, functions, types, foreigns, modules }
+Instance = {
+  key;                -- cache key: the code identity plus the classified arguments
+  code;               -- { tag = "word" | "method" | "closure", def, plan?, receiver? }
+  fn;                 -- Ir.Fn: the ABI is fn.inputs, fn.results, fn.params, fn.hidden
+  status;             -- "building" | "done" | "failed"
+  failure;            -- the Diagnostic a failed build recorded, re-raised by a later attempt
+  results;            -- one entry per *source* result slot; `false` where a signature requirement
+  resultRequirements; -- the Ty.Sig for each `false` slot
+  runtimeResults;     -- the same list with the Unit slots erased: what Ir.Fn.results carries
+  inputTypes;         -- Ty.V per input, in order
+  inputPlan;          -- { kind = "value" | "place" } per input
+  paramPositions;     -- the index in fn.params each input binds
+  loopTargets; loopBack; loopHeader;  -- the self-tail rewrite's bookkeeping (§4.2)
 }
-Projection = { Static(Ty.V type, atom) | Runtime(number index) }[]
 ```
 
-- A body's `Ir.Fn.results` contains only `Runtime` slots, in source order.
-- An entry's `Ir.Fn.results` contains every source slot, materialized.
-- `Atom` is a compiler-private checked static value (scalar, type, or frozen word). It never enters
-  `Ir.Program`; an entry lowers a static slot to `Const`/`Make`.
+- An instance's ABI is its `Ir.Fn`. `inputTypes`/`inputPlan`/`paramPositions` record how each
+  input was derived while the body was built; the backend reads the `fn`.
+- A *source* result slot that a signature requirement has yet to fix is `false`, with the
+  requirement in `resultRequirements`; `runtimeResults` drops the `Unit` slots and `Ir.Fn.results`
+  is built from it. `Eval:logicalResults` puts the `Unit` values back, which is what the reference
+  interpreter and an entry with a `Unit` result see.
+- The key is what `Eval:instanceKey` and `Eval:callableKey` build: the definition id (or the closure
+  plan key), the receiver's static fields, and then every parameter position -- a static argument
+  contributes its encoded value and type, a runtime callable its code identity (two closures must
+  not share an instance), and any other runtime argument a `*`.
 
 Instance discovery order is deterministic: the export list in source order, then depth-first over
 newly requested keys. Function IDs are assigned on reservation.
@@ -278,10 +290,11 @@ These are the obligations `check.lua` verifies; the builder should not rely on t
    target a `Unit` alternative, and its operand value must have been bound with that exact sum type.
    A projection is only ever reachable inside an arm whose test established the tag, which is a
    builder obligation the checker cannot see from the statement list alone.
-8. **Visible versus actual signature.** `Ty.Owned`/`Ty.View` carry the source-visible signature.
-   `Ir.Fn.inputs` carries the actual ABI including the hidden owner/capture prefix. The two are
-   related by `Meta.projections`/`hidden` and must not be conflated.
-10. **Integer widths.** `Ir.Expr.Convert(operand, type)` is the only conversion, and both its operand
+8. **Visible versus actual signature.** `Ty.Owned`/`Ty.View` carry the source-visible signature in
+   `Ty.Sig`: what a caller passes. `Ir.Fn.inputs` carries the actual ABI, whose first `fn.hidden`
+   inputs are the owner/capture prefix (`check.lua` bounds the count by the input list). The two
+   must not be conflated, and `cabi` derives the C signature from the `fn`.
+9. **Integer widths.** `Ir.Expr.Convert(operand, type)` is the only conversion, and both its operand
     and its type are integer widths. Arithmetic and bitwise operators take both operands at one width
     and yield it; a shift takes an integer value and a `U32` amount and yields the value's width; a
     comparison takes two integers of any widths and yields `Bool`. Which width an operand needs is
@@ -302,9 +315,10 @@ Diagnostic = { kind, code, message, span = Ast.Span? }
 -- kind: reject=1  bug=2  todo=3  resource=4  internal=2
 ```
 
-Every diagnostic carries a span when one exists. `eval` attaches the innermost expression span;
-`check` attaches the enclosing `Ir.Fn`'s span from `Meta.spans`. A `Diagnostic` is raised, so
-`pcall` boundaries in `cli.lua`/`init.lua` must distinguish it from a Lua error by its `kind` field.
+Every diagnostic carries a span when one exists. `eval` attaches the innermost expression span it
+knows; `check` reports a bug without one, because an `Ir.Fn` carries no source span of its own — a
+source mistake is rejected earlier, with a span. A `Diagnostic` is raised, so `pcall` boundaries in
+`cli.lua`/`init.lua` must distinguish it from a Lua error by its `kind` field.
 
 ## 8. Public facade
 

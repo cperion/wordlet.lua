@@ -677,32 +677,39 @@ acceptance condition.
 ## 12. Modules and ASDL discipline
 
 ```
-wordlet/init.lua   facade: load, compile, diagnostics and public API
-wordlet/lex.lua    free-form tokens and spans
-wordlet/parse.lua  expressions, declarations, blocks and module export syntax
-wordlet/ast.lua    loading/building ast.asdl nodes; AST helpers
-wordlet/resolve.lua lexical scopes, bindings, capture classification and tail positions
-wordlet/schema.lua ASDL semantic types, values, identities and interface descriptors
-wordlet/builtins.lua bootstrap definitions for U32, Bool, Unit and Type
-wordlet/value.lua  knownness, immutable components and storage distinctions
-wordlet/env.lua    lexical bindings and explicit actual-owner bindings
-wordlet/key.lua    canonical partitions, instance registry and active dependency graph
-wordlet/eval.lua   source evaluation, calls, conditionals, completion and capture planning
-wordlet/ir.lua     loading/building ir.asdl nodes, per-function interning, semantic visitors
-wordlet/check.lua  types, completion, scopes, initialization and borrow invariants
-wordlet/cabi.lua   representation closure, entry/adaptor layouts and names
-wordlet/lower.lua  ordered emission, local temporaries, header/source assembly
-wordlet/diag.lua   source diagnostics and resource reporting
-wordlet/cli.lua    command-line entry point (optional CLI module for the bundler)
+wordlet/init.lua     facade: load, compile, diagnostics and public API
+wordlet/lex.lua      free-form tokens and spans
+wordlet/parse.lua    expressions, declarations, blocks and module export syntax
+wordlet/ast.lua      loading/building ast.asdl nodes; AST helpers
+wordlet/walk.lua     reflective children, nodeChildren and walk over __fields
+wordlet/resolve.lua  a lambda's captured names and a definition's tail self-call
+wordlet/schema.lua   the Ty/Ir ASDL contexts, Ty constructors, the intrinsic Ty: predicates
+wordlet/schema/      the embedded ast.asdl and ir.asdl text, from tools/embed.lua
+wordlet/value.lua    knownness, immutable components and storage distinctions
+wordlet/session.lua  one compilation's descriptions, occurrences and budgets; withNesting
+wordlet/eval.lua     source evaluation, calls, conditionals, completion and capture planning
+wordlet/analysis.lua per-Ir.Fn uses, mutations, inlining and sharing, in one walk
+wordlet/ir.lua       loading/building ir.asdl nodes, per-function interning, structural :each
+wordlet/check.lua    types, completion, scopes, initialization and borrow invariants
+wordlet/cabi.lua     representation closure, entry/adaptor layouts and names
+wordlet/lower.lua    ordered emission, local temporaries, header/source assembly
+wordlet/diag.lua     source diagnostics and resource reporting
+wordlet/jit.lua      the LuaJIT FFI front end: build and load an artifact at run time
+wordlet/cli.lua      command-line entry point (optional CLI module for the bundler)
+wordletkit/          the separately licensed u32/u64 bit toolkit
+vendor/              the ASDL runtime and terra-lists, with their licenses
 ```
 
 The namespace is `wordlet`; `require("wordlet")` resolves through `wordlet/init.lua`. The bootstrap
 toolkit uses the separate `wordletkit` namespace, so compiler module names never collide with it.
 
-`resolve.lua` and `builtins.lua` were absent from the earlier file list. Without a resolution pass
-standing between parsing and evaluation, capture classification and receiver-field binding had no
-home; without bootstrap primitives, `U32`/`Bool`/`Unit`/`Type` had no definitions before evaluation.
-Per-module contracts, including each module's exported functions, are in `interfaces.md` §2.
+`eval.lua` holds the bootstrap primitives — `U32`, `Bool`, `Unit` and `Type`, plus the `OneOf` type
+constructor — in its `load`, rather than in a `builtins.lua`, so a primitive is defined on the same
+path as any other word. Binding is resolved during evaluation rather than by a separate pass,
+because a name can denote a word, a value, a schema or a field depending on values that only exist
+then; `resolve.lua` therefore holds only the purely syntactic facts (a lambda's captured names, a
+definition's tail self-call). Per-module contracts, including each module's exported functions, are
+in `interfaces.md` §2.
 
 Dependencies flow from orchestration through the evaluator to semantic data, and separately from
 IR through checking and lowering. No backend module imports eval or resolves source expressions.
