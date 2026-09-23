@@ -26,8 +26,10 @@ end
 local targets = {
     { source = "ast.asdl", out = root .. "wordlet/schema/ast.lua" },
     { source = "ir.asdl", out = root .. "wordlet/schema/ir.lua" },
-    -- The language reference travels with the tool, so a host that loads only the bundle can show it.
+    -- The language reference and the design guide travel with the tool, so a host that loads only
+    -- the bundle can show both.
     { source = "syntax.md", out = root .. "wordlet/docs/syntax.lua" },
+    { source = "GUIDE.md", out = root .. "wordlet/docs/guide.lua" },
 }
 
 local check = arg[1] == "--check"

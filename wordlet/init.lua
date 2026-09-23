@@ -266,6 +266,8 @@ end
 M.describe = describe   -- exported so a test can inspect one value directly
 -- The language reference, generated from syntax.md by tools/embed.lua and shipped in the bundle.
 M.syntax = require("wordlet.docs.syntax")
+-- The design and naming guide, generated from GUIDE.md by tools/embed.lua and shipped in the bundle.
+M.guide = require("wordlet.docs.guide")
 -- The LuaJIT FFI front end; it requires `ffi` only when something is actually loaded.
 M.jit = require("wordlet.jit")
 

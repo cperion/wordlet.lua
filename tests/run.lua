@@ -75,7 +75,7 @@ local ok, err = xpcall(function()
     command("mkdir -p -- " .. q(temp .. "/project with ' quote"))
     local project = temp .. "/project with ' quote"
     for _, path in ipairs({"vendor", "tools", "tests", "wordletkit", "wordlet", "examples", "wordletkit.lua", "bundle-manifest.lua",
-        "README.md", "AGENTS.md", "architecture.md", "syntax.md", "interfaces.md", "ast.asdl", "ir.asdl",
+        "README.md", "AGENTS.md", "architecture.md", "syntax.md", "GUIDE.md", "interfaces.md", "ast.asdl", "ir.asdl",
         "ASDL.md", "U32.md", "U64.md", "THIRD_PARTY.md", "VALIDATION.md", "LICENSE", ".gitignore"}) do        command("cp -R -- " .. q(root .. path) .. " " .. q(project .. "/"))
     end
     local bundle = project .. "/dist/wordlet.lua"
@@ -87,6 +87,8 @@ local ok, err = xpcall(function()
         "bundle must embed the project and vendored license notices")
     assert(first:find("Wordlet syntax and semantic contract, bundled from syntax.md", 1, true),
         "bundle must embed the syntax document")
+    assert(first:find("Wordlet design and naming guide, bundled from GUIDE.md", 1, true),
+        "bundle must embed the design guide")
     assert(first:find("Wordlet syntax and semantic contract", 1, true) < first:find("local host_require", 1, true),
         "the syntax document must lead the generated file")
     write(temp .. "/isolated.lua", first)
@@ -99,11 +101,14 @@ return { functions = { affine } }]==]
         assert(r[1]==19); local c=w.compile_file('program.let'):unit();
         assert(c:find('wordlet_affine',1,true)~=nil);
         assert(type(w.syntax)=='string' and w.syntax:find('Wordlet',1,true)~=nil,
-            'the bundle must carry the syntax reference')]])
+            'the bundle must carry the syntax reference');
+        assert(type(w.guide)=='string' and w.guide:find('Wordlet',1,true)~=nil,
+            'the bundle must carry the design guide')]])
     -- Real require mode from a different cwd, with no source search path.
     run([[package.path='./?.lua'; package.cpath=''; local w=require('isolated');
         assert(type(w.compile)=='function' and type(w.interpret)=='function');
-        assert(type(w.syntax)=='string' and w.syntax:find('Wordlet',1,true)~=nil)]])
+        assert(type(w.syntax)=='string' and w.syntax:find('Wordlet',1,true)~=nil);
+        assert(type(w.guide)=='string' and w.guide:find('Wordlet',1,true)~=nil)]])
 
     write(temp .. "/entry.lua", [[return {legacy=require('legacy'), retry=function() return require('unstable') end,
         cycle=function() return require('cycle_a') end, missing=function() return require('unlisted') end}]])

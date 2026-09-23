@@ -123,10 +123,11 @@ host compiler.
 - [AGENTS.md](AGENTS.md): local implementation and validation instructions for coding agents.
 
 The `wordlet` namespace is the compiler. `wordletkit` remains the bootstrap toolkit (ASDL, List and
-the U32 reference kernel) and is not the compiler. `wordlet.syntax` is the language reference text,
-generated from [syntax.md](syntax.md) into `wordlet/docs/syntax.lua` by `tools/embed.lua` and listed
-in the bundle manifest, so a host that loads only `dist/wordlet.lua` can still show the language.
-`tools/bundle.lua` also writes that same reference as a leading comment block, so the generated file
+the U32 reference kernel) and is not the compiler. `wordlet.syntax` is the language reference and
+`wordlet.guide` is the design and naming guide, generated from [syntax.md](syntax.md) and
+[GUIDE.md](GUIDE.md) into `wordlet/docs/syntax.lua` and `wordlet/docs/guide.lua` by `tools/embed.lua`
+and listed in the bundle manifest, so a host that loads only `dist/wordlet.lua` can still show both.
+`tools/bundle.lua` also writes those same documents as leading comment blocks, so the generated file
 is readable on its own without loading it as a module.
 
 `wordlet.jit` is the LuaJIT FFI front end. `wordlet.jit.loadstring(code)` compiles `.let` code with
@@ -185,7 +186,7 @@ return {
     modules = {
         wordlet = "wordlet/init.lua",  -- every bundled module is explicitly listed
         -- ... the rest of wordlet/* and wordletkit/*, in sorted name order
-        -- including wordlet/docs/syntax.lua, the language reference as a module
+        -- including wordlet/docs/syntax.lua and wordlet/docs/guide.lua, the documents as modules
         ["vendor.asdl"] = "vendor/asdl.lua",
         ["vendor.terralist"] = "vendor/terralist.lua",
     },

@@ -4,12 +4,14 @@ return {
     cli = "wordlet.cli",
     output = "dist/wordlet.lua",
     syntax = "syntax.md", -- the language reference, written as a leading comment block
+    guide = "GUIDE.md", -- the design and naming guide, also a leading comment block
     licenses = {"LICENSE", "vendor/LICENSE"},
     modules = {
         ["wordlet"] = "wordlet/init.lua",
         ["wordlet.cli"] = "wordlet/cli.lua",
         ["wordlet.diag"] = "wordlet/diag.lua",
         ["wordlet.docs.syntax"] = "wordlet/docs/syntax.lua", -- the language reference, embedded
+        ["wordlet.docs.guide"] = "wordlet/docs/guide.lua", -- the design guide, embedded
         ["wordlet.lex"] = "wordlet/lex.lua",
         ["wordlet.ast"] = "wordlet/ast.lua",
         ["wordlet.parse"] = "wordlet/parse.lua",
