@@ -215,6 +215,16 @@ local CASES = {
         inputs = { { 0, 5 }, { 1, 0 }, { 10, 3 }, { 5, 0 }, { 3, 4 }, { 0, 0 }, { 2, 5 }, { 7, 1 } },
     },
     {
+        -- A keyed requirement annotated with a signature types the lambda supplied for it, so the
+        -- lambda's parameter carries no annotation of its own (structure.md §5.4).
+        name = "keyedsig",
+        source = "let apply2 { f: (U32): U32, x: U32 } : U32 = f(x)\n"
+            .. "let g() : U32 = apply2 { f = |a| -> a + 1, x = 5 }\n"
+            .. "return { functions = { g } }",
+        entry = "g", arity = 0,
+        inputs = { {} },
+    },
+    {
         name = "closures",
         source = "let apply(f: (U32): U32, x: U32) : U32 = f(x)\n"
             .. "let twice(f: (U32): U32, x: U32) : U32 = f(f(x))\n"

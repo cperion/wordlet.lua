@@ -148,6 +148,14 @@ Key points:
   `exprs`; the enclosing context is used only to resolve and classify captures.
 - Evaluation returns `Completion`: `Continues(Value*)`, `Returns(Value*)` or
   `TailTransfer(key, Value*)`. `Returns` is not a value and cannot be consumed by later statements.
+- **One law for application.** `Eval:supply(ctx, callee, args, span)` is the only entry point: it
+  appends the arguments to the callee's bound arguments, tests saturation, and hands a saturated
+  call to the one owner for its kind — `invokeBuiltin`, `invokeForeign`, `invokeSource`,
+  `invokeMethod`, `invokeClosure`, or `invokeRuntime` for a value whose representation is a
+  callable. A saturated word or method call shares one fold-or-build decision, `foldOrBuild`, and a
+  call that cannot fold becomes an instance through `callInstance`, which emits the call or, in tail
+  position, a `loopBack` back edge. A deferred action and a match handler call `supply` as well, so
+  there is no second dispatcher to keep in step.
 
 ### 4.1 Emitting statements
 
@@ -241,9 +249,13 @@ These are the obligations `check.lua` verifies; the builder should not rely on t
    materialised as an `Ir.Expr`.
 6. **Tagged callables.** A `Ty.Tagged` value is a tag plus the environment of the arm that tag
    names. Its arms are registered in `Eval.arms` under the identity that names them in the type, so a
-   call site dispatches from the type alone: `Eval:applyTagged` tests each tag, projects that arm's
-   environment out of the payload, and calls the arm's own code directly — the arm's environment is
-   the call's hidden prefix, exactly as for a non-tagged owned callable. Every arm shares the visible
+   call site dispatches from the type alone: the tagged arm of `Eval:invokeRuntime` tests each tag,
+   projects that arm's environment out of the payload, and calls the arm's own code directly — the
+   arm's environment is the call's hidden prefix, exactly as for a non-tagged owned callable. Every
+   arm shares the visible signature, so the results join through one slot per result. A join needs
+   both arms to be callables of one signature; a word arm needs declared result types and a closure
+   arm may not borrow storage, because the value holds its environments by value. Erasing a
+   runtime-tagged value into a signature rejects (`callable-erase`).
    signature, so the results join through one slot per result. A join needs both arms to be callables
    of one signature; a word arm needs declared result types and a closure arm may not borrow storage,
    because the value holds its environments by value. Erasing a runtime-tagged value into a signature

@@ -135,6 +135,26 @@ local function lookup(sc, name)
     end
 end
 
+-- The values bound by an earlier partial application, then the new arguments, in written order.
+local function appendArguments(bound, args)
+    local values = {}
+    for _, value in ipairs(bound or {}) do values[#values + 1] = value end
+    for _, value in ipairs(args) do values[#values + 1] = value end
+    return values
+end
+
+-- A partial application is a compile-time description, so every value bound into it is static. A
+-- builtin names no parameter, so its message names none either.
+local function requireStatic(values, span, def)
+    for index, value in ipairs(values) do
+        if not V.isStatic(value) then
+            if def == nil then D.reject("static-required", "A partial argument must be static", span) end
+            D.reject("static-required", "Partial application needs a static value for parameter "
+                .. def.params[index].name.text, span)
+        end
+    end
+end
+
 local Ctx = {}
 Ctx.__index = Ctx
 function Ctx:arm(list)
@@ -750,7 +770,7 @@ function Eval:evalMatch(ctx, base, expr, span)
         -- The tag is known here, so the other alternatives are not evaluated at all.
         local payload = base.payload
         if payload == nil then payload = V.unit() end
-        return self:applyAny(ctx, handlers[base.case], { payload }, span)
+        return self:supply(ctx, handlers[base.case], { payload }, span)
     end
 
     if ctx.mode ~= "residual" then
@@ -759,19 +779,6 @@ function Eval:evalMatch(ctx, base, expr, span)
     return self:matchResidual(ctx, base, handlers, span)
 end
 
-function Eval:applyAny(ctx, callee, args, span)
-    local tag = V.tag(callee)
-    if tag == "word" then return self:apply(ctx, callee, args, span) end
-    if tag == "closure" then return self:applyClosure(ctx, callee.plan, nil, args, span, callee.bound) end
-    if tag == "method" then return self:applyMethod(ctx, callee, args, span) end
-    if tag == "variant" and callee.ty and S.isTagged(callee.ty) then
-        return self:applyTagged(ctx, callee, args, span)
-    end
-    if tag == "ir" and S.isTagged(callee.ty) then
-        return self:applyTagged(ctx, callee, args, span)
-    end
-    D.reject("callable-required", "Only words, methods and closures can be applied", span)
-end
 
 -- The opaque case: test the tag for each alternative, projecting the payload inside its own arm,
 -- and join the results through one slot. The last alternative needs no test.
@@ -811,7 +818,7 @@ function Eval:matchResidual(ctx, base, handlers, span)
             args = { V.ir(builder:ref(id, caseType), caseType) }
         end
         -- A handler is a callable, so it may return a result vector; the match forwards it.
-        local values = self:expand(self:applyAny(armCtx, handlers[name], args, span))
+        local values = self:expand(self:supply(armCtx, handlers[name], args, span))
         if resultTypes == nil then
             resultTypes = {}
             for index, value in ipairs(values) do resultTypes[index] = value.ty end
@@ -1701,7 +1708,7 @@ function Eval:callTaggedArm(ctx, name, variantId, taggedTy, args, span)
         local values = {}
         for _, item in ipairs(descriptor.bound) do values[#values + 1] = item end
         for _, item in ipairs(args) do values[#values + 1] = item end
-        return self:applyResidual(ctx, descriptor.def, values, span)
+        return self:callInstance(ctx, descriptor.def, values, span, nil)
     end
     local plan = descriptor.plan
     local merged = {}
@@ -1718,66 +1725,9 @@ function Eval:callTaggedArm(ctx, name, variantId, taggedTy, args, span)
             envExprs[#envExprs + 1] = ctx.builder:get(payload, envName, envTys[envName])
         end
     end
-    return self:applyClosure(ctx, plan, envExprs, merged, span)
+    return self:invokeClosure(ctx, plan, envExprs, merged, span, nil)
 end
 
--- A call on a tagged callable: test the tag, then run that arm's code directly. Every arm shares the
--- one visible signature, so the results join through a slot per result.
-function Eval:applyTagged(ctx, value, args, span)
-    local ty = value.ty
-    if ctx.mode ~= "residual" then
-        D.reject("runtime-in-normalization", "A tagged call needs runtime code", span)
-    end
-    local expr = value.expr
-    if expr == nil then
-        -- A tagged value built in this expression has not been emitted yet.
-        expr = self:expression(ctx, value, ty)
-    end
-    if expr.kind ~= "Ref" then D.bug("tagged-call", "A tagged callable must be an SSA value") end
-    local variantId = expr.value
-    local builder = ctx.builder
-    local results = ty.visible.results
-    local slots = {}
-    for index = 1, #results do slots[index] = builder:var(ctx.body, results[index], nil) end
-    local pieces = {}
-    for _, name in ipairs(S.casesOf(ty)) do
-        local arm = {}
-        local armCtx = ctx:arm(arm)
-        local result = self:callTaggedArm(armCtx, name, variantId, ty, args, span)
-        pieces[#pieces + 1] = { name = name, list = arm, ctx = armCtx, value = result,
-            terminated = armCtx.terminated }
-    end
-    for _, piece in ipairs(pieces) do
-        if not piece.terminated then
-            local values = self:expand(piece.value)
-            if #values ~= #results then
-                D.bug("tagged-arity", "A tagged arm returned the wrong number of results")
-            end
-            for index, item in ipairs(values) do
-                builder:store(piece.list, Ir.Local(slots[index]),
-                    self:expression(piece.ctx, item, results[index]))
-            end
-        end
-    end
-    local child = pieces[#pieces].list
-    for index = #pieces - 1, 1, -1 do
-        local piece = pieces[index]
-        local parent = {}
-        local id = builder:valueId()
-        builder:emit(parent, Ir.VariantMatches(id, variantId, ty, piece.name))
-        builder:emit(parent, Ir.If(builder:ref(id, S.Bool), S.list(piece.list), S.list(child)))
-        child = parent
-    end
-    for _, stmt in ipairs(child) do ctx.body[#ctx.body + 1] = stmt end
-    local out = {}
-    for index, resultTy in ipairs(results) do
-        local place = Ir.Local(slots[index])
-        out[index] = V.ir(builder:ref(builder:read(ctx.body, resultTy, place), resultTy), resultTy)
-    end
-    if #out == 0 then return V.unit() end
-    if #out == 1 then return out[1] end
-    return V.results(out)
-end
 
 -- Materialises a value for a runtime position. `want` is the destination type when the context
 -- knows it, which is what lets an unrepresentable callable be rejected with a source diagnostic
@@ -2870,41 +2820,30 @@ end
 
 
 -- Closure application: a static closure is evaluated now; otherwise a direct call carries the
--- captured environment as leading arguments.
-function Eval:applyClosure(ctx, plan, envExprs, args, span, bound)
+-- captured environment as leading arguments. A closure folds only in normalize code, where folding is
+-- the only way to produce a value, so it has no residual-mode probe to swallow and does not go
+-- through `foldOrBuild`.
+function Eval:invokeClosure(ctx, plan, envExprs, values, span, bound)
     local def = plan.def
-    bound = bound or {}
-    local supplied = #bound + #args
-    if supplied > #def.params then D.reject("arity", "Overapplication is not supported", span) end
-    if supplied < #def.params then
+    local merged = appendArguments(bound, values)
+    if #merged > #def.params then D.reject("arity", "Overapplication is not supported", span) end
+    if #merged < #def.params then
         -- Partial application of a closure binds static arguments, exactly as for a named word.
-        local merged = {}
-        for _, value in ipairs(bound) do merged[#merged + 1] = value end
-        for _, value in ipairs(args) do merged[#merged + 1] = value end
-        for index, value in ipairs(merged) do
-            if not V.isStatic(value) then
-                D.reject("static-required", "Partial application needs a static value for parameter "
-                    .. def.params[index].name.text, span)
-            end
-        end
+        requireStatic(merged, span, def)
         return V.closure(plan, merged)
     end
-    local all = {}
-    for _, value in ipairs(bound) do all[#all + 1] = value end
-    for _, value in ipairs(args) do all[#all + 1] = value end
-    args = all
     if envExprs == nil and #plan.runtimeOrder == 0 then
         local allKnown = true
-        for _, value in ipairs(args) do if not V.isKnown(value) then allKnown = false end end
+        for _, value in ipairs(merged) do if not V.isKnown(value) then allKnown = false end end
         if allKnown and ctx.mode == "normalize" then
-            return self:applyClosureStatically(plan, args, span)
+            return self:evaluateClosureStatically(plan, merged, span)
         end
     end
     if ctx.mode ~= "residual" then
         D.reject("runtime-in-normalization", "This closure call needs runtime code", span)
     end
     local callable = { plan = plan, env = self:closureEnvironment(plan, envExprs) }
-    return self:callClosure(ctx, callable, args, span)
+    return self:callClosure(ctx, callable, merged, span)
 end
 
 -- Binds a known callable's hidden inputs in a local adapter and yields a view value.
@@ -2952,56 +2891,120 @@ function Eval:makeView(ctx, value, sig)
 end
 
 -- An opaque callable is invoked through its view: the environment pointer plus the argument list.
-function Eval:applyView(ctx, value, args, span)
-    if ctx.mode ~= "residual" then
-        D.reject("runtime-in-normalization", "An opaque callable needs runtime code", span)
-    end
-    local sig = value.ty.visible
-    if #args ~= #sig.inputs then D.reject("arity", "Opaque callable arity mismatch", span) end
-    local operands = {}
-    for index, input in ipairs(sig.inputs) do
-        if input.kind ~= "InValue" then
-            D.todo("view-input", "Only by-value callable inputs are supported", span)
+-- A runtime callable is a value whose representation names code, so what it can be called as is
+-- read from its type: an Owned value carries a known environment, a View is opaque code, and a
+-- Tagged value is a tag plus the environment of the arm that tag names. This is the one dispatch the
+-- three former entry points (`applyOwned`, `applyView`, `applyTagged`) each had in front of them.
+function Eval:invokeRuntime(ctx, value, args, span)
+    local tag, ty = V.tag(value), value.ty
+    if tag == "ir" and ty and S.isOwned(ty) then
+        local plan = self:planOf(ty, span)
+        if #plan.borrowedOrder > 0 then
+            D.bug("borrowed-callable-value",
+                "A closure with borrowed captures must not have a materialised value")
         end
-        self:requireType(args[index], input.type, span)
-        operands[#operands + 1] = Ir.ValueArg(self:expression(ctx, args[index]))
+        if S.environmentOf(ty) == S.Unit then
+            -- Pure code carries no environment, so there is nothing to project: the call is direct.
+            return self:invokeClosure(ctx, plan, {}, args, span, value.bound)
+        end
+        local envTys = {}
+        for _, field in ipairs(ty.environment.fields or {}) do envTys[field.name] = field.type end
+        local envExprs = {}
+        for _, name in ipairs(plan.envNames) do
+            envExprs[#envExprs + 1] = ctx.builder:get(value.expr, name, envTys[name])
+        end
+        return self:invokeClosure(ctx, plan, envExprs, args, span, nil)
     end
-    local results = {}
-    for _ = 1, #sig.results do results[#results + 1] = ctx.builder:valueId() end
-    ctx.builder:emit(ctx.body, Ir.Indirect(S.list(results), value.expr, S.list(operands)))
-    if #sig.results == 0 then return V.unit() end
-    if #sig.results == 1 then
-        return V.ir(ctx.builder:ref(results[1], sig.results[1]), sig.results[1])
+    if tag == "ir" and ty and S.isView(ty) then
+        -- An opaque callable is invoked through its view: the environment pointer plus the argument
+        -- list.
+        if ctx.mode ~= "residual" then
+            D.reject("runtime-in-normalization", "An opaque callable needs runtime code", span)
+        end
+        local sig = ty.visible
+        if #args ~= #sig.inputs then D.reject("arity", "Opaque callable arity mismatch", span) end
+        local operands = {}
+        for index, input in ipairs(sig.inputs) do
+            if input.kind ~= "InValue" then
+                D.todo("view-input", "Only by-value callable inputs are supported", span)
+            end
+            self:requireType(args[index], input.type, span)
+            operands[#operands + 1] = Ir.ValueArg(self:expression(ctx, args[index]))
+        end
+        local results = {}
+        for _ = 1, #sig.results do results[#results + 1] = ctx.builder:valueId() end
+        ctx.builder:emit(ctx.body, Ir.Indirect(S.list(results), value.expr, S.list(operands)))
+        if #sig.results == 0 then return V.unit() end
+        if #sig.results == 1 then
+            return V.ir(ctx.builder:ref(results[1], sig.results[1]), sig.results[1])
+        end
+        local out = {}
+        for index, resultTy in ipairs(sig.results) do
+            out[index] = V.ir(ctx.builder:ref(results[index], resultTy), resultTy)
+        end
+        return V.results(out)
     end
-    local out = {}
-    for index, ty in ipairs(sig.results) do
-        out[index] = V.ir(ctx.builder:ref(results[index], ty), ty)
+    if (tag == "ir" or tag == "variant") and ty and S.isTagged(ty) then
+        -- A call on a tagged callable: test the tag, then run that arm's code directly. Every arm
+        -- shares the one visible signature, so the results join through a slot per result.
+        if ctx.mode ~= "residual" then
+            D.reject("runtime-in-normalization", "A tagged call needs runtime code", span)
+        end
+        local expr = value.expr
+        if expr == nil then
+            -- A tagged value built in this expression has not been emitted yet.
+            expr = self:expression(ctx, value, ty)
+        end
+        if expr.kind ~= "Ref" then D.bug("tagged-call", "A tagged callable must be an SSA value") end
+        local variantId = expr.value
+        local builder = ctx.builder
+        local results = ty.visible.results
+        local slots = {}
+        for index = 1, #results do slots[index] = builder:var(ctx.body, results[index], nil) end
+        local pieces = {}
+        for _, name in ipairs(S.casesOf(ty)) do
+            local arm = {}
+            local armCtx = ctx:arm(arm)
+            local result = self:callTaggedArm(armCtx, name, variantId, ty, args, span)
+            pieces[#pieces + 1] = { name = name, list = arm, ctx = armCtx, value = result,
+                terminated = armCtx.terminated }
+        end
+        for _, piece in ipairs(pieces) do
+            if not piece.terminated then
+                local values = self:expand(piece.value)
+                if #values ~= #results then
+                    D.bug("tagged-arity", "A tagged arm returned the wrong number of results")
+                end
+                for index, item in ipairs(values) do
+                    builder:store(piece.list, Ir.Local(slots[index]),
+                        self:expression(piece.ctx, item, results[index]))
+                end
+            end
+        end
+        local child = pieces[#pieces].list
+        for index = #pieces - 1, 1, -1 do
+            local piece = pieces[index]
+            local parent = {}
+            local id = builder:valueId()
+            builder:emit(parent, Ir.VariantMatches(id, variantId, ty, piece.name))
+            builder:emit(parent, Ir.If(builder:ref(id, S.Bool), S.list(piece.list), S.list(child)))
+            child = parent
+        end
+        for _, stmt in ipairs(child) do ctx.body[#ctx.body + 1] = stmt end
+        local out = {}
+        for index, resultTy in ipairs(results) do
+            local place = Ir.Local(slots[index])
+            out[index] = V.ir(builder:ref(builder:read(ctx.body, resultTy, place), resultTy), resultTy)
+        end
+        if #out == 0 then return V.unit() end
+        if #out == 1 then return out[1] end
+        return V.results(out)
     end
-    return V.results(out)
-end
-
--- An Owned IR value carries its environment; the captured fields are its arguments.
-function Eval:applyOwned(ctx, value, args, span)
-    local plan = self:planOf(value.ty, span)
-    if #plan.borrowedOrder > 0 then
-        D.bug("borrowed-callable-value",
-            "A closure with borrowed captures must not have a materialised value")
-    end
-    if S.environmentOf(value.ty) == S.Unit then
-        -- Pure code carries no environment, so there is nothing to project: the call is direct.
-        return self:applyClosure(ctx, plan, {}, args, span, value.bound)
-    end
-    local envTys = {}
-    for _, field in ipairs(value.ty.environment.fields or {}) do envTys[field.name] = field.type end
-    local envExprs = {}
-    for _, name in ipairs(plan.envNames) do
-        envExprs[#envExprs + 1] = ctx.builder:get(value.expr, name, envTys[name])
-    end
-    return self:applyClosure(ctx, plan, envExprs, args, span)
+    D.reject("callable-required", "Only words, methods and closures can be applied", span)
 end
 
 -- Evaluating a capture-free closure with known arguments produces a value, not a call.
-function Eval:applyClosureStatically(plan, args, span)
+function Eval:evaluateClosureStatically(plan, args, span)
     local sc = scope(plan.def.lexical)
     for _, name in ipairs(plan.borrowedOrder) do
         local borrowed = plan.borrowed[name]
@@ -3469,7 +3472,7 @@ end
 function Eval:runPendingDefers(ctx)
     local frame = ctx.deferFrame
     while frame do
-        self:invoke(ctx, frame.pending.callee, frame.pending.args, frame.pending.span)
+        self:supply(ctx, frame.pending.callee, frame.pending.args, frame.pending.span)
         frame = frame.parent
     end
 end
@@ -3483,24 +3486,6 @@ function Eval:deferredCall(ctx, stmt)
     return { callee = callee, args = args, span = stmt.call.span }
 end
 
--- Runs an already-evaluated call, which is how a deferred action is invoked without evaluating its
--- source a second time. The callee kinds are the ones `evalApply` dispatches on; a new kind has to be
--- added here as well.
-function Eval:invoke(ctx, callee, args, span)
-    local tag = V.tag(callee)
-    if tag == "word" then return self:apply(ctx, callee, args, span) end
-    if tag == "method" then return self:applyMethod(ctx, callee, args, span) end
-    if tag == "closure" then
-        return self:applyClosure(ctx, callee.plan, nil, args, span, callee.bound)
-    end
-    if tag == "ir" and S.isOwned(callee.ty) then return self:applyOwned(ctx, callee, args, span) end
-    if tag == "ir" and S.isView(callee.ty) then return self:applyView(ctx, callee, args, span) end
-    if (tag == "ir" or tag == "variant") and callee.ty and S.isTagged(callee.ty) then
-        return self:applyTagged(ctx, callee, args, span)
-    end
-    D.reject("callable-required", "A deferred action must be a call, found "
-        .. (callee.ty and S.encode(callee.ty) or V.describe(callee)), span)
-end
 
 
 function Eval:execBlock(ctx, statements, from)
@@ -3914,20 +3899,6 @@ function Eval:evalApply(ctx, expr)
     local args = self:evalArguments(ctx, expr.arguments, callee)
     ctx.tail = tail
     local tag = V.tag(callee)
-    if tag == "word" then return self:apply(ctx, callee, args, expr.span) end
-    if tag == "method" then return self:applyMethod(ctx, callee, args, expr.span) end
-    if tag == "closure" then
-        return self:applyClosure(ctx, callee.plan, nil, args, expr.span, callee.bound)
-    end
-    if tag == "ir" and S.isOwned(callee.ty) then
-        return self:applyOwned(ctx, callee, args, expr.span)
-    end
-    if tag == "ir" and S.isView(callee.ty) then
-        return self:applyView(ctx, callee, args, expr.span)
-    end
-    if (tag == "ir" or tag == "variant") and callee.ty and S.isTagged(callee.ty) then
-        return self:applyTagged(ctx, callee, args, expr.span)
-    end
     if tag == "type" then
         -- `Unit()` is the Unit value (syntax.md §1). An integer or float type converts; any other
         -- type is not a call.
@@ -3952,7 +3923,7 @@ function Eval:evalApply(ctx, expr)
         self:requireAgainst(args[1], callee.caseType, expr.span)
         return self:makeVariant(ctx, callee, args[1], expr.span)
     end
-    D.reject("callable-required", "Only words, methods and closures can be applied", expr.callee.span)
+    return self:supply(ctx, callee, args, expr.span)
 end
 
 -- A foreign declaration is a word with no body: its requirements and its result are written down, and
@@ -4004,7 +3975,7 @@ end
 
 -- A foreign call is an effect the compiler cannot see into, so it exists only where there is code to
 -- emit: it is never folded, and the reference interpreter has no binding to call.
-function Eval:applyForeign(ctx, def, values, span)
+function Eval:invokeForeign(ctx, def, values, span)
     if ctx.mode ~= "residual" then
         D.reject("foreign-effect", "A foreign call exists only in compiled code: " .. def.name
             .. "; a constant argument does not make the host call foldable", span)
@@ -4012,90 +3983,132 @@ function Eval:applyForeign(ctx, def, values, span)
     return self:emitCall(ctx, self:foreignInstance(def, span), values, span, nil)
 end
 
-function Eval:apply(ctx, word, args, span)
-    local def = word.def
-    if def.builtin then
-        local bound = {}
-        for _, value in ipairs(word.args) do bound[#bound + 1] = value end
-        for _, value in ipairs(args) do bound[#bound + 1] = value end
+-- The one law (syntax.md §3): evaluate the callee, evaluate the arguments left to right, append
+-- them to the callee's bound arguments, and test saturation. Every call in the language comes through
+-- here, so a partial application is decided once and each kind of saturated call has exactly one
+-- owner. `args` are evaluated values: `evalArguments` typed them against the requirements already.
+
+function Eval:supply(ctx, callee, args, span)
+    local tag = V.tag(callee)
+    if tag == "word" then
+        local def = callee.def
+        local bound = appendArguments(callee.args, args)
         if #bound > #def.params then D.reject("arity", "Overapplication is not supported", span) end
         if #bound < #def.params then
-            for _, value in ipairs(bound) do
-                if not V.isStatic(value) then
-                    D.reject("static-required", "A partial argument must be static", span)
+            -- A keyed word is never supplied positionally; its requirements are supplied by name,
+            -- as in `word { key = value }`.
+            if def.builtin then
+                requireStatic(bound, span)
+            else
+                if def.keyed then
+                    D.reject("keyed-required",
+                        "A keyed word is supplied by name, as in word { key = value }", span)
                 end
+                requireStatic(bound, span, def)
             end
             return V.word(def, bound, span)
         end
-        return def.builtin(self, ctx, bound, span)
+        if def.builtin then return self:invokeBuiltin(ctx, def, bound, span) end
+        if def.foreign then return self:invokeForeign(ctx, def, bound, span) end
+        return self:invokeSource(ctx, def, bound, span)
     end
-    local bound = {}
-    for _, value in ipairs(word.args) do bound[#bound + 1] = value end
-    for _, value in ipairs(args) do bound[#bound + 1] = value end
-    if #bound > #def.params then D.reject("arity", "Overapplication is not supported", span) end
-    if def.keyed and #bound < #def.params then
-        D.reject("keyed-required", "A keyed word is supplied by name, as in word { key = value }", span)
-    end
-    if #bound < #def.params then
-        for index, value in ipairs(bound) do
-            if not V.isStatic(value) then
-                D.reject("static-required",
-                    "Partial application needs a static value for parameter " .. def.params[index].name.text, span)
-            end
+    if tag == "method" then
+        local def, receiver = callee.def, callee.receiver
+        local bound = appendArguments(callee.args, args)
+        if #bound > #def.params then D.reject("arity", "Overapplication is not supported", span) end
+        if #bound < #def.params then
+            requireStatic(bound, span, def)
+            return setmetatable({ tag = "method", def = def, receiver = receiver, args = bound }, V.mt)
         end
-        return V.word(def, bound, span)
+        if not receiver then
+            D.reject("missing-receiver", "Bind the receiver before calling " .. def.name, span)
+        end
+        return self:invokeMethod(ctx, def, bound, receiver, span)
     end
-    if def.foreign then return self:applyForeign(ctx, def, bound, span) end
+    if tag == "closure" then
+        return self:invokeClosure(ctx, callee.plan, nil, args, span, callee.bound)
+    end
+    return self:invokeRuntime(ctx, callee, args, span)
+end
+
+
+-- A builtin runs its terminal directly: it has no body to fold and never builds an instance.
+function Eval:invokeBuiltin(ctx, def, values, span)
+    return def.builtin(self, ctx, values, span)
+end
+
+-- A named word with a source body, which is the only word that can become an instance.
+function Eval:invokeSource(ctx, def, values, span)
+    return self:foldOrBuild(ctx, def, values, span, nil, "This call needs runtime storage or values")
+end
+
+-- A method on a receiver: the receiver is an argument of a different shape, and only a concrete
+-- record can have its fields read for a static fold.
+function Eval:invokeMethod(ctx, def, values, receiver, span)
+    return self:foldOrBuild(ctx, def, values, span, receiver, "This method call needs runtime storage")
+end
+
+-- The fold-or-build decision every saturated word and method call shares: a call whose arguments
+-- are all known, and either all static or in normalize code, is folded; anything else is built.
+function Eval:foldOrBuild(ctx, def, values, span, receiver, subject)
     local allKnown, allStatic = true, true
-    for _, value in ipairs(bound) do
+    for _, value in ipairs(values) do
         if not V.isKnown(value) then allKnown = false end
         if not V.isStatic(value) then allStatic = false end
     end
-    if allKnown and (ctx.mode == "normalize" or allStatic) then
-        -- Folding a known call is an optimization in residual code and a requirement in normalize
-        -- code. A body that needs runtime storage cannot be folded and must instead be compiled, so
-        -- the rejection is the signal to compile it; normalize code has no runtime code to fall
-        -- back to, so for it the same rejection is the answer.
-        if ctx.mode == "residual" then
-            -- Folding is an optimization here, so a failed fold is compiled instead. The depth the
-            -- attempt used is restored by `applyStatically` itself, whatever the attempt did.
-            local ok, value = pcall(self.applyStatically, self, def, bound, span, nil)
-            if ok then return value end
-            if not (D.is(value) and (value.code == "runtime-in-normalization"
-                or value.code == "static-depth" or value.code == "foreign-effect")) then
-                error(value, 0)
-            end
-        else
-            return self:applyStatically(def, bound, span, nil)
+    local foldable = allKnown and (ctx.mode == "normalize" or allStatic)
+    if foldable and receiver ~= nil then foldable = V.tag(receiver) == "record" end
+    if foldable then
+        -- Static folding is a budget, so the depth is restored however the attempt ends: a probe that
+        -- swallows a diagnostic must not leave the session believing it is deeper than it is. In
+        -- residual code a fold is an optimization, so a diagnostic that says the body needs runtime
+        -- storage is the signal to compile it instead; any other diagnostic is a real one.
+        self:enterStatic(def, span)
+        local ok, folded = pcall(self.evaluateStatically, self, def, values, span, receiver)
+        self:leaveStatic()
+        if ok then return folded end
+        if ctx.mode ~= "residual" then error(folded, 0) end
+        if not (D.is(folded) and (folded.code == "runtime-in-normalization"
+            or folded.code == "static-depth" or folded.code == "foreign-effect")) then
+            error(folded, 0)
         end
     end
     if ctx.mode ~= "residual" then
-        D.reject("runtime-in-normalization", "This call needs runtime storage or values", span)
+        D.reject("runtime-in-normalization", subject, span)
     end
-    return self:applyResidual(ctx, def, bound, span)
+    return self:callInstance(ctx, def, values, span, receiver)
 end
 
 -- `Word { key = value }`: supply a word's keyed requirements. Values are evaluated in written
--- order; a name that is not a requirement, or one supplied twice, rejects. Supplying every key
--- invokes the body; otherwise the supplied values, which must be static, become part of a
--- specialized word that still awaits the rest.
+-- order; a name that is not a requirement, or one supplied twice, rejects. A keyed requirement is
+-- always annotated, and an annotation written as a signature types the value supplied for it exactly
+-- as a positional requirement does, which is what lets `f { g = |x| -> x }` leave `x` unannotated.
 function Eval:applyKeyed(ctx, word, fields, span, tail)
     local def = word.def
     local params = def.params
-    local known = {}
-    for _, param in ipairs(params) do known[param.name.text] = true end
+    local byName = {}
+    for _, param in ipairs(params) do byName[param.name.text] = param end
     local bound = {}
     for name, value in pairs(def.statics or {}) do bound[name] = value end
+    -- A keyed requirement has no order, so an annotation may not depend on another key: the word's
+    -- own lexical scope is the right place to resolve one.
+    local lexical = scope(def.lexical)
     for _, field in ipairs(fields) do
         local name = field.name.text
-        if not known[name] then
+        local param = byName[name]
+        if not param then
             D.reject("unknown-member", "Word " .. def.name .. " has no keyed requirement " .. name,
                 field.name.span)
         end
         if bound[name] ~= nil then
             D.reject("duplicate", "Keyed requirement " .. name .. " is supplied twice", field.name.span)
         end
-        bound[name] = self:evalExpr(ctx, field.value)
+        local expected
+        if param.annotation then
+            local ty = self:typeOf(param.annotation, lexical, param.span)
+            if S.isSig(ty) then expected = ty end
+        end
+        bound[name] = self:evalExpected(ctx, field.value, expected)
     end
     local remaining = {}
     for _, param in ipairs(params) do
@@ -4105,7 +4118,7 @@ function Eval:applyKeyed(ctx, word, fields, span, tail)
         local values = {}
         for index, param in ipairs(params) do values[index] = bound[param.name.text] end
         ctx.tail = tail
-        return self:apply(ctx, V.word(def, values, span), {}, span)
+        return self:supply(ctx, V.word(def, values, span), {}, span)
     end
     for _, value in pairs(bound) do
         if not V.isStatic(value) then
@@ -4121,46 +4134,6 @@ function Eval:applyKeyed(ctx, word, fields, span, tail)
     }
     ctx.tail = false
     return V.word(specialized, {}, span)
-end
-
-function Eval:applyMethod(ctx, method, args, span)
-    local def, receiver = method.def, method.receiver
-    local bound = {}
-    for _, value in ipairs(method.args or {}) do bound[#bound + 1] = value end
-    for _, value in ipairs(args) do bound[#bound + 1] = value end
-    if #bound > #def.params then D.reject("arity", "Overapplication is not supported", span) end
-    if #bound < #def.params then
-        for index, value in ipairs(bound) do
-            if not V.isStatic(value) then
-                D.reject("static-required",
-                    "Partial application needs a static value for parameter " .. def.params[index].name.text, span)
-            end
-        end
-        return setmetatable({ tag = "method", def = def, receiver = receiver, args = bound }, V.mt)
-    end
-    if not receiver then
-        D.reject("missing-receiver", "Bind the receiver before calling " .. def.name, span)
-    end
-    local allKnown = true
-    for _, value in ipairs(bound) do if not V.isKnown(value) then allKnown = false end end
-    if allKnown and V.tag(receiver) == "record" then
-        -- A method body that needs runtime storage is compiled rather than folded, for the same
-        -- reason a word call is.
-        if ctx.mode == "residual" then
-            local ok, value = pcall(self.applyStatically, self, def, bound, span, receiver)
-            if ok then return value end
-            if not (D.is(value) and (value.code == "runtime-in-normalization"
-                or value.code == "static-depth" or value.code == "foreign-effect")) then
-                error(value, 0)
-            end
-        else
-            return self:applyStatically(def, bound, span, receiver)
-        end
-    end
-    if ctx.mode ~= "residual" then
-        D.reject("runtime-in-normalization", "This method call needs runtime storage", span)
-    end
-    return self:applyMethodResidual(ctx, def, bound, receiver, span)
 end
 
 -- Shared scope construction: parameters, and receiver fields for methods.
@@ -4207,16 +4180,6 @@ function Eval:copyArgument(value)
     return V.record(value.ty, fields, value.schema)
 end
 
--- Static folding is a budget, so the depth is restored however the attempt ends. A fold reached
--- through a probe that swallows a diagnostic must not leave the session believing it is deeper than
--- it is, and one place owning that restore is what lets the residual fold sites stay plain pcalls.
-function Eval:applyStatically(def, values, span, receiver)
-    self:enterStatic(def, span)
-    local ok, result = pcall(self.evaluateStatically, self, def, values, span, receiver)
-    self:leaveStatic()
-    if not ok then error(result, 0) end
-    return result
-end
 
 function Eval:evaluateStatically(def, values, span, receiver)
     local sc = self:parameterScope(def, values, receiver)
@@ -4244,23 +4207,26 @@ function Eval:evaluateStatically(def, values, span, receiver)
     return V.results(result)
 end
 
-function Eval:applyResidual(ctx, def, values, span)
-    local instance = self:instanceFor(def, span, values)
+-- The saturated call that cannot fold: emit a call to the instance, or, when the call is a tail call
+-- to the instance currently being built, a back edge to its loop header.
+function Eval:callInstance(ctx, def, values, span, receiver)
+    local instance = self:instanceFor(def, span, values, receiver)
     if instance.status == "building" and not instance.results then
-        D.reject("recursive-result", "Recursive word " .. def.name .. " needs an explicit result annotation", span)
+        D.reject("recursive-result", "Recursive " .. (receiver and "method " or "word ") .. def.name
+            .. " needs an explicit result annotation", span)
     end
-    -- A tail call to the instance currently being built is a back edge, not a recursive call.
-    -- A block with a pending deferred action does not become a loop: the action runs after the call
-    -- returns and before the value leaves, which is not the order a back edge would give.
+    -- A tail call to the instance currently being built is a back edge, not a recursive call. A block
+    -- with a pending deferred action does not become a loop: the action runs after the call returns
+    -- and before the value leaves, which is not the order a back edge would give.
     if ctx.tail and not ctx.deferFrame and ctx.instance == instance and instance.loopTargets then
-        self:emitLoopBack(ctx, instance, values, span)
+        self:loopBack(ctx, instance, values, span)
         return V.unit()
     end
-    return self:emitCall(ctx, instance, values, span, nil)
+    return self:emitCall(ctx, instance, values, span, receiver)
 end
 
 -- Evaluate every next argument before assigning any parameter, then transfer to the loop head.
-function Eval:emitLoopBack(ctx, instance, values, span)
+function Eval:loopBack(ctx, instance, values, span)
     local builder = ctx.builder
     local temporaries = {}
     for index, target in ipairs(instance.loopTargets) do
@@ -4276,14 +4242,6 @@ function Eval:emitLoopBack(ctx, instance, values, span)
     builder:emit(ctx.body, Ir.Next)
     instance.loopBack = true
     ctx.terminated = true
-end
-
-function Eval:applyMethodResidual(ctx, def, values, receiver, span)
-    local instance = self:instanceFor(def, span, values, receiver)
-    if instance.status == "building" and not instance.results then
-        D.reject("recursive-result", "Recursive method " .. def.name .. " needs an explicit result annotation", span)
-    end
-    return self:emitCall(ctx, instance, values, span, receiver)
 end
 
 -- Builds the argument list from the instance's input plan.

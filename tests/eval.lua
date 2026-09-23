@@ -638,7 +638,16 @@ do
     check(interpret("positional", {}, source)[1] == 25, "every key may also be supplied positionally")
     compile(source)
 end
+-- A keyed requirement is always annotated, and an annotation written as a signature types the value
+-- supplied for it exactly as a positional requirement does, so the lambda's parameter needs no
+-- annotation of its own. Unifying keyed supply with positional supply is what makes this work.
+local keyedLambda = "let apply2 { f: (U32): U32, x: U32 } : U32 = f(x)\n"
+    .. "let g(): U32 = apply2 { f = |a| -> a + 1, x = 5 }\nreturn { functions = { g } }"
+check(interpret("g", {}, keyedLambda)[1] == 6,
+    "a signature annotation types the lambda a keyed requirement is supplied")
+compile(keyedLambda)
 rejects("unknown-member", "let f { x: U32 } = x\nlet bad(): U32 = f { y = 1 }\nreturn { functions = { bad } }")
+
 rejects("duplicate", "let f { x: U32 } = x\nlet bad(): U32 = f { x = 1, x = 2 }\nreturn { functions = { bad } }")
 rejects("keyed-required", "let f { x: U32, y: U32 }: U32 = x + y\nlet g = f(1)\nreturn { functions = {} }")
 
