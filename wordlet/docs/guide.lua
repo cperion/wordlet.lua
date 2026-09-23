@@ -45,7 +45,8 @@ change how something should be designed.
 25. [A practical design workflow](#25-a-practical-design-workflow)
 26. [Questions to ask during code review](#26-questions-to-ask-during-code-review)
 27. [Wordlet naming rules](#27-wordlet-naming-rules)
-28. [The central Wordlet instinct](#28-the-central-wordlet-instinct)
+28. [Handlers as requirements: hierarchical continuation wiring](#28-handlers-as-requirements-hierarchical-continuation-wiring)
+29. [The central Wordlet instinct](#29-the-central-wordlet-instinct)
 
 ---
 
@@ -1448,7 +1449,173 @@ Use some of that saved visual space for names that communicate meaning.
 
 ---
 
-## 28. The central Wordlet instinct
+## 28. Handlers as requirements: hierarchical continuation wiring
+
+An Elm-style architecture centers on one global model, messages and an update
+function:
+
+```text
+Model → View → Message → Update → Model
+```
+
+That predicts beautifully, and it converges on a fairly global notion of state and
+message routing. Wordlet's shape is different:
+
+```text
+Parent word
+├── owns parent state
+├── owns and wires ChildA
+├── owns and wires ChildB
+├── supplies requirements downward
+└── supplies continuations downward
+
+Child
+├── owns its local state
+├── computes locally
+└── reaches the outside only through supplied continuations
+```
+
+So the architecture is not "data flows one way". It is **hierarchical control-flow
+composition under lexical ownership**. The child does not emit an untyped message
+into a global update; it receives an explicit contract, and the parent decides what
+each exit means:
+
+```text
+Editor {
+    document_changed = update_document_state,
+    save_requested = save_current_document,
+    close_requested = close_editor,
+}
+```
+
+The property that follows is stronger than "messages flow upward":
+
+> A child can only affect the outside world through capabilities the parent
+> explicitly supplied.
+
+That is a capability property — the absence of *ambient authority*. A child cannot
+reach navigation, persistence or a sibling unless it is given a word that provides
+that capability. It is a discipline, not enforcement: nothing stops a parent from
+supplying too much, so a review question is whether each child receives exactly the
+capabilities its named exits mention.
+
+### This is the handler-in-scope half of algebraic effects
+
+A child's requirements *are* an effect signature, and the parent's supply is the
+handler:
+
+```text
+let admit(
+    request: Request,
+    on_admitted: (Accepted): Unit,
+    on_denied: (Rejected): Unit,
+): Unit = ...
+```
+
+`on_admitted` and `on_denied` are the operations the child may perform; the parent
+supplies their meaning. Keyed application is the `match` that dispatches an outcome,
+and keyed supply is how a handler set is built. What Wordlet does *not* add is a
+resumable, first-class continuation: the child's "perform" is an ordinary call, so
+no continuation is captured, and a handler whose identity is known specializes into
+the call site — an inlined effect handler. The callable distinction is the same
+lever: known code is a direct call, a handler that arrives at run time is the
+callable ABI.
+
+### The two directions are duals
+
+Capabilities travel downward and outcomes travel upward, and both are
+continuations:
+
+- **Downward:** the parent supplies words and the child calls them. Use it when the
+  exit happens inside the owner's activation.
+- **Upward:** the child returns a sum and the parent dispatches it. Use it when the
+  exit must be deferred, stored, or cross a boundary.
+
+The ownership model decides which is available. A borrowed closure cannot escape, so
+a capability the child keeps past the owner's activation has to be owned code or a
+value it returns. That is not friction — it is the type system enforcing the
+containment the pattern wants. `borrow-escape` and `ref-escape` become architectural
+diagnostics: they fire precisely when a child tried to keep authority past its
+owner's lifetime.
+
+`examples/pipeline.let` shows one child serving both directions through an
+`R: Type` parameter: `settle` supplies exits that yield a scalar, `evaluate` returns
+the outcome as a sum, and `summarize` dispatches it.
+
+### State ownership and architectural ownership point the same way
+
+A child can own real mutable state without every transition becoming a global
+message:
+
+```text
+let Editor = {
+    cursor: U32,
+    selection: U32,
+    ...
+}
+```
+
+and operate on it directly; only what is architecturally meaningful crosses the
+boundary. So you do not have to choose between "everything is globally immutable
+data" and "everything has a pointer to everything else". You get **local mutable
+ownership with explicit continuation boundaries**.
+
+Methods borrow actual receivers, and nested lexical owners use the actual enclosing
+records rather than invented parent pointers, so the architecture tree and the
+storage tree are the same tree. Siblings share only through an owner reference or
+module storage, and both reintroduce the coupling the pattern otherwise keeps out —
+which is why they should be deliberate.
+
+### Where it is honest about its limits
+
+- **Componentized source, connected control flow — while handlers are known.** Once
+  a handler crosses an export or arrives from the host it becomes the callable ABI,
+  an invocation pointer. The design survives; the erasure does not. That is the same
+  binding-time lever as specialization (section 13).
+- **Continuation chains are stack, not loops.** Parent → child → parent is mutual
+  recursion between instances, so only a same-instance tail self-call becomes a back
+  edge. Shallow trees are fine; a deep synchronous chain needs a trampoline
+  (section 17).
+- **Sums are closed, which is both the point and the limit.** A child's outcome set
+  is exhaustively handled, which is what makes the wiring readable. Open extension —
+  plugins, third-party messages — needs a signature or ABI boundary and gives up the
+  exhaustive match.
+- **A child's state is tree-shaped by value.** Records copy on pass and return, so a
+  parent that wants a child to mutate shared state passes a place — a method
+  receiver or an enclosing owner — not a copy. `Ref` to a sibling local is rejected
+  on purpose (`syntax.md` §8.2).
+
+### The same shape outside UI
+
+The compiler in this repository is the pattern:
+
+```text
+parse(source, on_parsed, on_syntax_error)
+check(ast, on_checked, on_type_error)
+lower(checked, on_lowered, on_unresolved)
+```
+
+Each stage owns its cursor and tables, exposes only named exits, and the parent
+decides what each exit means. There is no global compiler-state object and no event
+bus; and because the handlers are known code the wiring specializes into direct
+calls, so the residual program looks far more like straight-line control flow than
+the component structure suggests. A server (`authenticated`, `unauthorized`,
+`malformed_request`, `internal_failure`) and a game (`Scene`, `Player`, `Inventory`,
+`Dialog`, `Combat`) have the same shape.
+
+### The principle
+
+> Parents own and compose stateful children; children expose only named
+> continuation points, and parents supply the computations attached to those points.
+
+This guide calls the mechanism **handlers as requirements**: a child's exits are
+requirements, and the pattern is how parents wire them. The design question is not
+"what event does this component emit?" but "what words does this child require, and
+who supplies them?"
+
+---
+
+## 29. The central Wordlet instinct
 
 Wordlet's design style can ultimately be condensed to:
 

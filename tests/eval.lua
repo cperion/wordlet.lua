@@ -1665,6 +1665,25 @@ do
     check(generated:find("continue;", 1, true) ~= nil, "the back edge continues the loop")
 end
 
+-- The hierarchical-continuation example: a parent owns the state, wires a child's exits two ways,
+-- and the same child serves a scalar boundary and a sum boundary by specializing its result type.
+do
+    local path = (source:match("^(.*[/\\])") or "./") .. "../examples/pipeline.let"
+    local file = assert(io.open(path, "rb"))
+    local text = file:read("*a")
+    assert(file:close())
+    local expected = {
+        { "settle", { 1, 50 }, 50 }, { "settle", { 0, 50 }, 0 }, { "settle", { 1, 500 }, 0 },
+        { "summarize", { 1, 50 }, 50 }, { "summarize", { 1, 500 }, 0 },
+    }
+    for _, case in ipairs(expected) do
+        local got = interpret(case[1], case[2], text)[1]
+        check(got == case[3], ("examples/pipeline.let %s(%d,%d): expected %s but got %s")
+            :format(case[1], case[2][1], case[2][2], tostring(case[3]), tostring(got)))
+    end
+    compile(text)
+end
+
 -- Reading module storage through a reference is an ordinary run-time read. A call whose arguments
 -- happen to be static must still be compiled rather than folded when the body needs that storage.
 do

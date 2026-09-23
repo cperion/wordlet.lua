@@ -303,7 +303,7 @@ check(P.source("--[[\na\nb]]\nlet x = 1\nreturn { functions = {} }", "t.let").de
 rejects("parse", "let f(x: U32) = x\nreturn { functions = { f }\n")
 
 -- examples parse -----------------------------------------------------------------
-for _, example in ipairs({ "arithmetic", "receivers", "captures", "sums", "tagged", "references", "arrays", "modules", "modules_util", "strings", "dispatch" }) do
+for _, example in ipairs({ "arithmetic", "receivers", "captures", "sums", "tagged", "references", "arrays", "modules", "modules_util", "strings", "dispatch", "pipeline" }) do
     local path = (source:match("^(.*[/\\])") or "./") .. "../examples/" .. example .. ".let"
     local file = assert(io.open(path, "rb"))
     local text = assert(file:read("*a"))

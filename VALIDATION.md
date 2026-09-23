@@ -54,6 +54,12 @@ one directly.
   to a back edge (`for (;;) { ... continue; }`), not a call, so dispatch is constant stack; a handler
   that called the loop would be a different code instance and would grow the stack one frame per
   step. `tests/eval.lua` asserts the value and that the loop, not a call, survives.
+- examples/pipeline.let: settle(1,50)=50, settle(0,50)=0, settle(1,500)=0, summarize(1,50)=50,
+  summarize(1,500)=0. Hierarchical continuation wiring: a parent owns a stateful record and composes
+  a child that is a method on it; the child's only exits are the callable requirements the parent
+  supplies. `settle` supplies exits that yield a scalar, `evaluate` returns the outcome as a sum, and
+  `summarize` dispatches it — the downward and upward duals of the same child, separated by the
+  `R: Type` parameter. `tests/eval.lua` asserts every value listed here.
 - examples/references.let: read_shared(1)=6, bump_shared(1)=7, borrowed(2)=55, following()=10,
   bump_following()=15. A reference to module storage persists a store; a reference to a captured
   record is live for the caller; a recursive Node/Link reaches and mutates its neighbour through a
