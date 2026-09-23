@@ -646,10 +646,12 @@ do
         .. "let full(): U32 = distance { x = 3, y = 4 }\n"
         .. "let partial(): U32 = distance { x = 3 } { y = 4 }\n"
         .. "let reordered(): U32 = distance { y = 4, x = 3 }\n"
-        .. "return { functions = { full, partial, reordered } }"
+        .. "let positional(): U32 = distance(3, 4)\n"
+        .. "return { functions = { full, partial, reordered, positional } }"
     check(interpret("full", {}, source)[1] == 25, "a keyed word is invoked by name")
     check(interpret("partial", {}, source)[1] == 25, "keyed supply specializes and then completes")
     check(interpret("reordered", {}, source)[1] == 25, "keyed requirements have no order")
+    check(interpret("positional", {}, source)[1] == 25, "every key may also be supplied positionally")
     compile(source)
 end
 rejects("unknown-member", "let f { x: U32 } = x\nlet bad(): U32 = f { y = 1 }\nreturn { functions = { bad } }")

@@ -529,17 +529,40 @@ same requirement, and both specialize and lower the same way: a keyed supply is
 reordered into the word's declaration order and invoked as an ordinary call, so
 nothing about it survives to runtime that an ordered call would not.
 
-That makes the choice a **design** decision, not a mechanism decision:
+What differs is how the call **reads**. An ordered call reads as an *operator*, so it
+fits requirements that are operands: few, fixed, and in an order the reader already
+knows.
+
+```text
+add(a, b)          lerp(a, b, t)          clamp(x, low, high)
+resize(width, height, image)              distance(a, b)
+```
+
+A keyed call reads as a *record*, so it fits requirements that are configuration or
+capabilities: independent, often same-typed, and named for a reason.
+
+```text
+render { width = w, height = h, scene = scene, camera = camera }
+Server { host = host, port = port, logger = logger, clock = clock, retry = retry }
+```
+
+The quick test is whether you can read the call aloud without the parameter names.
+`lerp(a, b, t)` works; `render(w, h, sc, cam)` does not.
+
+The definition decides, and that is the point: an ordered word cannot be called by
+name, so its interface commits every call site to operands. A keyed word may still be
+called positionally when every key is supplied (`distance(3, 4)`), because the order is
+its declaration order, but it can never be supplied partially by position. So `()` and
+`{}` are not interchangeable spellings at a call site; they are two interfaces a
+definition chooses between, and choosing is choosing how the call reads everywhere.
 
 ```text
 Use () when position communicates enough.
 Use {} when names communicate essential structure.
 ```
 
-Prefer ordered for a small, fixed set whose order is memorable (`add(a, b)`), and
-keyed once a reader would have to ask what argument four means (section 6). Both are
-first class; neither is a fallback for the other, and a schema is just the keyed word
-that constructs.
+Both are first class; neither is a fallback for the other, and a schema is just the
+keyed word that constructs.
 
 ---
 
