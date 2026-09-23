@@ -39,7 +39,59 @@ function M.function_(fn, definitions, seeded)
         for key, value in pairs(set) do out[key] = value end
         return out
     end
-    local function checkList(list, visible, storages, inLoop)
+
+    -- The storage a place reads or writes through: a projection or an index reaches the same cell,
+
+    -- so the local at the end of the base chain is what must have a value. A view element names a
+
+    -- view value rather than a cell, so it roots nowhere.
+
+    -- The storages every one of these arm sets established. Each arm set starts from the incoming
+    -- one, so an id already initialized is in all of them unless an arm is missing.
+    local function everyArm(sets)
+        local kept = {}
+        for id in pairs(sets[1] or {}) do
+            local inEvery = true
+            for index = 2, #sets do
+                if not sets[index][id] then inEvery = false; break end
+            end
+            if inEvery then kept[id] = true end
+        end
+        return kept
+    end
+
+    -- Replace a set's contents with another's, so callers that hold the same table see the change.
+    local function replace(target, source)
+        for id in pairs(target) do if not source[id] then target[id] = nil end end
+        for id in pairs(source) do target[id] = true end
+    end
+
+    local function rootOf(place)
+
+        while place do
+
+            if place.kind == "Local" then return place.storage.id end
+
+            if place.kind == "Project" or place.kind == "Deref" or place.kind == "Index" then
+
+                place = place.base
+
+            else
+
+                return nil
+
+            end
+
+        end
+
+        return nil
+
+    end
+    -- `initialized` is the set of storages that have a value on every path to the current
+
+    -- statement; it is narrowed by an `If` or a `Switch` and never widened by a `Loop`.
+
+    local function checkList(list, visible, storages, inLoop, initialized)
         for _, stmt in ipairs(list) do
             local kind = stmt.kind
             if kind == "Let" then
@@ -55,6 +107,11 @@ function M.function_(fn, definitions, seeded)
                 if stmt.place.kind == "Local" and not storages[stmt.place.storage.id] then
                     D.bug("ir-place", "Read of undeclared storage " .. stmt.place.storage.id)
                 end
+                local root = rootOf(stmt.place)
+                if root and not initialized[root] then
+                    D.bug("ir-initialized", "Read of storage " .. root
+                        .. " whose value is not established on every path to it")
+                end
                 bind(visible, stmt.value.id, stmt.type)
             elseif kind == "Var" then
                 storages[stmt.storage.id] = stmt.type
@@ -62,31 +119,63 @@ function M.function_(fn, definitions, seeded)
                     if M.expr(stmt.initial, visible, storages) ~= stmt.type then
                         D.bug("ir-type", "Var initialiser does not match the storage type")
                     end
+                    initialized[stmt.storage.id] = true
                 end
             elseif kind == "Store" then
                 local placeType = M.place(stmt.place, storages, visible)
                 if M.expr(stmt.value, visible, storages) ~= placeType then
                     D.bug("ir-type", "Store value does not match the place's type")
                 end
+                local root = rootOf(stmt.place)
+                if root then initialized[root] = true end
             elseif kind == "If" then
                 M.expr(stmt.test, visible, storages)
-                checkList(stmt.yes, copy(visible), storages, inLoop)
-                checkList(stmt.no, copy(visible), storages, inLoop)
+                -- A storage has a value after the `If` only if both arms gave it one. Each arm set
+                -- starts from the incoming one, so this also keeps anything already initialized,
+                -- and it *adds* a storage both arms stored to even though it had no initializer:
+                -- that is exactly the if-expression result storage, declared, stored by each arm,
+                -- and then read.
+                local yesInitialized, noInitialized = copy(initialized), copy(initialized)
+                checkList(stmt.yes, copy(visible), storages, inLoop, yesInitialized)
+                checkList(stmt.no, copy(visible), storages, inLoop, noInitialized)
+                -- Only an arm that reaches the continuation takes part: an arm ending in `Next`,
+                -- `Return` or `Trap` transfers control away, and an empty arm passes the incoming
+                -- set through, which its copy already holds.
+                local reaching = {}
+                if falls(stmt.yes) then reaching[#reaching + 1] = yesInitialized end
+                if falls(stmt.no) then reaching[#reaching + 1] = noInitialized end
+                if #reaching > 0 then replace(initialized, everyArm(reaching)) end
             elseif kind == "Switch" then
                 if not stmt.sum:isTaggedType() then D.bug("ir-type", "Switch needs a sum type") end
                 if visible[stmt.variant.id] ~= stmt.sum then
                     D.bug("ir-type", "Switch tests a value that is not of that sum type")
                 end
+                -- The set after the `Switch` is what every arm established. A case the builder
+                -- omitted would fall through with the incoming set, so a switch that does not
+                -- name every alternative keeps only what was already initialized.
+                local incoming, reaching = copy(initialized), {}
                 for _, case in ipairs(stmt.cases) do
                     if not S.caseOf(stmt.sum, case.tag) then
                         D.bug("ir-type", "Switch has no alternative " .. case.tag)
                     end
-                    checkList(case.body, copy(visible), storages, inLoop)
+                    local arm = copy(initialized)
+                    checkList(case.body, copy(visible), storages, inLoop, arm)
+                    -- A case body that transfers control does not reach the continuation.
+                    if falls(case.body) then reaching[#reaching + 1] = arm end
                 end
+                -- An alternative the builder did not name falls through with the incoming set.
+                if #stmt.cases < #S.alternatives(stmt.sum) then reaching[#reaching + 1] = incoming end
+                if #reaching > 0 then replace(initialized, everyArm(reaching)) end
             elseif kind == "Loop" then
-                -- A loop never falls through, so its body is checked as a loop context and no
-                -- statement after it in this list is unreachable because of it.
-                checkList(stmt.body, copy(visible), storages, true)
+                -- A self-tail call becomes a `Loop`. The emitter puts the continuation inside the
+                -- `for (;;)`, so falling off the end of the body reaches the statements after the
+                -- loop with whatever the body's fall-through established, while a `Next` starts the
+                -- next iteration from the set the loop was entered with -- which is why the body
+                -- starts from the incoming set: a storage only the back edge gave a value is not
+                -- initialized on the first iteration.
+                local bodyEnd = copy(initialized)
+                checkList(stmt.body, copy(visible), storages, true, bodyEnd)
+                replace(initialized, bodyEnd)
             elseif kind == "Call" or kind == "Indirect" then
                 local target = definitions[stmt.target]
                 if kind == "Call" and not target then
@@ -245,12 +334,20 @@ function M.function_(fn, definitions, seeded)
         end
         if param.kind == "ValueParam" then bind(visible, param.binding.id, param.type) end
     end
-    local storages = {}
-    for id, ty in pairs(seeded or {}) do storages[id] = ty end
+    -- A module-level storage and a borrowed place parameter both hold a value when the function is
+
+    -- entered, so they start initialized; a `Var` adds its own storage only when it has an
+
+    -- initializer (interfaces.md §6 item 3).
+
+    local storages, initialized = {}, {}
+    for id, ty in pairs(seeded or {}) do storages[id], initialized[id] = ty, true end
     for _, param in ipairs(fn.params) do
-        if param.kind == "PlaceParam" then storages[param.binding.id] = param.type end
+        if param.kind == "PlaceParam" then
+            storages[param.binding.id], initialized[param.binding.id] = param.type, true
+        end
     end
-    checkList(fn.body, visible, storages)
+    checkList(fn.body, visible, storages, nil, initialized)
     if falls(fn.body) then
         D.bug("ir-fallthrough", "Function " .. fn.id .. " can fall through without returning")
     end

@@ -241,10 +241,13 @@ These are the obligations `check.lua` verifies; the builder should not rely on t
 
    The `Ir.fn`'s body list must not fall through; `architecture.md` §9 requires every reachable path
    to end in `Return`.
-3. **Definite initialization.** Track a set of initialized storage through a list: `Var` adds its
-   storage; `If` produces the *intersection* of its arms' outputs (a missing arm passes the input
-   set through); `Loop` adds nothing and does not fall through. A `Read` of a storage not in the set
-   is a `bug`.
+3. **Definite initialization.** Track a set of initialized storage through a list: a `Var` with an
+   initializer adds its storage and a `Store` adds the storage its place roots at; `If` and
+   `Switch` keep what every arm that *continues* (item 2) leaves established, with the input set for
+   an arm the builder did not name; a `Loop` hands its incoming set to the body and takes the
+   body's fall-through set, because the emitter places the continuation inside the loop while a
+   `Next` starts the next iteration. Module storage and a borrowed place parameter start
+   initialized. A `Read` whose place roots at a storage not in the set is a `bug`.
 4. **Places.** `Place.Local(storage)` requires storage declared by `Var`, by a `PlaceParam`, or by a
    module-level `Var` outside every function. `Place.Project(base, field)` requires a record-typed
    base and an existing field. `Place.Deref` requires a base holding a `Ref` or a `Ptr`, and records
@@ -269,10 +272,6 @@ These are the obligations `check.lua` verifies; the builder should not rely on t
    both arms to be callables of one signature; a word arm needs declared result types and a closure
    arm may not borrow storage, because the value holds its environments by value. Erasing a
    runtime-tagged value into a signature rejects (`callable-erase`).
-   signature, so the results join through one slot per result. A join needs both arms to be callables
-   of one signature; a word arm needs declared result types and a closure arm may not borrow storage,
-   because the value holds its environments by value. Erasing a runtime-tagged value into a signature
-   rejects (`callable-erase`).
 7. **Sum tags.** `Ir.ConstructVariant`/`Ir.VariantMatches`/`Ir.VariantPayload` each name their
    `Ty.Sum`. The tag must be one of its alternatives; a construct of a `Unit` alternative must omit
    its payload and any other alternative must have one whose type matches; a projection must not

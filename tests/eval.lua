@@ -1849,4 +1849,59 @@ do
     check(elapsed < 2, "a 400-binding chain compiles in linear time (took " .. elapsed .. " s)")
 end
 
+-- The verifier proves definite initialization (interfaces.md §6 item 3): a storage is read only
+-- where every *continuing* path gave it a value. These build IR directly, because the evaluator's
+-- own output always satisfies the rule, and the check is what turns that from an observation into
+-- a property.
+do
+    local Ir = S.Ir
+    local Check = require("wordlet.check")
+    local function fn(body)
+        return Ir.Fn("wordletfn_1", Ir.Body, 0, S.list({}), S.list({ S.U32 }), S.list({}), S.list(body))
+    end
+    local function rejects(program, what)
+        local ok, err = pcall(Check.program, S.list(program), nil, nil)
+        check(not ok and D.is(err) and err.code == "ir-initialized",
+            what .. " must be rejected as uninitialized")
+    end
+    local function accepts(program, what)
+        local ok, err = pcall(Check.program, S.list(program), nil, nil)
+        check(ok, what .. " must be accepted: " .. (ok and "" or tostring(err)))
+    end
+    local storage, value = Ir.Storage(1), Ir.Value(1)
+    local unitZero, unitOne = Ir.Const(S.U32, Ir.UInt(0)), Ir.Const(S.U32, Ir.UInt(1))
+    local trueTest = Ir.Const(S.Bool, Ir.Boolean(true))
+    local function read() return Ir.Read(value, S.U32, Ir.Local(storage)) end
+    local function ret() return Ir.Return(S.list({ Ir.Ref(value, S.U32) })) end
+
+    -- A `Var` with no initializer gives the storage no value on any path.
+    rejects({ fn({ Ir.Var(storage, S.U32, nil), read(), ret() }) }, "a read of an uninitialized Var")
+    accepts({ fn({ Ir.Var(storage, S.U32, unitZero), read(), ret() }) }, "a Var with an initializer")
+
+    -- An if-expression's result storage is declared, stored by each arm, then read.
+    accepts({ fn({ Ir.Var(storage, S.U32, nil),
+        Ir.If(trueTest, S.list({ Ir.Store(Ir.Local(storage), unitOne) }),
+            S.list({ Ir.Store(Ir.Local(storage), unitZero) })),
+        read(), ret() }) }, "a storage both arms store to")
+    rejects({ fn({ Ir.Var(storage, S.U32, nil),
+        Ir.If(trueTest, S.list({ Ir.Store(Ir.Local(storage), unitOne) }), S.list({})),
+        read(), ret() }) }, "a storage only one arm stores to")
+
+    -- An arm that transfers control never reaches the continuation, so what it stored does not
+    -- matter there.
+    accepts({ fn({ Ir.Var(storage, S.U32, nil),
+        Ir.If(trueTest, S.list({ Ir.Store(Ir.Local(storage), unitOne) }),
+            S.list({ Ir.Return(S.list({ unitZero })) })),
+        read(), ret() }) }, "an arm that stores, the other returning")
+
+    -- A loop's continuation is emitted inside the loop, so the body's fall-through set is what
+    -- reaches the statements after it; a storage only the back edge gave a value is not
+    -- initialized on the first iteration.
+    accepts({ fn({ Ir.Var(storage, S.U32, nil),
+        Ir.Loop(S.list({ Ir.Store(Ir.Local(storage), unitOne) })), read(), ret() }) },
+        "a storage the loop body falls through with")
+    rejects({ fn({ Ir.Var(storage, S.U32, nil), Ir.Loop(S.list({ Ir.Next })), read(), ret() }) },
+        "a read after a loop whose body gave the storage nothing")
+end
+
 print(("PASS: evaluator semantics (%d checks)"):format(checks))
