@@ -583,7 +583,11 @@ function Eval:checkNoValueCycle(ty, slot, span, seen)
     end
     -- A reference and a raw pointer are both indirection boundaries; a signature and a view hold no
     -- storage of their own. Everything else would embed the definition in itself.
-    if S.isRef(ty) or S.isPtr(ty) or S.isSig(ty) or S.isView(ty) then return end
+    -- A reference, a raw pointer and a slice are all indirection boundaries: the first two are an
+    -- address and a slice is an address with a length, so none of them depends on the size of what it
+    -- names. A signature and a view hold no storage of their own. Everything else would embed the
+    -- definition in itself.
+    if S.isRef(ty) or S.isPtr(ty) or S.isSlice(ty) or S.isSig(ty) or S.isView(ty) then return end
     if seen[ty] then return end
     seen[ty] = true
     if S.isRecord(ty) then
@@ -1012,14 +1016,31 @@ function Eval:evalRef(ctx, expr)
         local heldType = held and self:asType(held, expr.span) or nil
         if heldType then return V.type(S.ref(self:canonicalize(heldType))) end
         local origin = self:placeOrigin(ctx, expr)
-        if origin then
-            local reached = self:placeOf(ctx, expr, expr.span)
-            if reached.place then
+        -- What the place turned out to be decides as much as the route the name spells. A place
+        -- reached through a reference to module storage is module storage, and a caller holding its own
+        -- reference to one does not change that; the route alone says nothing, so the place is asked.
+        local ok, reached = pcall(function() return self:placeOf(ctx, expr, expr.span) end)
+        if ok and not reached.place and reached.concrete ~= nil then
+            -- The place exists as a compile-time value with no storage of its own, which is how the
+            -- interpreter holds a module array's element. Taking an address needs an address, and only
+            -- compiled code gives one, so say that rather than blaming the target's lifetime.
+            D.reject("runtime-in-normalization",
+                "A reference needs storage here, and this place has none while interpreting; compiling"
+                .. " the program gives it one", expr.span)
+        end
+        if ok and reached.place then
+            local container = reached.container
+            local isModule = origin == "module" or (container ~= nil and container.module == true)
+            -- A container whose provenance is not known here is treated as enclosing, which is the
+            -- conservative reading: it cannot be proven to be module storage, so it must not escape.
+            local isEnclosing = origin == "enclosing"
+                or (container ~= nil and (container.enclosing == true or container.retaining == true))
+            if isModule or isEnclosing then
                 local made = V.ref(S.ref(self:canonicalize(reached.ty)), reached.place, nil,
-                    origin == "enclosing", reached.value)
+                    isEnclosing, reached.value)
                 -- Building the reference is just an address, which is how a recursive structure is
                 -- built; reading or writing through it is what runtime code does.
-                made.module = origin == "module"
+                made.module = isModule
                 return made
             end
         end
@@ -1106,6 +1127,17 @@ end
 -- `Slice(array)` is a runtime-length view of an array: the address of its first element and its
 -- length. The view borrows the storage it names, so the lifetime rules of a reference apply to it.
 function Eval:evalSlice(ctx, expr)
+    -- `Slice(Node)` inside Node's own definition must not demand Node's layout: a slice is a pointer
+    -- and a length, so its size does not depend on its element either. It names the cell the
+    -- definition reserved, exactly as a pointer or a reference does.
+    if expr.kind == "Reference" then
+        local slot = lookup(ctx.scope, expr.name.text)
+        if slot and slot.open and slot.value == nil and slot.cell and self:isTypeDefinition(slot) then
+            if self.referencedCells == nil then self.referencedCells = {} end
+            self.referencedCells[slot.cell] = true
+            return V.type(S.slice(S.named(slot.cell)))
+        end
+    end
     local container = self:containerOf(ctx, expr, expr.span)
     -- `Slice(T)` is a type, exactly as `Ref(T)` is; only a non-type argument names a view.
     local element = self:asType(container.value, expr.span)
@@ -1291,7 +1323,7 @@ function Eval:placeOf(ctx, expr, span)
             if ctx.mode ~= "residual" then
                 D.reject("runtime-in-normalization", "A pointer element needs runtime code", expr.span)
             end
-            local view = self:expression(ctx, base.value, base.ty)
+            local view = self:containerExpr(ctx, base)
             local indexExpr = self:expression(ctx, index, S.U32)
             -- No length and so no guard: that is the whole difference from the slice index below.
             return { place = ctx.builder:ptrIndex(view, indexExpr, element), ty = element }
@@ -1315,7 +1347,7 @@ function Eval:placeOf(ctx, expr, span)
             if ctx.mode ~= "residual" then
                 D.reject("runtime-in-normalization", "A run-time slice index needs runtime code", expr.span)
             end
-            local view = self:expression(ctx, container.value, container.ty)
+            local view = self:containerExpr(ctx, container)
             local indexExpr = self:expression(ctx, index, S.U32)
             -- A run-time index is checked before it is used, exactly as an array's is.
             ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Ge", indexExpr,
@@ -1363,7 +1395,10 @@ function Eval:placeOf(ctx, expr, span)
         ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Ge", indexExpr,
             ctx.builder:u32(length), S.Bool), "index-range"))
         local place = container.place or self:arrayPlace(ctx, container.value, expr.span)
-        return { place = Ir.Index(place, indexExpr, element), ty = element }
+        -- The container travels too: `Ref(r[i])` has to be able to see that the element it names is
+        -- in module storage, even when the route to it is a run-time index.
+        return { place = Ir.Index(place, indexExpr, element), ty = element,
+            container = container.container }
     end
     D.reject("not-a-place", "This expression does not name storage", span or expr.span)
 end
@@ -1398,7 +1433,7 @@ function Eval:derefContainer(ctx, container, span)
         local place = container.place
         if not place then
             local storage = ctx.builder:var(ctx.body, container.ty,
-                self:expression(ctx, container.value, container.ty))
+                self:containerExpr(ctx, container))
             place = Ir.Local(storage)
         end
         return { place = Ir.Deref(place, target), ty = target, container = { retaining = true } }
@@ -1414,6 +1449,19 @@ end
 
 -- The container an element or field selection starts from: a compile-time value, or a place with the
 -- type it refers to. A selection over a selection does not read the intermediate value.
+-- The value a resolved container stands for, as an IR expression: the value it carries when there is
+-- one, and otherwise a read of the place it was resolved to. A container that came from `placeOf` has
+-- no value attached, so a consumer that needs the expression must be able to read one; assuming a value
+-- is there is what turned `Slice(Ptr(U8))` into an internal Lua error rather than a diagnostic.
+function Eval:containerExpr(ctx, container)
+    if container.value then return self:expression(ctx, container.value, container.ty) end
+    if container.place then
+        local read = ctx.builder:read(ctx.body, container.ty, container.place)
+        return ctx.builder:ref(read, container.ty)
+    end
+    D.bug("container-value", "A container has neither a value nor a place")
+end
+
 function Eval:containerOf(ctx, expr, span)
     if expr.kind == "Reference" or expr.kind == "FieldSelect" or expr.kind == "IndexExpr" then
         local ok, reached = pcall(function() return self:placeOf(ctx, expr, span) end)
@@ -3554,7 +3602,10 @@ function Eval:evalArguments(ctx, exprs, callee)
     for index, expr in ipairs(exprs) do
         local param = sc and def.params[index] or nil
         local expected
-        if param and param.annotation and param.annotation.kind == "SignatureExpr" then
+        -- The requirement decides, not how it was spelled: an alias of a signature is a signature, so
+        -- a lambda passed to `f: Endo` gets its parameter type from it just as one passed to a written
+        -- `(U32): U32` does. Only a signature is used this way, since that is what types a lambda.
+        if param and param.annotation then
             local ty = self:typeOf(param.annotation, sc, param.span)
             if S.isSig(ty) then expected = ty end
         end

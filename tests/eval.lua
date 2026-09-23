@@ -1468,6 +1468,54 @@ do
         ("both effect-only calls are compiled, not folded away (found %d)"):format(calls))
 end
 
+-- The evaluator decides from what a value or a place *is*, not from the syntax or the name that
+-- reached it, and a requirement types a lambda however it is spelled. Each of these was a false
+-- rejection before.
+do
+    -- A name a nested lambda needs has to travel through the lambda that encloses it: an environment
+    -- cannot hold a name its enclosing environment does not have.
+    local nested = "let Counter = { n: U32 }\n"
+        .. "let borrow(c: Counter): U32 = do\n"
+        .. "  let outer = || -> do\n"
+        .. "    let inner = |d: U32| -> do\n      c.n += d\n      return c.n\n    end\n"
+        .. "    return inner(3)\n  end\n"
+        .. "  return outer() * 10 + c.n\nend\n"
+        .. "let use(): U32 = borrow(Counter { n = 1 })\n"
+        .. "return { functions = { use } }"
+    check(interpret("use", {}, nested)[1] == 44, "a capture travels through a nested lambda")
+
+    -- A slice is an indirection, so a type may mention itself through one; by value it may not.
+    local recursive = "let Node = { value: U32, rest: Slice(Node) }\n"
+        .. "let head(n: Node): U32 = n.value\nreturn { functions = { head } }"
+    local generatedNode = compile(recursive):unit()
+    check(generatedNode:find("wordletrecord_1", 1, true) ~= nil
+        and generatedNode:find("wordletslice_", 1, true) ~= nil,
+        "a recursive type through a slice has a finite layout")
+    local pointed = compile("let Node = { value: U32, next: Ptr(Node) }\n"
+        .. "let head(n: Node): U32 = n.value\nreturn { functions = { head } }"):unit()
+    check(pointed:find("wordletrecord_1", 1, true) ~= nil,
+        "a recursive type through a pointer has a finite layout")
+    rejects("type-cycle", "let Bad = { child: Bad }\nreturn { functions = { } }")
+
+    -- A requirement types a lambda however it was spelled, so an alias is as good as a signature.
+    local aliased = "let Endo = (U32): U32\n"
+        .. "let twice(f: Endo, x: U32): U32 = f(f(x))\n"
+        .. "let use(): U32 = twice(|x| -> x + 1, 5)\n"
+        .. "return { functions = { use } }"
+    check(interpret("use", {}, aliased)[1] == 7,
+        "an alias of a signature types the lambda it receives")
+
+    -- A reference into module storage is module storage even when the route to it is a local
+    -- reference, so the compiler accepts it and the store reaches the module array.
+    local throughRef = "let pool = [10, 20, 30]\n"
+        .. "let bump(i: U32): U32 = do\n"
+        .. "  let r = Ref(pool)\n  r[i] += 5\n  return r[i]\nend\n"
+        .. "return { functions = { bump } }"
+    local reached = compile(throughRef):unit()
+    check(reached:find("wordletmodule_1.f_data", 1, true) ~= nil,
+        "a store through a local reference reaches module storage")
+end
+
 -- Exhausting a budget is a diagnostic, not a crash. A recursive word whose static arguments change
 -- specializes once per value, which must stop at a resource rather than at the host's own stack; a
 -- fold that merely runs out of depth is compiled instead; and the reference interpreter, which has no

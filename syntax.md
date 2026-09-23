@@ -486,8 +486,9 @@ must already be defined, so a sum cannot mention itself by value. Section 8.2 su
 
 ### 8.2 References and recursive types
 
-A reference names a place instead of copying it. It is one of the two indirection boundaries that
-make a recursive type finite -- `Ptr` (section 8.5) is the other -- and it is what lets a sum mention
+A reference names a place instead of copying it. It is one of the three indirection boundaries that
+make a recursive type finite -- `Ptr` (section 8.5) and `Slice` (section 8.4) are the others -- and it
+is what lets a sum mention
 itself:
 
 ```
@@ -698,6 +699,10 @@ No slice operation allocates, grows, frees or copies storage, and no string oper
 string. Building a byte sequence writes into storage the program already has, which is what keeps a
 view a view.
 
+A slice is an indirection boundary, so a type may mention itself through one: `let Node = { value:
+U32, rest: Slice(Node) }` is finite for the same reason a pointer to itself is, because a view's own
+size does not depend on its element.
+
 ### 8.5 Raw pointers
 
 `Ptr(T)` is an address the compiler does not track. It is deliberately a different type from `Ref(T)`:
@@ -742,10 +747,10 @@ let missing = bytes(4) == empty
 ```
 
 Ordering, pointer arithmetic and any conversion between a pointer and an integer are not offered.
-A pointer is an indirection boundary, so it is the second way a recursive type can be finite: `let
+A pointer is an indirection boundary, so it is one of the ways a recursive type can be finite: `let
 Node = { value: U32, next: Ptr(Node) }` has the layout of a struct that holds a pointer to itself, and
 a cycle that crosses only a `Ptr` is accepted for the same reason one that crosses a `Ref` is. A
-by-value cycle that crosses neither still rejects (`type-cycle`).
+by-value cycle that crosses none of them still rejects (`type-cycle`).
 
 `p[i]` is the only arithmetic a pointer has, so one thing has one spelling. A pointer is not a
 `Slice`: a slice carries a length and a pointer does not.

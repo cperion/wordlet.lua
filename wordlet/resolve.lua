@@ -9,7 +9,7 @@
 local M = {}
 
 -- Free names of a lambda body: referenced but not bound by its parameters or its own `let`s.
--- Nested lambdas and method bodies are separate functions and are not entered.
+-- A method body belongs to the schema it is written in and is not entered here.
 local function freeNames(node, bound, out)
     if node == nil then return end
     local kind = node.kind
@@ -17,7 +17,15 @@ local function freeNames(node, bound, out)
         local name = node.name.text
         if not bound[name] then out[name] = true end
         return
-    elseif kind == "Lambda" or kind == "SchemaExpr" then
+    elseif kind == "Lambda" then
+        -- A nested lambda is a separate function, but the names it needs have to travel through this
+        -- one: an environment cannot hold a name its enclosing environment does not have. So its
+        -- parameters are bound and its body is walked, which is what makes captures transitive.
+        local inner = {}
+        for key in pairs(bound) do inner[key] = true end
+        for _, param in ipairs(node.params) do inner[param.name.text] = true end
+        return freeNames(node.body, inner, out)
+    elseif kind == "SchemaExpr" then
         return
     elseif kind == "Block" then
         local inner = {}

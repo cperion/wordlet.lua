@@ -188,6 +188,17 @@ Gates 1–5 and 9–11 have their first executable form in `tests/parse.lua`, `t
    (`type-cycle`), and field selection through a `Ptr(Record)` resolves the cell a recursive definition
    reserved the way a reference does.
    bug rather than a source error.
+8n. **What a value or a place is, not how it was reached (audited):** the evaluator used to decide
+   several things from the syntax or the name route rather than from the value or place actually in
+   hand, and each of those was a false rejection or a crash. Now covered: a container resolved as a
+   place carries no value, so a consumer that needs the expression reads one from the place instead of
+   indexing a nil; a nested lambda's captures travel through the lambda that encloses it, because an
+   environment cannot hold a name its enclosing environment lacks; a slice is a third indirection
+   boundary, so a type may mention itself through one while a by-value cycle still rejects; a reference
+   decides module storage from the place as well as from the name route, so `Ref(r[i])` through a local
+   reference to module storage is module storage and its store reaches the module array, while the
+   interpreter says it needs storage rather than blaming the target's lifetime; and a requirement types
+   a lambda however it is spelled, so an alias of a signature is as good as a written one.
 9. **IR/checking:** storage/value distinction, scope and definite assignment, target signature checks,
    module storage seeded outside every function,
    dynamic failure guards, transitive borrow provenance, finite layouts, no metadata runtime slots.
