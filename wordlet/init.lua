@@ -28,7 +28,7 @@ function M.compile(options)
                 .. decl.path .. "` can be resolved next to it", decl.span)
         end
     end
-    local session = options.session or Eval.session(options)
+    local session = options.session or Eval.new(options)
     if options.session and options.session.instances then
         -- A fresh session per compilation is the supported entry point.
         D.bug("compile-session", "Reuse of an existing session is not supported yet")
@@ -117,7 +117,7 @@ end
 -- M.compile_file loads the module graph, then compiles the entry module with its own top scope. A
 -- source string with no path cannot resolve an import, so only a file may use one.
 function M.compile_file(path, options)
-    local engine = Eval.session(options)
+    local engine = Eval.new(options)
     local module = loadModule(engine, path, {}, {})
     engine.top = module.top
     local compilation = engine:compile(module.program, module.top)
@@ -149,7 +149,7 @@ end
 function M.interpret(options)
     local options = options or {}
     local program = Parse.source(options.source, options.name or "<source>")
-    local session = Eval.session(options)
+    local session = Eval.new(options)
     -- The reference interpreter executes the program, so unlike compile-time normalization it may
     -- read and write module storage through the concrete value it names.
     session.run = true
@@ -176,7 +176,7 @@ function M.interpret(options)
         else D.reject("interpret-arg", "Unsupported argument " .. tostring(value)) end
     end
     local span = word.span
-    local result = session:supply(session:context("normalize", session.top, span), word, args, span)
+    local result = session:supply(session:staticFrame(session.top, span), word, args, span)
     if V.tag(result) == "word" then
         D.reject("arity", "Entry " .. options.entry .. " needs more arguments to be saturated")
     end
@@ -272,7 +272,7 @@ M.guide = require("wordlet.docs.guide")
 -- The LuaJIT FFI front end; it requires `ffi` only when something is actually loaded.
 M.jit = require("wordlet.jit")
 
-M.session = Eval.session
+M.session = Eval.new
 M.diagnostic = D.format
 
 return M

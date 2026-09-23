@@ -57,7 +57,7 @@ function M.close(compilation)
         privateInline = not (compilation.session.options and compilation.session.options.inline == false),
         -- Named cells are the identity of a recursive type definition; a reference to one resolves
         -- to the definition's layout, which must be named so its forward declaration is emitted.
-        typeCells = (compilation.session and compilation.session.typeCells) or {},
+        typeCells = (compilation.session and compilation.session.types.cells) or {},
         tuples = {},        -- result vector -> { name, fields }
         tupleOrder = {},
         views = {},         -- Ty.View -> invocation-pointer layout

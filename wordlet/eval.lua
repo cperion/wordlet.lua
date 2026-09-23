@@ -1,16 +1,17 @@
 -- The evaluator: one walker for concrete, normalization and residual execution.
 --
--- Modes: "normalize" has no builder at all, so a static attempt cannot leave partial IR behind;
--- "residual" emits statements into the current Ir.Fn. Both share every expression rule.
+-- Layers: a frame that is not residual has no builder at all, so a static attempt cannot leave
+-- partial IR behind; a residual frame emits statements into the current Ir.Fn. Both share every
+-- expression rule.
 local D = require("wordlet.diag")
 local S = require("wordlet.schema")
 local IR = require("wordlet.ir")
 local V = require("wordlet.value")
 local Resolve = require("wordlet.resolve")
 
-local M = {}
-local Eval = {}
-Eval.__index = Eval
+-- The evaluator is installed on the session class `session.lua` declares: every `Eval:*` method is
+-- called on a session, and this module returns that class, so a caller can build one.
+local Eval = require("wordlet.session")
 
 local Ir = S.Ir
 local U64Kernel = require("wordletkit.u64")
@@ -155,83 +156,33 @@ local function requireStatic(values, span, def)
     end
 end
 
-local Ctx = {}
-Ctx.__index = Ctx
-function Ctx:arm(list)
-    return setmetatable({ session = self.session, mode = self.mode, scope = self.scope,
-        span = self.span, builder = self.builder, body = list,
-        instance = self.instance, tail = self.tail, expectedResult = self.expectedResult,
-        -- An arm is part of the enclosing block, so a deferred action pending there is still pending
-        -- inside the arm: a `return` in an arm must run it too.
-        deferFrame = self.deferFrame }, Ctx)
+-- A frame is one context per body construction. `residual` is the layer: a residual frame emits
+-- into the current Ir.Fn, and a frame that is not residual runs the same rules with no builder at
+-- all, so a static attempt cannot leave partial IR behind.
+local Frame = {}
+Frame.__index = Frame
+
+-- An arm is a nested list inside the enclosing body: an if or match arm, or a condition's branch.
+-- It runs in the same body, so it inherits every field the enclosing frame carries — the tail flag,
+-- the expected result, the pending deferred actions — and only the list it builds changes. Copying
+-- all fields is what keeps a field added later from being forgotten here; `terminated` is reset
+-- because it describes a list, and this list has not ended.
+function Frame:arm(list)
+    local child = setmetatable({}, Frame)
+    for key, value in pairs(self) do child[key] = value end
+    child.body = list
+    child.terminated = nil
+    return child
 end
 
-function M.session(options)
-    options = options or {}
-    local limits = options.limits or {}
-    return setmetatable({
-        options = options, limits = limits,
-        definitions = {}, instances = {}, order = {}, moduleStorages = {},
-        -- Foreign declarations in first-use order, so the prototypes they need are deterministic.
-        foreignInstances = {}, foreignOrder = {},
-        -- Tagged-callable arms, keyed by the code identity that names them in a type.
-        arms = {},
-        -- Sealed definitions of named cells, keyed by the identity a recursive definition reserved.
-        typeCells = {},
-        nextTypeCell = 0,
-        nextDef = 0, nextFn = 0, nextModule = 0, steps = 0,
-        maxSteps = limits.steps or 1000000,
-        -- Three separate budgets, because they bound three different recursions. Specialization
-        -- nesting is the depth of nested instance building; static depth is nested compile-time
-        -- folding, which is an optimization in residual code and can fall back to compiling; and
-        -- the interpreter, which has no fallback, gets the largest bound it can have without
-        -- reaching the host's own stack limit (measured at roughly 2500 on this host, so this
-        -- deliberately stays well below it).
-        buildDepth = 0, maxBuildDepth = limits.depth or 256,
-        staticDepth = 0, maxStaticDepth = limits.staticDepth or 64,
-        maxInterpretDepth = limits.interpretDepth or 1024,
-    }, Eval)
+-- Two ways to enter a body: with no builder at all (normalization, and the reference
+-- interpreter's own walk), or emitting into the Ir.Fn this frame is building.
+function Eval:staticFrame(sc, span)
+    return setmetatable({ session = self, residual = false, scope = sc, span = span }, Frame)
 end
 
-function Eval:step(span)
-    self.steps = self.steps + 1
-    if self.steps > self.maxSteps then D.resource("steps", "Static evaluation budget exhausted", span) end
-end
-
--- Specialization nests: building one instance evaluates its body, and a body that specializes again
--- nests another build. The host's Lua stack gives out long before a thousand nested builds would reach
--- the key budget, so the nesting is bounded here and its exhaustion names a resource instead of
--- surfacing as an unlabelled stack overflow.
--- The check is made before the depth changes, so a refused entry leaves the session as it found it
--- and the caller that restores the depth has nothing to restore.
-function Eval:enterBuild(span)
-    if self.buildDepth >= self.maxBuildDepth then
-        D.resource("depth", "Specialization nests more than " .. self.maxBuildDepth
-            .. " deep; a recursive word whose static arguments change specializes once per value, so"
-            .. " bind the changing value at run time", span)
-    end
-    self.buildDepth = self.buildDepth + 1
-end
-
-function Eval:leaveBuild() self.buildDepth = self.buildDepth - 1 end
-
--- Folding a known call is optional in residual code, so its depth is a budget rather than a wall: a
--- fold that runs out of depth is compiled instead. The reference interpreter has no such fallback, so
--- it is given the largest bound it can have without reaching the host stack limit.
-function Eval:enterStatic(def, span)
-    local allowed = self.run and self.maxInterpretDepth or self.maxStaticDepth
-    if self.staticDepth >= allowed then
-        D.resource("static-depth", "Static evaluation nests more than " .. allowed .. " deep in "
-            .. def.name .. "; a recursive word with a run-time argument is compiled instead, and"
-            .. " the reference interpreter is bounded", span)
-    end
-    self.staticDepth = self.staticDepth + 1
-end
-
-function Eval:leaveStatic() self.staticDepth = self.staticDepth - 1 end
-
-function Eval:context(mode, sc, span)
-    return setmetatable({ session = self, mode = mode, scope = sc, span = span }, Ctx)
+function Eval:residualFrame(sc, span)
+    return setmetatable({ session = self, residual = true, scope = sc, span = span }, Frame)
 end
 
 -- Top level -----------------------------------------------------------------------------------
@@ -304,7 +255,7 @@ function Eval:load(program)
             -- a named record is a fine target even though it is not itself a runtime value.
             local pointer = S.ptr(target)
             S.checkRuntime(pointer, span)
-            if ctx.mode ~= "residual" then
+            if not ctx.residual then
                 D.reject("runtime-in-normalization",
                     "A null pointer exists only in compiled code", span)
             end
@@ -402,8 +353,8 @@ function Eval:compile(program, loadedTop)
     end
 
     local compilation = { session = self, exports = exports, functions = {}, types = exports.types,
-        foreigns = self.foreignOrder,
-        modules = self.moduleStorages }
+        foreigns = self.foreigns.order,
+        modules = self.modules }
     for _, export in ipairs(exports.functions) do
         local instance = self:instanceFor(export.word.def, export.span, export.word.args)
         compilation.functions[#compilation.functions + 1] = { name = export.name, instance = instance, span = export.span }
@@ -426,8 +377,8 @@ function Eval:moduleInitialiser(modules, span)
     local body = {}
     local fn = { id = target, role = Ir.Body, hidden = 0, inputs = {}, params = {}, results = {},
         body = body }
-    local ctx = setmetatable({ session = self, mode = "residual", scope = self.top, span = span,
-        builder = builder, body = body, fn = fn }, Ctx)
+    local ctx = self:residualFrame(self.top, span)
+    ctx.builder, ctx.body, ctx.fn = builder, body, fn
     for _, module in ipairs(modules) do
         local fields = {}
         if S.isArray(module.type) then
@@ -451,7 +402,7 @@ end
 
 function Eval:resolveExportItem(item, top)
     if item.kind == "ExportAlias" then
-        return self:evalExpr(self:context("normalize", top, item.span), item.value)
+        return self:evalExpr(self:staticFrame(top, item.span), item.value)
     end
     local name = item.name.text
     local slot = lookup(top, name)
@@ -474,7 +425,7 @@ function Eval:moduleObject(slot, span)
         local array = V.array(value.ty, nil, Ir.Local(storage))
         array.module = true
         array.backing = value
-        self.moduleStorages[#self.moduleStorages + 1] = {
+        self.modules[#self.modules + 1] = {
             storage = storage, type = value.ty, initial = value, name = slot.name,
         }
         slot.module = { object = array }
@@ -486,7 +437,7 @@ function Eval:moduleObject(slot, span)
     object.module = true
     -- The interpreter reads and writes that record directly, so both modes observe one state.
     object.backing = value
-    self.moduleStorages[#self.moduleStorages + 1] = {
+    self.modules[#self.modules + 1] = {
         storage = storage, type = value.ty, initial = value, name = slot.name,
     }
     slot.module = { object = object }
@@ -547,19 +498,19 @@ function Eval:demand(slot, span)
         -- A binding that its own type computation demands reserves a cell, so the definition can refer
         -- to itself through an indirection instead of forcing its layout.
         if sibling.cell == nil then
-            self.nextTypeCell = self.nextTypeCell + 1
-            sibling.cell = sibling.name .. "#" .. tostring(self.nextTypeCell)
+            self.nextCell = self.nextCell + 1
+            sibling.cell = sibling.name .. "#" .. tostring(self.nextCell)
         end
         sibling.open = true
     end
-    local ctx = self:context("normalize", slot.scope, slot.decl.span)
+    local ctx = self:staticFrame(slot.scope, slot.decl.span)
     -- A top-level initializer is compile-time execution over concrete values, so module storage is
     -- readable and writable here even though residual specialization must not touch it. Nested
     -- demands keep the flag set and the outermost demand restores it.
-    local savedDemand = self.moduleDemand
-    self.moduleDemand = true
+    local savedDemand = self.demanding
+    self.demanding = true
     local ok, result = pcall(self.evalValueDef, self, ctx, slot.decl.def)
-    self.moduleDemand = savedDemand
+    self.demanding = savedDemand
     for _, sibling in ipairs(siblings) do
         sibling.demanding = nil
         sibling.open = false
@@ -594,13 +545,11 @@ end
 function Eval:sealCell(slot, span)
     span = span or (slot.decl and slot.decl.span)
     local ty = self:asType(slot.value, span)
-    if self.referencedCells == nil then self.referencedCells = {} end
     if ty then
-        self.typeCells[slot.cell] = ty
-        self.namedByMeaning = self.namedByMeaning or {}
-        self.namedByMeaning[S.encode(ty)] = S.named(slot.cell)
+        self.types.cells[slot.cell] = ty
+        self.types.byMeaning[S.encode(ty)] = S.named(slot.cell)
     end
-    if ty and self.referencedCells[slot.cell] then
+    if ty and self.types.referenced[slot.cell] then
         -- A recursive alias must be nominal. A reference, pointer or slice chain that unfolds to
         -- the cell itself is an infinite type with no record or sum to name, and it has no finite
         -- layout: follow the chain before the ordinary value-cycle walk, which treats every
@@ -608,7 +557,7 @@ function Eval:sealCell(slot, span)
         local function reachesCell(current, seen)
             if S.isNamed(current) then
                 if current.cell == slot.cell then return true end
-                local resolved = self.typeCells[current.cell]
+                local resolved = self.types.cells[current.cell]
                 if resolved and not (seen and seen[current.cell]) then
                     seen = seen or {}
                     seen[current.cell] = true
@@ -727,7 +676,7 @@ function Eval:makeVariant(ctx, ctor, payload, span)
     -- that knownness and matching treat it like any other alternative.
     local unit = ctor.caseType == S.Unit and payload == nil
     local value = payload or V.unit()
-    if ctx.mode ~= "residual" then
+    if not ctx.residual then
         return V.variant(ctor.sum, ctor.case, value)
     end
     local id = ctx.builder:valueId()
@@ -773,7 +722,7 @@ function Eval:evalMatch(ctx, base, expr, span)
         return self:supply(ctx, handlers[base.case], { payload }, span)
     end
 
-    if ctx.mode ~= "residual" then
+    if not ctx.residual then
         D.reject("runtime-in-normalization", "Matching an opaque variant needs runtime code", span)
     end
     return self:matchResidual(ctx, base, handlers, span)
@@ -894,7 +843,7 @@ end
 -- so this is the one place recursion has to be unwound for inspection.
 function Eval:resolveType(ty, span)
     if S.isNamed(ty) then
-        local cell = self.typeCells[ty.cell]
+        local cell = self.types.cells[ty.cell]
         if not cell then
             D.bug("type-cell", "A named type cell has no definition: " .. tostring(ty.cell))
         end
@@ -907,7 +856,7 @@ end
 -- the same nominal thing: otherwise the type written inside the definition and the type of an
 -- instance built from it would not compare equal.
 function Eval:canonicalize(ty)
-    local named = self.namedByMeaning and self.namedByMeaning[S.encode(ty)]
+    local named = self.types.byMeaning and self.types.byMeaning[S.encode(ty)]
     if named then return named end
     if S.isPtr(ty) then
         local target = self:canonicalize(ty.target)
@@ -971,7 +920,7 @@ function Eval:derefPlace(ctx, value, span)
     -- IR node, so the verifier needs no type-cell table to check it.
     local pointee = S.environmentOf(self:pointeeType(value.ty))
     if value.place then return Ir.Deref(value.place, pointee) end
-    if ctx.mode ~= "residual" then
+    if not ctx.residual then
         D.reject("runtime-in-normalization", "A runtime reference needs runtime code", span)
     end
     local storage = ctx.builder:var(ctx.body, value.ty, self:expression(ctx, value, value.ty))
@@ -1047,8 +996,7 @@ function Eval:evalPtr(ctx, expr)
         -- indirection boundary exactly as a reference is, so it names the cell the definition
         -- reserved and the recursion stays finite.
         if slot and slot.open and slot.value == nil and slot.cell and self:isTypeDefinition(slot) then
-            if self.referencedCells == nil then self.referencedCells = {} end
-            self.referencedCells[slot.cell] = true
+            self.types.referenced[slot.cell] = true
             return V.type(S.ptr(S.named(slot.cell)))
         end
         local value = slot and self:demand(slot, expr.span).value or nil
@@ -1062,7 +1010,7 @@ function Eval:evalPtr(ctx, expr)
         if asType then return V.type(S.ptr(self:canonicalize(asType))) end
         D.reject("type-required", "Ptr needs an element type or a place to address", expr.span)
     end
-    if ctx.mode ~= "residual" then
+    if not ctx.residual then
         D.reject("runtime-in-normalization", "A raw pointer exists only in compiled code", expr.span)
     end
     -- A place expression names storage directly, so the address is that place and nothing is read.
@@ -1093,8 +1041,7 @@ function Eval:evalRef(ctx, expr)
         -- `Ref(Node)` inside Node's own definition must not demand Node's layout: it refers to the
         -- cell that definition reserved, which is what makes the recursion finite.
         if slot and slot.open and slot.value == nil and slot.cell and self:isTypeDefinition(slot) then
-            if self.referencedCells == nil then self.referencedCells = {} end
-            self.referencedCells[slot.cell] = true
+            self.types.referenced[slot.cell] = true
             return V.type(S.ref(S.named(slot.cell)))
         end
     end
@@ -1199,7 +1146,7 @@ function Eval:evalArray(ctx, expr, expected)
             .. tostring(ty.length) .. " elements", expr.span)
     end
     for _, item in ipairs(items) do self:requireType(item, ty.element, expr.span) end
-    if ctx.mode ~= "residual" then return V.array(ty, items) end
+    if not ctx.residual then return V.array(ty, items) end
     local exprs, borrowed = {}, false
     for index, item in ipairs(items) do
         exprs[index] = self:expression(ctx, item, ty.element)
@@ -1221,8 +1168,7 @@ function Eval:evalSlice(ctx, expr)
     if expr.kind == "Reference" then
         local slot = lookup(ctx.scope, expr.name.text)
         if slot and slot.open and slot.value == nil and slot.cell and self:isTypeDefinition(slot) then
-            if self.referencedCells == nil then self.referencedCells = {} end
-            self.referencedCells[slot.cell] = true
+            self.types.referenced[slot.cell] = true
             return V.type(S.slice(S.named(slot.cell)))
         end
     end
@@ -1239,7 +1185,7 @@ function Eval:evalSlice(ctx, expr)
     end
     -- A reference to module storage may leave the activation; a view of anything else may not.
     local tied = not (container.container and container.container.module)
-    if ctx.mode ~= "residual" then
+    if not ctx.residual then
         local held = container.value
         if not (V.tag(held) == "array" and held.items) then
             D.reject("runtime-in-normalization", "A runtime slice must be built in runtime code", expr.span)
@@ -1249,7 +1195,7 @@ function Eval:evalSlice(ctx, expr)
         -- initialization and the reference interpreter execute over that storage, so for them it
         -- is the value; elsewhere the call is compiled instead.
         if container.container and container.container.module
-            and not (ctx.session.run or ctx.session.moduleDemand) then
+            and not (ctx.session.run or ctx.session.demanding) then
             D.reject("runtime-in-normalization",
                 "A view of module storage is built where it is used, not folded while compiling",
                 expr.span)
@@ -1293,7 +1239,7 @@ function Eval:arrayPlace(ctx, value, span)
         value.expr = nil
         return value.place
     end
-    if ctx.mode ~= "residual" then
+    if not ctx.residual then
         D.reject("runtime-in-normalization", "A runtime array needs runtime code", span)
     end
     -- The spill goes into the list the value was built in, so it dominates every use even when the
@@ -1318,7 +1264,7 @@ function Eval:recordPlace(ctx, value, span)
         if V.tag(value) == "object" then value.expr = nil end
         return value.place
     end
-    if ctx.mode ~= "residual" then
+    if not ctx.residual then
         D.reject("runtime-in-normalization", "A runtime record needs runtime code", span)
     end
     -- A value that only exists as an SSA value is spilled once; the place is initialized from its
@@ -1399,7 +1345,7 @@ function Eval:placeOf(ctx, expr, span)
         local ty = S.field(target, name)
         if not ty then D.reject("unknown-member", "Record has no field " .. name, expr.field.span) end
         local base = container.place
-        if ctx.mode == "residual" and container.value
+        if ctx.residual and container.value
             and (not base or (V.tag(container.value) == "object" and container.value.expr)) then
             base = self:recordPlace(ctx, container.value, expr.span)
         end
@@ -1409,7 +1355,7 @@ function Eval:placeOf(ctx, expr, span)
             return { concrete = "field", record = held, name = name, ty = ty,
                 place = place, value = held.fields[name], container = container.container }
         end
-        if not place or ctx.mode ~= "residual" then
+        if not place or not ctx.residual then
             D.reject("runtime-in-normalization",
                 "A field of run-time storage is only reachable from runtime code", expr.span)
         end
@@ -1425,7 +1371,7 @@ function Eval:placeOf(ctx, expr, span)
             local element = self:pointeeType(base.ty)
             local index = self:evalExpr(ctx, expr.index)
             self:requireType(index, S.U32, expr.index.span)
-            if ctx.mode ~= "residual" then
+            if not ctx.residual then
                 D.reject("runtime-in-normalization", "A pointer element needs runtime code", expr.span)
             end
             local view = self:containerExpr(ctx, base)
@@ -1445,11 +1391,11 @@ function Eval:placeOf(ctx, expr, span)
                         .. "length " .. tostring(count), expr.span)
                 end
                 local held = self:sliceElement(container.value, index.n)
-                if held and ctx.mode ~= "residual" then
+                if held and not ctx.residual then
                     return { concrete = "element", value = held, ty = element, readonly = true }
                 end
             end
-            if ctx.mode ~= "residual" then
+            if not ctx.residual then
                 D.reject("runtime-in-normalization", "A run-time slice index needs runtime code", expr.span)
             end
             local view = self:containerExpr(ctx, container)
@@ -1476,24 +1422,24 @@ function Eval:placeOf(ctx, expr, span)
             -- A place needs a builder, so only residual code builds one; normalize code either uses
             -- the value it names or reports that this storage is runtime-only.
             local base = container.place
-            if ctx.mode == "residual" and container.value
+            if ctx.residual and container.value
                 and (not base or (V.tag(container.value) == "array" and container.value.expr)) then
                 base = self:arrayPlace(ctx, container.value, expr.span)
             end
-            local place = (base and ctx.mode == "residual")
+            local place = (base and ctx.residual)
                 and Ir.Index(base, ctx.builder:u32(index.n), element) or nil
             local held = container.concrete
             if type(held) == "table" and held.tag == "array" and held.items then
                 return { concrete = "index", array = held, index = index.n, ty = element,
                     place = place, value = held.items[index.n + 1], container = container.container }
             end
-            if not place or ctx.mode ~= "residual" then
+            if not place or not ctx.residual then
                 D.reject("runtime-in-normalization",
                     "An element of run-time storage is only reachable from runtime code", expr.span)
             end
             return { place = place, ty = element, container = container.container }
         end
-        if ctx.mode ~= "residual" then
+        if not ctx.residual then
             D.reject("runtime-in-normalization", "A run-time index needs runtime code", expr.span)
         end
         -- A run-time index is checked before it is used, exactly as a run-time divisor is.
@@ -1523,7 +1469,7 @@ function Eval:derefContainer(ctx, container, span)
     end
     if held and held.ty and S.isRef(held.ty) and V.tag(held) == "ir" then
         local target = self:pointeeType(held.ty)
-        local place = ctx.mode == "residual" and self:derefPlace(ctx, held, span) or nil
+        local place = ctx.residual and self:derefPlace(ctx, held, span) or nil
         return { place = place, ty = target, container = { retaining = true } }
     end
     -- A selection directly off a reference field or a runtime reference: the place holds the
@@ -1533,7 +1479,7 @@ function Eval:derefContainer(ctx, container, span)
         -- The pointer is a value, so it is spilled once to reach the record it addresses; from there the
         -- selection is the same route a reference takes.
         local target = self:pointeeType(container.ty)
-        if ctx.mode ~= "residual" then
+        if not ctx.residual then
             D.reject("runtime-in-normalization", "A pointer field needs runtime code", span)
         end
         local place = container.place
@@ -1601,13 +1547,13 @@ function Eval:evalIndex(ctx, expr)
     -- specialization must not bake a snapshot of module storage, but the reference interpreter
     -- (`session.run`) and a top-level initializer demand (`session.moduleDemand`) both execute over
     -- concrete state, so they read it directly.
-    if ctx.mode ~= "residual" and (ctx.session.run or ctx.session.moduleDemand
+    if not ctx.residual and (ctx.session.run or ctx.session.demanding
         or self:placeOrigin(ctx, expr) ~= "module") then
         if reached.concrete == "element" then return reached.value end
         if reached.concrete == "index" then return reached.array.items[reached.index + 1] end
         if reached.concrete == "field" then return reached.record.fields[reached.name] or V.unit() end
     end
-    if ctx.mode ~= "residual" then
+    if not ctx.residual then
         D.reject("runtime-in-normalization", "Element is runtime storage", expr.span)
     end
     local read = ctx.builder:read(ctx.body, reached.ty, reached.place)
@@ -1739,7 +1685,7 @@ function Eval:expression(ctx, value, want)
     end
     if (tag == "closure" or tag == "word" or tag == "method") and want
         and (S.isSig(want) or S.isView(want)) then
-        if ctx.mode ~= "residual" then
+        if not ctx.residual then
             D.reject("runtime-in-normalization", "A view needs runtime code", ctx.span)
         end
         return self:makeView(ctx, value, S.isView(want) and want.visible or want)
@@ -1770,7 +1716,7 @@ function Eval:expression(ctx, value, want)
             local read = ctx.builder:read(ctx.body, value.ty, value.place)
             return ctx.builder:ref(read, value.ty)
         end
-        if ctx.mode ~= "residual" then
+        if not ctx.residual then
             D.reject("runtime-in-normalization", "An array needs runtime code", ctx.span)
         end
         return self:arrayExpr(ctx, value)
@@ -1780,7 +1726,7 @@ function Eval:expression(ctx, value, want)
             D.reject("ref-target", "A reference to a compile-time value has no address; it can only "
                 .. "be used where the value itself is", ctx.span)
         end
-        if ctx.mode ~= "residual" then
+        if not ctx.residual then
             D.reject("runtime-in-normalization", "A reference needs runtime code", ctx.span)
         end
         return ctx.builder:addr(value.place, value.ty)
@@ -1788,7 +1734,7 @@ function Eval:expression(ctx, value, want)
     if tag == "variant" then
         -- A variant already emitted under runtime code refers to its own instruction.
         if value.expr then return value.expr end
-        if ctx.mode ~= "residual" then
+        if not ctx.residual then
             D.reject("runtime-in-normalization", "A sum value needs runtime code", ctx.span)
         end
         local caseType = S.caseOf(value.ty, value.case)
@@ -2034,7 +1980,7 @@ function Eval:evalReference(ctx, expr)
     if not slot then self:unknownName(name, expr.name.span) end
     if slot.kind == "value" then
         local demanded = self:demand(slot, expr.name.span)
-        if slot.atTop and ctx.mode == "residual"
+        if slot.atTop and ctx.residual
             and (V.tag(demanded.value) == "record"
                 or (V.tag(demanded.value) == "array" and demanded.value.place == nil)) then
             -- Runtime code reaches a *file-scope* binding through its named storage. A local
@@ -2050,7 +1996,7 @@ function Eval:evalReference(ctx, expr)
     elseif slot.kind == "concrete-field" then
         return slot.record.fields[slot.name] or V.unit()
     elseif slot.kind == "param" then
-        if ctx.mode ~= "residual" then
+        if not ctx.residual then
             D.reject("runtime-in-normalization", "Parameter " .. slot.name .. " is runtime storage", expr.name.span)
         end
         local read = ctx.builder:read(ctx.body, slot.ty, Ir.Local(slot.storage))
@@ -2062,14 +2008,14 @@ end
 -- Reads an implicit receiver field (or a bound local field place).
 function Eval:readFieldValue(ctx, slot, span)
     if slot.static then return slot.static end
-    if ctx.mode ~= "residual" then
+    if not ctx.residual then
         -- Normalize code reads the frontend value a borrowed or module place stands for directly.
         local record = slot.record and slot.record.backing
         -- A module object is read the same way, but only where reading it is the point: module
         -- initialization and the reference interpreter both execute over concrete state, while
         -- residual specialization must not bake a snapshot of module storage into the output.
         if record and record.fields
-            and (not slot.record.module or ctx.session.run or ctx.session.moduleDemand) then
+            and (not slot.record.module or ctx.session.run or ctx.session.demanding) then
             local held = record.fields[slot.name]
             if held == nil then D.bug("module-field", "Module storage has no field " .. slot.name) end
             return held
@@ -2177,7 +2123,7 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
             D.reject("type-mismatch", "A pointer compares only with a pointer of one element type, found "
                 .. S.encode(left.ty or S.Unit) .. " and " .. S.encode(right.ty or S.Unit), span)
         end
-        if ctx.mode ~= "residual" then
+        if not ctx.residual then
             D.reject("runtime-in-normalization", "A pointer comparison needs runtime code", span)
         end
         return V.ir(ctx.builder:bin(COMPARE[op], self:expression(ctx, left),
@@ -2193,7 +2139,7 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
         if V.tag(left) == "string" and V.tag(right) == "string" then
             return V.bool((left.bytes == right.bytes) == (op == "=="))
         end
-        if ctx.mode ~= "residual" then
+        if not ctx.residual then
             D.reject("runtime-in-normalization", "A run-time string comparison needs runtime code", span)
         end
         return V.ir(ctx.builder:bin(COMPARE[op], self:expression(ctx, left), self:expression(ctx, right),
@@ -2591,7 +2537,7 @@ function Eval:evalSupply(ctx, expr)
         if values[name] == nil then D.bug("schema-fields", "A data field was not supplied") end
     end
     local ty = def.type
-    if ctx.mode ~= "residual" then
+    if not ctx.residual then
         -- Static evaluation builds a concrete record; it is not runtime storage.
         local fields = {}
         for _, name in ipairs(def.fieldNames) do fields[name] = values[name] end
@@ -2603,7 +2549,7 @@ end
 -- Builds a record value of `ty` from a field-name keyed supply. `def` supplies methods and static
 -- bindings when the record came from a source schema; it is absent for a sum alternative.
 function Eval:constructRecord(ctx, ty, values, def)
-    if ctx.mode ~= "residual" then
+    if not ctx.residual then
         local fields = {}
         for _, name in ipairs(S.fieldNames(ty)) do fields[name] = values[name] or V.unit() end
         return V.record(ty, fields, def)
@@ -2631,7 +2577,7 @@ function Eval:evalFieldSelect(ctx, expr)
     if base.ty and S.isSlice(base.ty) and name == "length" then
         local known = self:sliceCount(base)
         if known then return V.u32(known) end
-        if ctx.mode ~= "residual" then
+        if not ctx.residual then
             D.reject("runtime-in-normalization", "A runtime slice length needs runtime code", expr.span)
         end
         return V.ir(ctx.builder:sliceLength(self:expression(ctx, base, base.ty), S.U32), S.U32)
@@ -2676,7 +2622,7 @@ function Eval:evalFieldSelect(ctx, expr)
     elseif tag == "ir" and S.isRecord(base.ty) then
         local ty = S.field(base.ty, name)
         if not ty then D.reject("unknown-member", "Record has no field " .. name, expr.field.span) end
-        if ctx.mode ~= "residual" then
+        if not ctx.residual then
             D.reject("runtime-in-normalization", "Cannot read a runtime record field here", expr.span)
         end
         -- A record value spilled into storage for a store must read through that storage, so a store
@@ -2743,7 +2689,7 @@ function Eval:storeTarget(ctx, target)
     -- interpreter (`session.run`), which executes the program rather than specialising it. Module
     -- storage is runtime state, so compile-time initialization and residual specialization never
     -- write it; a mutating top-level initializer rejects instead of baking a moved start value.
-    local origin = ctx.mode ~= "residual" and self:placeOrigin(ctx, target) or nil
+    local origin = not ctx.residual and self:placeOrigin(ctx, target) or nil
     -- `placeOrigin` names the route a *name* spells, so a write through a local binding that holds a
     -- reference to module storage looks like a local write. What the place turned out to be is the
     -- other half of the question, and without it such a write is folded away with its effect lost.
@@ -2752,12 +2698,12 @@ function Eval:storeTarget(ctx, target)
     -- Module storage is runtime state: residual specialization never writes it, because such a store
     -- would not appear in the generated code. Initialization (`session.moduleDemand`) and the reference
     -- interpreter (`session.run`) execute over concrete state and do write it.
-    if ctx.mode ~= "residual" and modules
-        and not (ctx.session.run or ctx.session.moduleDemand) then
+    if not ctx.residual and modules
+        and not (ctx.session.run or ctx.session.demanding) then
         D.reject("runtime-in-normalization",
             "Module storage is runtime state, so only module initialization may write it", target.span)
     end
-    if ctx.mode ~= "residual" then
+    if not ctx.residual then
         if reached.concrete == "field" then
             return { kind = "concrete-field", name = reached.name, record = reached.record,
                 ty = reached.ty }, nil
@@ -2835,11 +2781,11 @@ function Eval:invokeClosure(ctx, plan, envExprs, values, span, bound)
     if envExprs == nil and #plan.runtimeOrder == 0 then
         local allKnown = true
         for _, value in ipairs(merged) do if not V.isKnown(value) then allKnown = false end end
-        if allKnown and ctx.mode == "normalize" then
+        if allKnown and not ctx.residual then
             return self:evaluateClosureStatically(plan, merged, span)
         end
     end
-    if ctx.mode ~= "residual" then
+    if not ctx.residual then
         D.reject("runtime-in-normalization", "This closure call needs runtime code", span)
     end
     local callable = { plan = plan, env = self:closureEnvironment(plan, envExprs) }
@@ -2918,7 +2864,7 @@ function Eval:invokeRuntime(ctx, value, args, span)
     if tag == "ir" and ty and S.isView(ty) then
         -- An opaque callable is invoked through its view: the environment pointer plus the argument
         -- list.
-        if ctx.mode ~= "residual" then
+        if not ctx.residual then
             D.reject("runtime-in-normalization", "An opaque callable needs runtime code", span)
         end
         local sig = ty.visible
@@ -2947,7 +2893,7 @@ function Eval:invokeRuntime(ctx, value, args, span)
     if (tag == "ir" or tag == "variant") and ty and S.isTagged(ty) then
         -- A call on a tagged callable: test the tag, then run that arm's code directly. Every arm
         -- shares the one visible signature, so the results join through a slot per result.
-        if ctx.mode ~= "residual" then
+        if not ctx.residual then
             D.reject("runtime-in-normalization", "A tagged call needs runtime code", span)
         end
         local expr = value.expr
@@ -3028,7 +2974,7 @@ function Eval:evaluateClosureStatically(plan, args, span)
     for index, param in ipairs(plan.def.params) do
         declare(sc, param.name.text, { kind = "value", name = param.name.text, value = args[index] }, param.span)
     end
-    local result = self:execBody(self:context("normalize", sc, span), plan.def.body, span)
+    local result = self:execBody(self:staticFrame(sc, span), plan.def.body, span)
     if #result == 0 then return V.unit() end
     if #result == 1 then return result[1] end
     return V.results(result)
@@ -3053,7 +2999,7 @@ function Eval:captureValue(ctx, name, span)
     elseif slot.kind == "concrete-field" then
         return slot.record.fields[slot.name] or V.unit()
     elseif slot.kind == "field" or slot.kind == "param" then
-        if ctx.mode ~= "residual" then
+        if not ctx.residual then
             D.reject("runtime-in-normalization", "Cannot capture runtime storage " .. name, span)
         end
         -- Reading a field captures its value; the field path must not be flattened to the root.
@@ -3091,7 +3037,7 @@ function Eval:evalLambda(ctx, expr, expected)
             -- A borrow needs an address, so a value still carrying its construction expression
             -- materialises here. The closure is then non-retaining, and returning it escapes.
             local place = object.place
-            if ctx.mode == "residual" then
+            if ctx.residual then
                 if S.isArray(object.ty) then
                     place = self:arrayPlace(ctx, object, expr.span)
                 else
@@ -3112,7 +3058,7 @@ function Eval:evalLambda(ctx, expr, expected)
                     method = tag == "method" and value.def or nil,
                 }
             end
-            if ctx.mode == "residual" and not place then
+            if ctx.residual and not place then
                 D.reject("runtime-in-normalization", "Cannot capture runtime storage " .. name, expr.span)
             end
         elseif tag == "closure" then
@@ -3121,7 +3067,7 @@ function Eval:evalLambda(ctx, expr, expected)
                 "Capturing a borrowed closure needs a callable environment, which is not supported; "
                 .. "capture its receiver instead", expr.span)
         else
-            if ctx.mode ~= "residual" then
+            if not ctx.residual then
                 D.reject("runtime-in-normalization", "This closure captures runtime value " .. name, expr.span)
             end
             plan.runtimeOrder[#plan.runtimeOrder + 1] = name
@@ -3291,12 +3237,12 @@ function Eval:callableInstance(callable, args, span)
     return self:buildCallableInstance(key, callable, args, span)
 end
 
--- The same shape as `buildInstance`: the depth is restored and the failure is recorded here, so a
+-- The same shape as `buildInstance`: the failed attempt is remembered here, so a probe that swallows
+-- the diagnostic still leaves the session usable.
 -- probe that swallows the diagnostic still leaves the session usable.
 function Eval:buildCallableInstance(key, callable, args, span)
-    self:enterBuild(span)
-    local ok, result = pcall(self.constructCallableInstance, self, key, callable, args, span)
-    self:leaveBuild()
+    local ok, result = self:withNesting("build", span, nil, self.constructCallableInstance, self,
+        key, callable, args, span)
     if not ok then
         local instance = self.instances[key]
         if instance then
@@ -3430,8 +3376,8 @@ function Eval:constructCallableInstance(key, callable, args, span)
     end
 
     instance.results = self:declaredResult(def, sc, span)
-    local ctx = setmetatable({ session = self, mode = "residual", scope = sc, span = span,
-        builder = builder, body = body, fn = { id = instance.target }, instance = instance }, Ctx)
+    local ctx = self:residualFrame(sc, span)
+    ctx.builder, ctx.body, ctx.fn, ctx.instance = builder, body, { id = instance.target }, instance
     self:execBodyResidual(ctx, def.body, span)
     if not instance.results then instance.results = ctx.resultTypes end
     if not instance.results then D.reject("recursive-result", "Closure has no returning path", span) end
@@ -3517,7 +3463,7 @@ function Eval:execBlock(ctx, statements, from)
             self:checkReturn(values, stmt.span)
             if ctx.terminated then return true end
             ctx.terminated = savedTerminated
-            if ctx.mode == "residual" then
+            if ctx.residual then
                 local exprs = self:materializeAll(ctx, values,
                     ctx.instance and ctx.instance.results or nil)
                 ctx.resultTypes = {}
@@ -3644,12 +3590,11 @@ function Eval:typeOf(expr, sc, span)
         -- The name is being computed right now, so this is the recursion knot: hand back the cell it
         -- reserved rather than demanding its layout.
         if slot and slot.open and slot.cell and self:isTypeDefinition(slot) then
-            if self.referencedCells == nil then self.referencedCells = {} end
-            self.referencedCells[slot.cell] = true
+            self.types.referenced[slot.cell] = true
             return S.named(slot.cell)
         end
     end
-    local value = self:evalExpr(self:context("normalize", sc, span), expr)
+    local value = self:evalExpr(self:staticFrame(sc, span), expr)
     local ty = self:asType(value, span)
     if not ty then D.reject("type-required", "Expected a type", expr.span) end
     return ty
@@ -3941,7 +3886,7 @@ end
 -- The call shape of a foreign word: every requirement is an input and the result is the declared one.
 -- It is built once per definition, because a foreign call has no specialization to key.
 function Eval:foreignInstance(def, span)
-    local existing = self.foreignInstances[def]
+    local existing = self.foreigns.instances[def]
     if existing then return existing end
     local sc = scope(def.lexical)
     local plan, types, inputs = {}, {}, {}
@@ -3968,15 +3913,15 @@ function Eval:foreignInstance(def, span)
     if #declared == 1 and declared[1] == S.Unit then declared = {} end
     local instance = { target = def.symbol, def = def, foreign = true, inputPlan = plan,
         inputTypes = types, inputs = inputs, results = declared }
-    self.foreignInstances[def] = instance
-    self.foreignOrder[#self.foreignOrder + 1] = instance
+    self.foreigns.instances[def] = instance
+    self.foreigns.order[#self.foreigns.order + 1] = instance
     return instance
 end
 
 -- A foreign call is an effect the compiler cannot see into, so it exists only where there is code to
 -- emit: it is never folded, and the reference interpreter has no binding to call.
 function Eval:invokeForeign(ctx, def, values, span)
-    if ctx.mode ~= "residual" then
+    if not ctx.residual then
         D.reject("foreign-effect", "A foreign call exists only in compiled code: " .. def.name
             .. "; a constant argument does not make the host call foldable", span)
     end
@@ -4056,24 +4001,22 @@ function Eval:foldOrBuild(ctx, def, values, span, receiver, subject)
         if not V.isKnown(value) then allKnown = false end
         if not V.isStatic(value) then allStatic = false end
     end
-    local foldable = allKnown and (ctx.mode == "normalize" or allStatic)
+    local foldable = allKnown and (not ctx.residual or allStatic)
     if foldable and receiver ~= nil then foldable = V.tag(receiver) == "record" end
     if foldable then
-        -- Static folding is a budget, so the depth is restored however the attempt ends: a probe that
-        -- swallows a diagnostic must not leave the session believing it is deeper than it is. In
-        -- residual code a fold is an optimization, so a diagnostic that says the body needs runtime
-        -- storage is the signal to compile it instead; any other diagnostic is a real one.
-        self:enterStatic(def, span)
-        local ok, folded = pcall(self.evaluateStatically, self, def, values, span, receiver)
-        self:leaveStatic()
+        -- Folding is an optimization in residual code: a diagnostic that says the body needs runtime
+        -- storage is the signal to compile it instead; any other diagnostic is a real one. The depth
+        -- itself is restored by the session.
+        local ok, folded = self:withNesting("static", span, def.name, self.evaluateStatically, self,
+            def, values, span, receiver)
         if ok then return folded end
-        if ctx.mode ~= "residual" then error(folded, 0) end
+        if not ctx.residual then error(folded, 0) end
         if not (D.is(folded) and (folded.code == "runtime-in-normalization"
             or folded.code == "static-depth" or folded.code == "foreign-effect")) then
             error(folded, 0)
         end
     end
-    if ctx.mode ~= "residual" then
+    if not ctx.residual then
         D.reject("runtime-in-normalization", subject, span)
     end
     return self:callInstance(ctx, def, values, span, receiver)
@@ -4184,7 +4127,7 @@ end
 function Eval:evaluateStatically(def, values, span, receiver)
     local sc = self:parameterScope(def, values, receiver)
     local declared, requirements = self:declaredResult(def, sc, span)
-    local ctx = self:context("normalize", sc, span)
+    local ctx = self:staticFrame(sc, span)
     ctx.expectedResult = self:resultExpectation(requirements)
     local result = self:execBody(ctx, def.body, span)
     if declared then
@@ -4327,14 +4270,11 @@ function Eval:loopTarget(instance, position, storage, ty)
     instance.loopTargets[#instance.loopTargets + 1] = { position = position, storage = storage, ty = ty }
 end
 
--- A build nests, and its depth is a budget rather than a wall: a failed build must leave the session
--- as it found it, so the depth is restored and the half-made instance is remembered as failed
--- whatever the attempt did. One place owning that is what lets the probes that call this through a
--- `pcall` swallow a diagnostic without leaving the session believing it is deeper than it is.
+-- A failed build leaves the half-made instance remembered as failed, so a later attempt re-raises
+-- that diagnostic instead of building again. The nesting budget itself belongs to the session.
 function Eval:buildInstance(key, def, values, span, receiver)
-    self:enterBuild(span)
-    local ok, result = pcall(self.constructInstance, self, key, def, values, span, receiver)
-    self:leaveBuild()
+    local ok, result = self:withNesting("build", span, nil, self.constructInstance, self,
+        key, def, values, span, receiver)
     if not ok then
         local instance = self.instances[key]
         if instance then
@@ -4501,9 +4441,9 @@ function Eval:constructInstance(key, def, values, span, receiver)
 
     local declared, requirements = self:declaredResult(def, sc, span)
     instance.results, instance.resultRequirements = declared, requirements
-    local ctx = setmetatable({ session = self, mode = "residual", scope = sc, span = span,
-        builder = builder, body = body, fn = { id = instance.target }, instance = instance,
-        expectedResult = self:resultExpectation(requirements) }, Ctx)
+    local ctx = self:residualFrame(sc, span)
+    ctx.builder, ctx.body, ctx.fn, ctx.instance = builder, body, { id = instance.target }, instance
+    ctx.expectedResult = self:resultExpectation(requirements)
     self:execBodyResidual(ctx, def.body, span)
     if instance.results then
         for index, ty in ipairs(instance.results) do
@@ -4618,4 +4558,4 @@ function Eval:execBodyResidual(ctx, body, span)
     if not returned then D.reject("no-return", "Every reachable path must return a value", span) end
 end
 
-return M
+return Eval

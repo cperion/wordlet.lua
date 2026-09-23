@@ -39,10 +39,11 @@ Lua-level signatures. `Diag` values are raised with `error`, not returned.
 | `wordlet/lex.lua` | `tokens(source, name) -> Token[]` | free-form lexer; every token has a span |
 | `wordlet/parse.lua` | `program(Token[]) -> Ast.Program` | builds `ast.asdl` nodes; exports are a separate grammar |
 | `wordlet/resolve.lua` | `module(Ast.Program) -> Resolution` | scopes, bindings, captures, tail positions |
-| `wordlet/eval.lua` | `program(Ast.Program, Resolution, Options) -> Compilation` | keys, instances, IR, projections |
-| `wordlet/check.lua` | `program(Ir.Program, Meta)` | raises `bug` diagnostics only |
-| `wordlet/cabi.lua` | `close(Ir.Program, Meta) -> Layouts` | record layouts, callable ABIs, C names |
-| `wordlet/lower.lua` | `header(Layouts) -> string`, `source(Layouts) -> string` | views of one closed artifact |
+| `wordlet/session.lua` | `new(options) -> Session` | one compilation's descriptions, occurrences and budgets |
+| `wordlet/eval.lua` | `compile(program, loadedTop) -> Compilation` | a session method: keys, instances, IR, type application |
+| `wordlet/check.lua` | `program(fnList, modules, foreigns)` | raises `bug` diagnostics only |
+| `wordlet/cabi.lua` | `close(compilation) -> Layouts` | record layouts, callable ABIs, C names |
+| `wordlet/lower.lua` | `unit(layouts) -> string`, `cdef(layouts, ns)`, `source(layouts, headerName)`, `header(layouts, name)` | views of one closed artifact |
 | `wordlet/diag.lua` | `reject/bug/todo/resource/internal(...)`, `format(Diagnostic) -> string` | diagnostic construction |
 | `wordlet/init.lua` | `compile(options) -> Artifact`, `compile_file(path, options)` | public facade |
 | `wordlet/cli.lua` | `function(api, argv) -> exit_status` | bundler CLI entry point |
@@ -63,8 +64,9 @@ Current reality, so the table is not read as a promise of empty files:
 - The schema text is served by the generated modules `wordlet/schema/ast.lua` and
   `wordlet/schema/ir.lua`, produced from `ast.asdl`/`ir.asdl` by `tools/embed.lua`.
 
-`Compilation = { program = Ir.Program, meta = Meta }`. `Meta` is compiler-private state that never
-reaches `Ir.Program`: projections, trap policy, export selection, source spans, provenance.
+`Compilation = { session, exports, functions, types, foreigns, modules }`: the exported names, the
+instances behind them, the module storage and the foreign declarations one compilation produced.
+`check` and `cabi` consume the three lists (`functions`, `modules`, `foreigns`).
 
 ## 3. Resolution side tables
 
@@ -113,24 +115,28 @@ Capture classification is a language rule, not an optimization:
 ## 4. Evaluation state
 
 ```lua
-EvalContext = {
-  mode      = "normalize" | "residual",          -- Normalize/Residualize
-  instance  = InstanceRef?,                      -- nil while normalizing
-  fn        = Ir.Fn?,                            -- the Fn under construction (residual only)
-  body      = Stmt[]?,                           -- statement list under construction, innermost last
-  exprs     = { [ExprKey] = Ir.Expr }?,          -- per-function E memo (interning)
-  next      = { value = n, storage = n, bundle = n },  -- per-Fn allocators
-  params    = Ir.Param[]?,
-  expected  = ResultContract?,                   -- from the annotation/binding context
-  frames    = Frame[],                           -- lexical frames: name -> Value/Place
-  limits    = Limits,
+Frame = {
+  session,          -- the compilation session: descriptions, occurrences, budgets (session.lua)
+  residual,         -- true emits into the Ir.Fn under construction; false runs with no builder
+  scope,            -- the lexical scope
+  span,             -- the span of the construct being evaluated
+  tail,             -- is the current expression in tail position
+  expectedResult,   -- a signature from an annotation context, if any
+  builder,          -- Ir.builder (residual only)
+  body,             -- Ir.Stmt list under construction (residual only)
+  fn,               -- Ir.Fn under construction (residual only)
+  instance,         -- the instance being built (residual only)
+  deferFrame,       -- pending deferred actions
+  terminated,       -- the current list was terminated
+  resultTypes,      -- the result types of the body being executed (residual)
+  result,           -- the reference interpreter's result vector (non-residual)
 }
 ```
 
 Key points:
 
-- **Normalization has no builder.** `mode = "normalize"` runs the same expression walker but
-  `ctx.fn`, `ctx.body` and `ctx.next` are nil. A static attempt therefore cannot leave partial IR
+- **A frame that is not residual has no builder.** The same expression walker runs with
+  `ctx.builder`, `ctx.body` and `ctx.fn` nil. A static attempt therefore cannot leave partial IR
   behind: an operation that needs runtime storage raises `runtime-in-normalization` rather than
   emitting half a statement. Compile-time normalization never reads or writes module storage, so it
   cannot bake a snapshot or drop a store.
@@ -140,14 +146,17 @@ Key points:
   generated C does.
 - **Initialization is eager and ordered.** `initializeModule` demands every top-level value binding
   once, in declaration order; a forward reference pulls a later initializer early. `demand` sets
-  `session.moduleDemand` while it runs, so an initializer may read and write module storage — it is
+  `session.demanding` while it runs, so an initializer may read and write module storage — it is
   compile-time execution over concrete values. Residual specialization still rejects touching it.
-- `exprs` implements per-function E interning, as required by `architecture.md` §7. ASDL does not
-  intern `Ir.Expr` because `Value` IDs are function-local.
-- Each nested `Lambda`/`MethodMember` body creates a fresh `Ir.Fn` with its own `next`, `body` and
-  `exprs`; the enclosing context is used only to resolve and classify captures.
-- Evaluation returns `Completion`: `Continues(Value*)`, `Returns(Value*)` or
-  `TailTransfer(key, Value*)`. `Returns` is not a value and cannot be consumed by later statements.
+- The builder interns E per `Ir.Fn` (`Builder.memo`), as required by `architecture.md` §7. ASDL
+  does not mark `Ir.Expr` unique because `Value` IDs are function-local, so the memo belongs to the
+  function's builder rather than to the schema.
+- Each nested `Lambda`/`MethodMember` body creates a fresh `Ir.Fn` with its own builder and id
+  allocators; the enclosing frame is used only to resolve and classify captures.
+- Evaluation returns a `Value`. Control completion is not a value: `execBlock` answers whether the
+  block ended, and `ctx.terminated` records that the current evaluation already transferred control
+  (a tail back edge, emitted as `Ir.Next`), which the enclosing `return` then reports. A body with
+  no returning path rejects (`no-return`).
 - **One law for application.** `Eval:supply(ctx, callee, args, span)` is the only entry point: it
   appends the arguments to the callee's bound arguments, tests saturation, and hands a saturated
   call to the one owner for its kind — `invokeBuiltin`, `invokeForeign`, `invokeSource`,
@@ -159,9 +168,11 @@ Key points:
 
 ### 4.1 Emitting statements
 
-`ctx.body` is the current `Stmt` list. Emitters: `emitLet`, `emitVar`, `emitRead`, `emitStore`,
-`emitCall`, `emitIf`, `emitLoop`, `emitReturn`, `emitTrap`. Every emitter that allocates uses
-`ctx.next` so IDs are unique within the `Ir.Fn`.
+`ctx.body` is the current `Stmt` list and `ctx.builder` is the `Ir.builder` that fills it. Statements
+go in through `builder:let`/`var`/`read`/`store`/`trap`/`return_` and expressions through
+`builder:const`/`ref`/`un`/`bin`/`get`/`make`/`convert`/`addr`/`sliceLength`/`nullPtr`/`ptrIndex`/
+`sliceIndex`; `builder:emit` appends a finished statement. The builder owns the id allocators
+(`valueId`, `storageId`) and the E memo, so every id is unique within the `Ir.Fn` it belongs to.
 
 Two rules are easy to get wrong and are therefore explicit:
 
@@ -317,9 +328,9 @@ wordlet.jit.install()       -- register a searcher so `require("a.b")` finds `a/
 
 `compile_file` resolves the module graph first: it reads each `use`d file relative to the importing
 one, loads a module before the modules that use it, declares each namespace in the importing module's
-top scope, and then compiles the entry module with its own top. `Eval:compile(program, top)` accepts
-that pre-loaded scope; `Eval:declareNamespace` puts a namespace in it. A source string cannot resolve
-an import, so `compile` rejects a `use` declaration (`import-input`).
+top scope, and then compiles the entry module with its own top. `session:compile(program, top)`
+accepts that pre-loaded scope; `session:declareNamespace` puts a namespace in it. A source string
+cannot resolve an import, so `compile` rejects a `use` declaration (`import-input`).
 
 Options: `name` (defaults to the path), `limits` (section 9), `target = "c11"`, `inline` (defaults
 to `true`: a private function is asked to force-inline on GCC and clang, and is plain `static` on

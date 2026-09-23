@@ -154,7 +154,7 @@ check(interpret("x", { 1, 4 }, "let x(a, b: U32) : U32 = a | b\nreturn { functio
     "bitwise or")
 
 -- Partial application and specialization --------------------------------------------------------
-local session = Eval.session()
+local session = Eval.new()
 session:compile(Parse.source("let scale(k, x: U32) : U32 = k * x\n"
     .. "let use(x: U32) : U32 = scale(3)(x) + scale(3)(x) + scale(5)(x)\n"
     .. "return { functions = { use } }", "s.let"))
@@ -163,7 +163,7 @@ local bodies = {}
 for _, instance in ipairs(session.order) do bodies[#bodies + 1] = instance.fn.body end
 check(#bodies == 3, "one body per distinct static key")
 
-local shared = Eval.session()
+local shared = Eval.new()
 shared:compile(Parse.source("let inc(x: U32) : U32 = x + 1\n"
     .. "let use(x: U32) : U32 = inc(x) + inc(x)\nreturn { functions = { use } }", "s.let"))
 check(#shared.order == 2, "a helper called twice in one caller has one body")
@@ -280,7 +280,7 @@ check(interpret("snap", { 1 }, CLOSURES)[1] == 101,
     "a captured field is a snapshot, so a later store does not change it")
 
 -- Code identity is per syntactic lambda, and the environment is a runtime input.
-local shareSession = Eval.session()
+local shareSession = Eval.new()
 shareSession:compile(Parse.source("let twice(f: (U32): U32, x: U32) : U32 = f(f(x))\n"
     .. "let a(x: U32) : U32 = twice(|y: U32| -> y + 1, x)\n"
     .. "let b(x: U32) : U32 = twice(|y: U32| -> y + 1, x)\n"
@@ -293,7 +293,7 @@ for _, instance in ipairs(shareSession.order) do
 end
 check(closureBodies == 2, "each syntactic lambda compiles once regardless of call sites")
 
-local retSession = Eval.session()
+local retSession = Eval.new()
 retSession:compile(Parse.source("let apply(f: (U32): U32, x: U32) : U32 = f(x)\n"
     .. "let make_adder(n: U32) = |x: U32| -> n + x\n"
     .. "let run(n, x: U32) : U32 = do let add = make_adder(n) return apply(add, x) end\n"
@@ -403,7 +403,7 @@ check(externalUnit:find("(*invoke)(const void *, uint32_t)", 1, true) ~= nil, "t
 check(externalUnit:find(".invoke(", 1, true) ~= nil, "the opaque call goes through the pointer")
 check(#externalArtifact:exports() == 5, "the higher-order functions are exportable")
 
-local externalSession = Eval.session()
+local externalSession = Eval.new()
 externalSession:compile(Parse.source(EXTERNAL, "external.let"))
 local viewInputs, indirectInstances = 0, 0
 for _, instance in ipairs(externalSession.order) do
@@ -420,7 +420,7 @@ check(interpret("internal", { 4 }, EXTERNAL)[1] == 5,
     "a call with known code still specialises to a direct call")
 
 -- Tail self-calls become loops; non-tail recursion stays a call -------------------------------
-local loopSession = Eval.session()
+local loopSession = Eval.new()
 loopSession:compile(Parse.source("let sum_to(n, acc: U32) : U32 = if n == 0 then acc else sum_to(n - 1, acc + n)\n"
     .. "return { functions = { sum_to } }", "l.let"))
 check(#loopSession.order == 1, "a tail self-call reuses the instance it is defined in")
@@ -430,7 +430,7 @@ check(loopIR:find("Loop", 1, true) ~= nil and loopIR:find("Next", 1, true) ~= ni
 check(loopIR:find("Call", 1, true) == nil, "the tail call emits no call at all")
 
 -- A saturated keyed self-call is a tail call too, so it reuses the instance and emits a Loop.
-local keyedLoop = Eval.session()
+local keyedLoop = Eval.new()
 keyedLoop:compile(Parse.source("let sum { n: U32, acc: U32 } : U32 = if n == 0 then acc else sum { n = n - 1, acc = acc + n }\n"
     .. "let run(n: U32, start: U32) : U32 = sum { n = n, acc = start }\n"
     .. "return { functions = { run } }", "kl.let"))
@@ -444,14 +444,14 @@ check(keyedIR:find("Loop", 1, true) ~= nil and keyedIR:find("Next", 1, true) ~= 
     "a keyed tail self-call carries a Loop with a back edge")
 check(keyedIR:find("Call", 1, true) == nil, "the keyed tail call emits no call")
 
-local recSession = Eval.session()
+local recSession = Eval.new()
 recSession:compile(Parse.source("let f(a: U32) : U32 = if a == 0 then 1 else a * f(a - 1)\n"
     .. "return { functions = { f } }", "r.let"))
 check(A.dump(recSession.order[1].fn):find("Loop", 1, true) == nil,
     "recursion outside tail position stays an ordinary call")
 
 -- A conditional in tail position loops from either arm.
-local bothSession = Eval.session()
+local bothSession = Eval.new()
 bothSession:compile(Parse.source("let count(n: U32) : U32 =\n"
     .. "  if n == 0 then 0 else if n == 1 then count(0) else count(n - 2)\n"
     .. "return { functions = { count } }", "b.let"))
@@ -459,7 +459,7 @@ check(A.dump(bothSession.order[1].fn):find("Loop", 1, true) ~= nil, "either tail
 
 -- A loop-carried parameter is read once at the top of the loop body, so expressions built from it
 -- are shared. Reads are never interned, so a read per mention would block that sharing.
-local readSession = Eval.session()
+local readSession = Eval.new()
 readSession:compile(Parse.source("let step(n: U32, x: U32): U32 = do\n"
     .. "  if n == 0 then return x ~ (x << 3) end\n"
     .. "  let y = x ~ (x << 3)\n"
@@ -469,7 +469,7 @@ local _, reads = A.dump(readSession.order[1].fn):gsub("Read", "")
 check(reads == 2, "a loop-carried parameter is read once, not per mention (found " .. reads .. ")")
 
 -- A tail call with different static arguments is a different instance, so it is a real call.
-local staticSession = Eval.session()
+local staticSession = Eval.new()
 staticSession:compile(Parse.source("let scale(k, x: U32) : U32 = if k == 0 then x else scale(0, x + 1)\n"
     .. "let five(x: U32) : U32 = scale(5, x)\nreturn { functions = { five } }", "s.let"))
 check(#staticSession.order >= 2, "changing a static argument creates a new instance")
