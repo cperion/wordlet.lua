@@ -384,15 +384,14 @@ end
 -- import, and `let use = ...` keeps working.
 function Parser:useDecl()
     local start = self:expectName("a module name")
-    local path, last = {}, nil
+    local path = {}
     while true do
         local name = self:expectName("a module name")
         path[#path + 1] = name.text
-        last = name
         if not self:at(".") then break end
         self:next()
     end
-    return A.c.UseDecl(A.name(last), table.concat(path, "."), S(start.span))
+    return A.c.UseDecl(table.concat(path, "."), S(start.span))
 end
 
 function Parser:declaration()
@@ -446,6 +445,13 @@ end
 
 -- Shared tail of a named definition and a method: `: result? = body`, after the `)`.
 function Parser:definitionBody(name, params, keyed)
+    keyed = keyed or asList({})
+    if #params > 0 and #keyed > 0 then
+        -- Positional requirements and keyed requirements are different productions, so a
+        -- definition that has both is a parser bug, not a source error.
+        D.bug("worddef-requirements",
+            "A word definition cannot take positional and keyed requirements at once")
+    end
     local result = nil
     if self:at(":") then
         self:next()
@@ -456,7 +462,7 @@ function Parser:definitionBody(name, params, keyed)
         D.reject("parse", "A result is declared with ':'; '->' introduces a lambda body", self:peek().span)
     end
     self:expect("=")
-    return A.c.WordDef(name, params, keyed or asList({}), result, self:body())
+    return A.c.WordDef(name, params, keyed, result, self:body())
 end
 
 -- `{ name: Type, ... }`: a word's keyed requirements, in the form a schema literal uses. A word

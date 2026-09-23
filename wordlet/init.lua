@@ -93,7 +93,10 @@ local function loadModule(engine, path, stack, cache)
     local saved = engine.top
     local top = engine:load(program)
     for _, item in ipairs(imports) do
-        engine:declareNamespace(top, item.decl.name.text, item.module.namespace, item.decl.span)
+        -- The lexical name of an import is the last dotted segment of its path, which is the only
+        -- place the AST records it.
+        engine:declareNamespace(top, item.decl.path:match("[^.]*$"), item.module.namespace,
+            item.decl.span)
     end
     -- A module's initializers run once its imports' namespaces are visible, in declaration order.
     engine:initializeModule(program, top)

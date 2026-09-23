@@ -250,7 +250,7 @@ function M.inValue(t) return Ty.InValue(t) end
 function M.inPlace(t) return Ty.InPlace(t) end
 
 -- Canonical textual encoding of a Ty/Ir descriptor; used for instance keys and caches.
-function M.encode(value, seen)
+function M.encode(value)
     local tv = type(value)
     if tv == "number" then return "n" .. string.format("%.17g", value) end
     if tv == "string" then return "s" .. #value .. ":" .. value end
