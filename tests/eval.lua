@@ -1684,6 +1684,23 @@ do
     compile(text)
 end
 
+-- A match handler is a callable, so it may return a result vector; the match forwards it, and each
+-- result keeps its own slot in residual code.
+do
+    local source = "let Op = OneOf({ a: Unit, b: Unit })\n"
+        .. "let pick(op: Op, x: U32): (U32, U32) = op {\n"
+        .. "  a = |u: Unit| -> do return x + 1, x + 2 end,\n"
+        .. "  b = |u: Unit| -> do return x + 3, x + 4 end,\n"
+        .. "}\n"
+        .. "let total(op: Op, x: U32): U32 = do let p, q = pick(op, x) return p + q end\n"
+        .. "let run_a(x: U32): U32 = total(Op.a(), x)\n"
+        .. "let run_b(x: U32): U32 = total(Op.b(), x)\n"
+        .. "return { types = { Op }, functions = { run_a, run_b, total } }"
+    check(interpret("run_a", { 10 }, source)[1] == 23, "a match handler may return a result vector")
+    check(interpret("run_b", { 10 }, source)[1] == 27, "a different arm returns its own vector")
+    compile(source)
+end
+
 -- Reading module storage through a reference is an ordinary run-time read. A call whose arguments
 -- happen to be static must still be compiled rather than folded when the body needs that storage.
 do

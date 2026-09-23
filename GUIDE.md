@@ -1033,6 +1033,11 @@ end
 `for (;;) { ... continue; }`; the handler lambdas only return a machine, so they
 never stay on the stack after their step. `examples/dispatch.let` is this shape.
 
+Prefer the hot state as the loop's **parameters** rather than a record: a code
+`Ptr`, the `pc`, a stack `Ptr` and `sp` are one word each, so a step copies no
+aggregate at all, and the handlers return the transition instead of the machine.
+`examples/interpreter.let` is that form — one back edge, no per-step copy.
+
 The choice is binding time, not syntax. A handler set known at compile time becomes
 direct, specialised code — a tag test with the arm inlined — while a handler set
 that arrives at run time becomes the callable ABI, an invocation pointer, which is

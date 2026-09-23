@@ -744,7 +744,7 @@ function Eval:matchResidual(ctx, base, handlers, span)
     local builder = ctx.builder
     local variant = sumValueId(base)
     local names = S.casesOf(base.ty)
-    local pieces, resultType = {}, nil
+    local pieces, resultTypes = {}, nil
     for _, name in ipairs(names) do
         local arm = {}
         local armCtx = ctx:arm(arm)
@@ -759,21 +759,36 @@ function Eval:matchResidual(ctx, base, handlers, span)
             builder:emit(arm, Ir.VariantPayload(id, variant, base.ty, name))
             args = { V.ir(builder:ref(id, caseType), caseType) }
         end
-        local result = self:applyAny(armCtx, handlers[name], args, span)
-        if resultType == nil then
-            resultType = result.ty
-        elseif result.ty ~= resultType then
-            D.reject("branch-result", "Every arm of a match must produce the same type: "
-                .. S.encode(resultType) .. " and " .. S.encode(result.ty), span)
+        -- A handler is a callable, so it may return a result vector; the match forwards it.
+        local values = self:expand(self:applyAny(armCtx, handlers[name], args, span))
+        if resultTypes == nil then
+            resultTypes = {}
+            for index, value in ipairs(values) do resultTypes[index] = value.ty end
+        elseif #values ~= #resultTypes then
+            D.reject("branch-result", "Every arm of a match must produce the same number of results: "
+                .. #resultTypes .. " and " .. #values, span)
+        else
+            for index, value in ipairs(values) do
+                if value.ty ~= resultTypes[index] then
+                    D.reject("branch-result", "Every arm of a match must produce the same type: "
+                        .. S.encode(resultTypes[index]) .. " and " .. S.encode(value.ty), span)
+                end
+            end
         end
-        pieces[#pieces + 1] = { name = name, list = arm, ctx = armCtx, value = result,
+        pieces[#pieces + 1] = { name = name, list = arm, ctx = armCtx, values = values,
             terminated = armCtx.terminated }
     end
-    local slot = builder:var(ctx.body, resultType, nil)
-    local place = Ir.Local(slot)
+    -- One slot per result, so a match may yield a result vector rather than only one value.
+    local places = {}
+    for index, ty in ipairs(resultTypes) do
+        places[index] = Ir.Local(builder:var(ctx.body, ty, nil))
+    end
     for _, piece in ipairs(pieces) do
         if not piece.terminated then
-            builder:store(piece.list, place, self:expression(piece.ctx, piece.value, resultType))
+            for index, value in ipairs(piece.values) do
+                builder:store(piece.list, places[index],
+                    self:expression(piece.ctx, value, resultTypes[index]))
+            end
         end
     end
     -- Nest from the last alternative outwards, so each test sits in the path that reaches it.
@@ -788,7 +803,12 @@ function Eval:matchResidual(ctx, base, handlers, span)
         child = parent
     end
     for _, stmt in ipairs(child) do ctx.body[#ctx.body + 1] = stmt end
-    return V.ir(builder:ref(builder:read(ctx.body, resultType, place), resultType), resultType)
+    local out = {}
+    for index, ty in ipairs(resultTypes) do
+        out[index] = V.ir(builder:ref(builder:read(ctx.body, ty, places[index]), ty), ty)
+    end
+    if #out == 1 then return out[1] end
+    return V.results(out)
 end
 
 function sumValueId(value)

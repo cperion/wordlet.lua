@@ -1655,6 +1655,90 @@ int main(void) {
         "a Unit result did not erase and run correctly")
 end
 
+-- A residual match may yield a result vector, one slot per result, and a pointer may index record
+-- and sum storage. Both were assumptions the lowering and the verifier made too narrowly.
+do
+    local source = [==[
+let Op = OneOf({ a: Unit, b: Unit, n: U32 })
+let classify(k: U32): Op =
+  if k == 0 then Op.a()
+  else if k == 1 then Op.b()
+  else Op.n(k)
+
+let pick(op: Op, x: U32): (U32, U32) = op {
+  a = |u: Unit| -> do return x + 1, x + 2 end,
+  b = |u: Unit| -> do return x + 3, x + 4 end,
+  n = |v: U32| -> do return v, x end,
+}
+let total(k: U32, x: U32): U32 = do let p, q = pick(classify(k), x) return p + q end
+
+let Point = { x: U32, y: U32 }
+extern let host_points() : Ptr(Point)
+let point_at(i: U32): U32 = do
+  let p = host_points()[i]
+  return p.x + p.y
+end
+
+let program = [Op.n(7), Op.a()]
+let code_at(i: U32): U32 = do
+  let op = Ptr(program[0])[i]
+  return op {
+    a = |u: Unit| -> 1,
+    b = |u: Unit| -> 2,
+    n = |v: U32| -> v,
+  }
+end
+return { types = { Point, Op }, functions = { total, point_at, code_at } }
+]==]
+    local generated = wordlet.compile{ source = source, name = "matchptr.let" }:unit()
+    local pointType = generated:match("(wordletrecord_%d+) %* host_points")
+    check(pointType ~= nil, "the pointer target has a named layout")
+    local path = directory .. "/matchptr.c"
+    write(path, generated .. ([[
+
+#include <assert.h>
+static %s points[2];
+%s *host_points(void) { return points; }
+int main(void) {
+    wordlet_init();
+    points[0].f_x = 3; points[0].f_y = 4;
+    points[1].f_x = 10; points[1].f_y = 20;
+    assert(wordlet_point_5Fat(UINT32_C(0)) == UINT32_C(7));
+    assert(wordlet_point_5Fat(UINT32_C(1)) == UINT32_C(30));
+    assert(wordlet_code_5Fat(UINT32_C(0)) == UINT32_C(7));
+    assert(wordlet_code_5Fat(UINT32_C(1)) == UINT32_C(1));
+    assert(wordlet_total(UINT32_C(0), UINT32_C(10)) == UINT32_C(23));
+    assert(wordlet_total(UINT32_C(1), UINT32_C(10)) == UINT32_C(27));
+    assert(wordlet_total(UINT32_C(9), UINT32_C(10)) == UINT32_C(19));
+    return 0;
+}
+]]):format(pointType, pointType))
+    check(shell("timeout --kill-after=2s 30s " .. CC .. " -std=c11 -Wall -Wextra -Werror -O2 -o '"
+        .. directory .. "/matchptr' '" .. path .. "' 2> " .. directory .. "/matchptrerr.txt") == 0,
+        "match/pointer C failed to compile:\n" .. read(directory .. "/matchptrerr.txt"))
+    check(shell("timeout --kill-after=2s 10s '" .. directory .. "/matchptr'") == 0,
+        "a multi-result match or a pointer index did not run correctly")
+end
+
+-- The hot-state interpreter example: the machine is the loop's parameters and the handlers return
+-- the transition, so dispatch copies no aggregate and is one back edge. It indexes through a `Ptr`,
+-- so only compiled code can run it.
+do
+    local path = (source:match("^(.*[/\\])") or "./") .. "../examples/interpreter.let"
+    local file = assert(io.open(path, "rb"))
+    local source = assert(file:read("*a"))
+    assert(file:close())
+    local generated = wordlet.compile{ source = source, name = "interpreter.let" }:unit()
+    check(generated:find("for (;;)", 1, true) ~= nil, "the interpreter loop is a back edge")
+    local cPath = directory .. "/interpreter.c"
+    write(cPath, generated .. "\n#include <assert.h>\nint main(void) { assert(wordlet_main() == UINT32_C(7)); return 0; }\n")
+    check(shell("timeout --kill-after=2s 30s " .. CC .. " -std=c11 -Wall -Wextra -Werror -O2 -o '"
+        .. directory .. "/interpreter' '" .. cPath .. "' 2> " .. directory .. "/interpretererr.txt") == 0,
+        "interpreter C failed to compile:\n" .. read(directory .. "/interpretererr.txt"))
+    check(shell("timeout --kill-after=2s 10s '" .. directory .. "/interpreter'") == 0,
+        "the hot-state interpreter did not run correctly")
+end
+
 -- A pointer is not a reference, in either direction: it cannot satisfy a `Ref` requirement, and
 -- `Ref(p)` cannot turn one back into a checked borrow.
 do

@@ -54,6 +54,11 @@ one directly.
   to a back edge (`for (;;) { ... continue; }`), not a call, so dispatch is constant stack; a handler
   that called the loop would be a different code instance and would grow the stack one frame per
   step. `tests/eval.lua` asserts the value and that the loop, not a call, survives.
+- examples/interpreter.let: main()=7. The same dispatch with the hot state as the loop's parameters
+  (`Ptr(Op)` code, `pc`, `Ptr(U32)` stack, `sp`) instead of a record, so a step copies no aggregate.
+  Handlers return the transition (next pc, next sp, done) and `run` tail-calls itself outside the
+  match, which is the only self-call. `tests/c.lua` compiles and runs it, since a `Ptr` exists only
+  in compiled code.
 - examples/pipeline.let: settle(1,50)=50, settle(0,50)=0, settle(1,500)=0, summarize(1,50)=50,
   summarize(1,500)=0. Hierarchical continuation wiring: a parent owns a stateful record and composes
   a child that is a method on it; the child's only exits are the callable requirements the parent

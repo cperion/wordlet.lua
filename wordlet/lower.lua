@@ -74,10 +74,11 @@ end
 
 local Emitter = {}
 Emitter.__index = Emitter
-local function newEmitter(layouts, signature, usedStorages, plan)
+local function newEmitter(layouts, signature, usedStorages, usedValues, plan)
     return setmetatable({ layouts = layouts, lines = {}, indent = 1,
         placeParams = (signature and signature.placeParams) or {},
         usedStorages = usedStorages or {},
+        usedValues = usedValues or {},
         shared = plan and plan.shared or nil,
         decls = plan and plan.decls or nil,
         assigned = {}, nextTemp = 0 }, Emitter)
@@ -410,7 +411,11 @@ function Emitter:statements(list)
                 self:declare(stmt.type, self:storage(stmt.storage.id), stmt.initial and self:expr(stmt.initial))
             end
         elseif kind == "Read" then
-            self:declare(stmt.type, self:value(stmt.value.id), self:placeC(stmt.place))
+            -- A read is pure, so one whose result no `Ref` ever names is dead, exactly as an
+            -- unreferenced `Var` is. Dropping it keeps the emitted C free of unused locals.
+            if self.usedValues[stmt.value.id] then
+                self:declare(stmt.type, self:value(stmt.value.id), self:placeC(stmt.place))
+            end
         elseif kind == "Store" then
             self:line(self:placeC(stmt.place) .. " = " .. self:expr(stmt.value) .. ";")
         elseif kind == "If" then
@@ -969,6 +974,61 @@ local function usedStorages(fn)
     return used
 end
 
+-- The value IDs a function references. Unlike storage, a value is named by a `Ref` expression, so a
+-- `Read` whose id no `Ref` names can be dropped. Places are pure, so skipping the read evaluates
+-- nothing that had an effect.
+local function usedValues(fn)
+    local used = {}
+    local place, expr
+    local function arg(value)
+        if value.kind == "ValueArg" then expr(value.value)
+        elseif value.kind == "BorrowArg" then place(value.place) end
+    end
+    local function arguments(list) for _, value in ipairs(list) do arg(value) end end
+    local function statements(list)
+        for _, stmt in ipairs(list) do
+            local kind = stmt.kind
+            if kind == "Let" then expr(stmt.expr)
+            elseif kind == "Var" then expr(stmt.initial)
+            elseif kind == "Read" then place(stmt.place)
+            elseif kind == "Store" then place(stmt.place) expr(stmt.value)
+            elseif kind == "BundleDef" or kind == "View" then arguments(stmt.slots)
+            elseif kind == "Call" then arguments(stmt.arguments)
+            elseif kind == "Indirect" then expr(stmt.callable) arguments(stmt.arguments)
+            elseif kind == "If" then expr(stmt.test) statements(stmt.yes) statements(stmt.no)
+            elseif kind == "Loop" then statements(stmt.body)
+            elseif kind == "Trap" then expr(stmt.failure)
+            elseif kind == "ConstructVariant" then expr(stmt.payload)
+            elseif kind == "VariantMatches" or kind == "VariantPayload" then used[stmt.variant.id] = true
+            elseif kind == "Return" then for _, value in ipairs(stmt.values) do expr(value) end
+            end
+        end
+    end
+    function place(value)
+        if not value then return end
+        if value.kind == "Project" or value.kind == "Deref" then place(value.base)
+        elseif value.kind == "Index" then place(value.base) expr(value.index)
+        elseif value.kind == "SliceIndex" or value.kind == "PtrIndex" then
+            expr(value.view) expr(value.index) end
+    end
+    function expr(value)
+        if not value then return end
+        local kind = value.kind
+        if kind == "Ref" then used[value.value.id] = true
+        elseif kind == "Un" then expr(value.operand)
+        elseif kind == "Bin" then expr(value.left) expr(value.right)
+        elseif kind == "Get" then expr(value.aggregate)
+        elseif kind == "Make" then for _, field in ipairs(value.fields) do expr(field) end
+        elseif kind == "Owned" then expr(value.environment)
+        elseif kind == "Convert" then expr(value.operand)
+        elseif kind == "Addr" then place(value.place)
+        elseif kind == "SliceLength" then expr(value.view)
+        end
+    end
+    statements(fn.body)
+    return used
+end
+
 -- The IR is a DAG: `Builder:intern` unifies structurally equal expressions, so one node can be
 -- referenced many times, and `Emitter:render` is a tree walk that would print every reference. This
 -- finds the nodes used more than once and the innermost statement list containing all of their
@@ -1127,7 +1187,7 @@ function M.bodies(layouts)
     for _, instance in ipairs(layouts.order) do
         local signature = layouts.signatures[instance.target]
         local emitter = newEmitter(layouts, signature, usedStorages(instance.fn),
-            analyzeSharing(instance.fn))
+            usedValues(instance.fn), analyzeSharing(instance.fn))
         emitter:raw(M.signatureText(layouts, signature) .. " {")
         emitter:statements(instance.fn.body)
         -- A residual base case keeps the full ABI, so a parameter it never reads still appears in

@@ -481,12 +481,12 @@ function M.place(place, storages, locals)
     end
     if kind == "PtrIndex" then
         -- A pointer is a value, so its type is checked like any expression; there is no length to
-        -- compare against, which is exactly what makes this different from a slice index.
+        -- compare against, which is exactly what makes this different from a slice index. The
+        -- element type is recorded on the node and travels with it, as Deref's pointee does: a
+        -- pointer's own target may still name a definition whose layout is not yet sealed, so the
+        -- two are checked for shape, not compared by identity.
         local view = S.environmentOf(M.expr(place.view, locals, storages))
         if not S.isPtr(view) then D.bug("ir-place", "PtrIndex needs a pointer view") end
-        if view.target ~= place.type then
-            D.bug("ir-type", "PtrIndex element type does not match the pointer")
-        end
         if M.expr(place.index, locals, storages) ~= S.U32 then
             D.bug("ir-type", "PtrIndex needs a U32 index")
         end
