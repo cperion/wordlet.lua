@@ -1005,6 +1005,40 @@ proper-tail-call optimization across all mutually recursive continuations.
 Also remember that `defer` can intentionally prevent tail-loop conversion because
 deferred work must happen after the call returns (`syntax.md` §8.8).
 
+### Threaded dispatch is reified-continuation CPS
+
+For an interpreter or any dynamic dispatch, the continuation should be **data**. A
+keyed match whose handler lambdas call the loop is a *different code instance*, so
+that call is an ordinary call and the stack grows one frame per step. Return the
+next state from the handlers instead, and let one tail self-call in the loop word's
+own body drive it:
+
+```text
+let advance(m: Machine): Machine =
+  m.code[m.pc] {
+    push = |value: U32| -> do ... return m end,
+    add  = |unit: Unit| -> do ... return m end,
+    halt = |unit: Unit| -> do m.done = true return m end,
+  }
+
+let run(m: Machine): U32 = do
+  let next = advance(m)
+  if next.done then return next.result end
+  return run(next)
+end
+```
+
+`run(next)` is in `run`'s own tail position, so it lowers to
+`for (;;) { ... continue; }`; the handler lambdas only return a machine, so they
+never stay on the stack after their step. `examples/dispatch.let` is this shape.
+
+The choice is binding time, not syntax. A handler set known at compile time becomes
+direct, specialised code — a tag test with the arm inlined — while a handler set
+that arrives at run time becomes the callable ABI, an invocation pointer, which is
+classic indirect threading. Moving a dimension to run time is the same move that
+controls specialization (section 13): make its value come from a parameter, a
+foreign result or mutable storage.
+
 ---
 
 ## 18. Use sums and keyed handlers instead of artificial class hierarchies

@@ -291,6 +291,7 @@ artifact:exports()         -- { functions = {name...}, types = {name...} }
 
 wordlet.syntax             -- string: the language reference, embedded from syntax.md
 wordlet.guide              -- string: the design and naming guide, embedded from GUIDE.md
+wordlet.walk               -- AST/IR traversal by ASDL reflection; children, nodeChildren, walk, sums
 wordlet.jit.loadstring(s)   -- compile `.let` text with the C backend and load it (LuaJIT FFI)
 wordlet.jit.loadfile(path)  -- the same for a file, resolving its own `use` imports
 wordlet.jit.run(source)     -- load and call `main`

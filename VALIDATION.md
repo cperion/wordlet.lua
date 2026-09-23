@@ -48,6 +48,12 @@ one directly.
   span lines; a view of module storage may be returned while a view of a local rejects; and a slice
   parameter's length is only known while it runs. `tests/eval.lua` reads this file and asserts every
   value listed here, so this bullet is executable rather than prose.
+- examples/dispatch.let: main()=7. A small stack machine: an opcode is one alternative of a sum, a
+  step decodes it with an exhaustive keyed match whose handlers return the next machine, and one
+  tail self-call drives the loop. Because the recursive call is the loop word's own body it lowers
+  to a back edge (`for (;;) { ... continue; }`), not a call, so dispatch is constant stack; a handler
+  that called the loop would be a different code instance and would grow the stack one frame per
+  step. `tests/eval.lua` asserts the value and that the loop, not a call, survives.
 - examples/references.let: read_shared(1)=6, bump_shared(1)=7, borrowed(2)=55, following()=10,
   bump_following()=15. A reference to module storage persists a store; a reference to a captured
   record is live for the caller; a recursive Node/Link reaches and mutates its neighbour through a

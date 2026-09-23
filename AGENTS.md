@@ -33,6 +33,8 @@ value for an unimplemented phase.
 - Wordlet owns its syntax: no Lua proxy/metamethod frontend, replay oracle or debug-stack reconciliation.
 - Use ASDL from the beginning for AST, semantic descriptors and structured IR. Canonicalize/copy lists;
   interned does not mean immutable. Keep effects/storage reads as occurrences.
+- Traverse AST and IR through `wordlet/walk.lua`, which reads the generated `__fields`, not a
+  hand-written child table; a new variant must not be silently skipped. Semantic visitors stay explicit.
 - Separate immutable values from mutable places. Snapshot reads immediately; preserve call/store order.
 - Compile each residual specialization independently. Known code identity is not a borrowed receiver
   address, nor proof that an invocation is static or effect-free.

@@ -95,7 +95,7 @@ emits a local adapter that binds its hidden inputs, and the field stores the res
 adapter lives in the assigning activation, the record holding it is non-retaining: it may be used,
 copied and called locally, but returning it or storing it in module state is rejected.
 
-`tests/eval.lua` (576 checks) and `tests/c.lua` (667 checks, 40 programs, compiling and running the
+`tests/eval.lua` (584 checks) and `tests/c.lua` (667 checks, 40 programs, compiling and running the
 generated C11 under strict warnings) cover this. `tests/sha256.lua` runs a real program,
 `examples/sha256.let`, against the published NIST vector and against the interpreter for runtime
 seeds. `tests/jit.lua` exercises the LuaJIT FFI front end, building and loading an artifact with the
@@ -115,6 +115,7 @@ host compiler.
 - `examples/*.let`: source acceptance fixtures; they type-check and run today, and VALIDATION.md lists
   their expected values.
 - `tests/run.lua`: runs every suite — the bootstrap/relocation checks and the compiler tests.
+- `tests/walk.lua`: asserts the schema-driven traversal reads the ASDL classes, so a field or variant cannot be skipped.
 - [ASDL.md](ASDL.md): the actual vendored API, limitations and integration rules.
 - [VALIDATION.md](VALIDATION.md): executable checks and the remaining compiler obligations.
 - [THIRD_PARTY.md](THIRD_PARTY.md): verified Terra origins, local changes and MIT attribution.

@@ -1652,6 +1652,19 @@ do
     end
 end
 
+-- The threaded-dispatch example. A reified-continuation loop makes the trailing self-call a back
+-- edge, so the residual program carries the loop and no recursion.
+do
+    local path = (source:match("^(.*[/\\])") or "./") .. "../examples/dispatch.let"
+    local file = assert(io.open(path, "rb"))
+    local text = file:read("*a")
+    assert(file:close())
+    check(interpret("main", {}, text)[1] == 7, "examples/dispatch.let main() is 7")
+    local generated = compile(text):unit()
+    check(generated:find("for (;;)", 1, true) ~= nil, "the dispatch loop is a back edge, not a call")
+    check(generated:find("continue;", 1, true) ~= nil, "the back edge continues the loop")
+end
+
 -- Reading module storage through a reference is an ordinary run-time read. A call whose arguments
 -- happen to be static must still be compiled rather than folded when the body needs that storage.
 do
