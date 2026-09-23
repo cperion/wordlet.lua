@@ -41,12 +41,16 @@ function M.record(ty, fields, schema) return make{ tag = "record", ty = ty, fiel
 -- A schema: data fields, methods and any statically bound fields.
 function M.schema(def) return make{ tag = "schema", def = def, ty = S.Type } end
 
--- A mutable instance in residual code: its fields live in `place`.
+-- A record instance in residual code. A record is mutable, so a place is what makes a store to a
+-- field observable; but storage is only demanded when something actually needs an address. Until
+-- then `expr` is the immutable `Make` the constructor built, and every read is a pure projection of
+-- it, which is what keeps a constructor out of a storage round trip. Materialising clears `expr`,
+-- because from then on the place is authoritative and a mutation must be visible to every read.
 -- `enclosing` marks storage that belongs to an enclosing activation (a borrowed capture or a place
 -- parameter) rather than to this one, which is what makes it a legal reference target.
-function M.object(ty, place, schema, borrowed, enclosing)
+function M.object(ty, place, schema, borrowed, enclosing, expr, body)
     return make{ tag = "object", ty = ty, place = place, schema = schema, borrowed = borrowed or false,
-        enclosing = enclosing or false }
+        enclosing = enclosing or false, expr = expr, body = body }
 end
 
 -- A reference: a checked borrow of the place it names. `tied` records that the target belongs to an
@@ -59,9 +63,12 @@ function M.ref(ty, place, schema, tied, record)
 end
 
 -- An array: a fixed-length sequence whose elements are values, with an optional place when it is
--- backed by storage.
-function M.array(ty, items, place, borrowed)
-    return make{ tag = "array", ty = ty, items = items, place = place, borrowed = borrowed or false }
+-- backed by storage. Like a record, a residual literal keeps its construction `Make` as `expr` and
+-- spills to a place only when an element is addressed; `body` is the statement list that spill must
+-- go into so it dominates every use.
+function M.array(ty, items, place, borrowed, expr, body)
+    return make{ tag = "array", ty = ty, items = items, place = place, borrowed = borrowed or false,
+        expr = expr, body = body }
 end
 
 -- A string literal is a compile-time constant byte sequence. Its bytes are the bytes of the source

@@ -27,11 +27,9 @@ local i = context("ir.asdl")
 -- Structural types intern; distinct meanings do not collide.
 assert(i.Ty.Record("m", L{}) == i.Ty.Record("m", L{}))
 assert(i.Ty.Record("m", L{}) ~= i.Ty.Record("n", L{}))
-assert(i.Ty.Tuple(L{i.Ty.U32}) ~= i.Ty.Tuple(L{i.Ty.Bool}))
 local sig = i.Ty.Sig(L{i.Ty.InValue(i.Ty.U32)}, L{i.Ty.U32})
 assert(sig == i.Ty.Sig(L{i.Ty.InValue(i.Ty.U32)}, L{i.Ty.U32}))
 assert(sig ~= i.Ty.Sig(L{i.Ty.InValue(i.Ty.Bool)}, L{i.Ty.U32}))
-assert(i.Ty.Env(L{i.Ty.Saved(i.Ty.U32)}) ~= i.Ty.Env(L{i.Ty.Reference(i.Ty.U32)}))
 assert(i.Ty.U32 == i.Ty.U32 and i.Ty.V:isclassof(i.Ty.U32) and i.Ty.V:isclassof(i.Ty.Unit))
 
 -- A sum interns by its canonical alternative list, so two spellings of one sum are one type.
@@ -71,9 +69,11 @@ assert(i.Ir.Place:isclassof(i.Ir.Deref(i.Ir.Local(i.Ir.Storage(1)), named)))
 assert(i.Ir.Place:isclassof(i.Ir.Index(i.Ir.Local(i.Ir.Storage(1)),
     i.Ir.Const(i.Ty.U32, i.Ir.UInt(0)), i.Ty.U32)))
 
--- Function-local ID descriptors are interned so equality is cheap.
-assert(i.Ir.Value(1) == i.Ir.Value(1) and i.Ir.Storage(1) == i.Ir.Storage(1))
-assert(i.Ir.Bundle(1) == i.Ir.Bundle(1) and i.Ir.Field("x") == i.Ir.Field("x"))
+-- Value and Storage ids are function-local and deliberately NOT interned: interning by value in a
+-- context-wide cache would make two functions' value 1 the same table. Field names are global and do
+-- intern.
+assert(i.Ir.Value(1) ~= i.Ir.Value(1) and i.Ir.Storage(1) ~= i.Ir.Storage(1))
+assert(i.Ir.Field("x") == i.Ir.Field("x"))
 assert(i.Ir.Value(1) ~= i.Ir.Storage(1))
 
 -- Ir.Expr is deliberately NOT interned by ASDL: Value IDs are function-local, so a global cache
@@ -102,12 +102,10 @@ local record = i.Ty.Record("Counter", L{i.Ty.Field("value", i.Ty.U32)})
 local place_param = i.Ir.PlaceParam(0, i.Ir.Storage(1), record)
 local place = i.Ir.Project(i.Ir.Local(place_param.binding), i.Ir.Field("value"))
 assert(i.Ir.Place:isclassof(place) and place.base.kind == "Local")
-local env = i.Ty.Env(L{i.Ty.Saved(i.Ty.U32), i.Ty.Reference(record)})
-local bundle = i.Ir.BundleDef(i.Ir.Bundle(1), env, L{i.Ir.ValueArg(three), i.Ir.BorrowArg(place)})
-assert(bundle.env == env)
-assert(i.Ir.Arg:isclassof(bundle.slots[1]) and i.Ir.Arg:isclassof(bundle.slots[2]))
+assert(i.Ir.Arg:isclassof(i.Ir.ValueArg(three)))
+assert(i.Ir.Arg:isclassof(i.Ir.BorrowArg(place)))
 
--- Fn.inputs is Ty.Input* (value/place/bundle), not Ty.V*: the ASDL field check enforces this.
+-- Fn.inputs is Ty.Input* (value/place), not Ty.V*: the ASDL field check enforces this.
 local fn = i.Ir.Fn("wordletfn_1", i.Ir.Body, 1,
     L{i.Ty.InPlace(record), i.Ty.InValue(i.Ty.U32)}, L{i.Ty.U32},
     L{place_param, i.Ir.ValueParam(1, i.Ir.Value(1), i.Ty.U32)},
@@ -116,8 +114,5 @@ assert(fn.role.kind == "Body" and fn.hidden == 1 and fn.params[1].input == 0)
 assert(i.Ir.Fn.kind == nil and i.Ir.ValueParam.kind == "ValueParam")
 assert(not pcall(i.Ir.Fn, "bad", i.Ir.Body, 0, L{i.Ty.U32}, L{}, L{}, L{}))
 assert(not pcall(i.Ty.Sig, L{i.Ty.U32}, L{}))
-
-local out = i.Ir.Program(L{fn}, L{i.Ir.FunctionExport("inc", "wordlet_inc")}, L{i.Ir.TypeExport("Counter", record)})
-assert(#out.functions == 1 and out.exports[1].target == "wordlet_inc" and out.types[1].name == "Counter")
 
 print("PASS: ast.asdl/ir.asdl parse and construct; interning, spans, occurrences and cross-module refs behave")

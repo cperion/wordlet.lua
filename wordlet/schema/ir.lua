@@ -4,7 +4,6 @@ return [[# Wordlet runtime semantic types and structured IR. Checkable with vend
 module Ty {
   V = U32 | U8 | U16 | I32 | U64 | I64 | F64 | Bool | Unit | Type
     | Record(string meaning, Field* fields) unique
-    | Tuple(V* fields) unique
     | Sig(Input* inputs, V* results) unique
     | Owned(string entry, Sig visible, V environment) unique
     | View(Sig visible) unique
@@ -20,15 +19,14 @@ module Ty {
     | Slice(V element) unique
     | Named(string cell) unique
   Field = (string name, V type) unique
-  Input = InValue(V type) unique | InPlace(V type) unique | InBundle(V env) unique
-  Env = (Slot* slots) unique
-  Slot = Saved(V type) unique | Reference(V type) unique
+  Input = InValue(V type) unique | InPlace(V type) unique
 }
 
 module Ir {
-  Value = (number id) unique
-  Storage = (number id) unique
-  Bundle = (number id) unique
+  # Not marked unique, for the reason Ir.Expr gives: these ids are function-local, so interning by
+  # value in the context-wide cache would make two functions' value 1 the same table.
+  Value = (number id)
+  Storage = (number id)
   Field = (string name) unique
 
   Literal = UInt(number value) | UInt64(number high, number low) | Boolean(boolean value)
@@ -51,7 +49,6 @@ module Ir {
        | Bin(Binary op, Expr left, Expr right, Ty.V type)
        | Get(Expr aggregate, Field field, Ty.V type)
        | Make(Ty.V type, Expr* fields)
-       | Owned(Expr environment, Ty.V type)
        | Convert(Expr operand, Ty.V type)
        | Addr(Place place, Ty.V type)
        # The length of a slice value. Pure, like a record field projection.
@@ -60,7 +57,6 @@ module Ir {
        | Null(Ty.V type)
 
   Place = Local(Storage storage)
-        | Captured(Bundle bundle, number slot)
         | Project(Place base, Field field)
         | Deref(Place base, Ty.V type)
         | Index(Place base, Expr index, Ty.V type)
@@ -74,14 +70,13 @@ module Ir {
         # which is the whole difference between this and a slice.
         | PtrIndex(Expr view, Expr index, Ty.V type)
 
-  Arg = ValueArg(Expr value) | BorrowArg(Place place) | BundleArg(Bundle bundle)
+  Arg = ValueArg(Expr value) | BorrowArg(Place place)
 
   # Ordered effects. Loop-carried storage is declared by Var before its Loop.
   Stmt = Let(Value value, Ty.V type, Expr expr)
        | Var(Storage storage, Ty.V type, Expr? initial)
        | Read(Value value, Ty.V type, Place place)
        | Store(Place place, Expr value)
-       | BundleDef(Bundle bundle, Ty.Env env, Arg* slots)
        | View(Value value, Ty.V type, string entry, Arg* slots)
        | Call(Value* results, string target, Arg* arguments)
        | Indirect(Value* results, Expr callable, Arg* arguments)
@@ -103,12 +98,7 @@ module Ir {
   # Actual ABI inputs, including the hidden owner/capture prefix at input 0..hidden-1.
   Param = ValueParam(number input, Value binding, Ty.V type)
         | PlaceParam(number input, Storage binding, Ty.V type)
-        | BundleParam(number input, Bundle binding, Ty.V env)
   Role = Body | Entry
   Fn = (string id, Role role, number hidden, Ty.Input* inputs, Ty.V* results, Param* params, Stmt* body)
-
-  FunctionExport = (string name, string target) unique
-  TypeExport = (string name, Ty.V type) unique
-  Program = (Fn* functions, FunctionExport* exports, TypeExport* types)
 }
 ]]
