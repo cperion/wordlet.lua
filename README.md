@@ -40,7 +40,6 @@ this section states exactly how much of it runs today.
 | A callable stored in a signature-typed field | implemented through the borrowed callable ABI: the field holds `{ invoke, environment }` built from a local adapter, so the record is non-retaining and cannot escape (`borrow-escape`) |
 | Partial application of a closure | implemented: `add(5)` yields a closure with a static argument bound |
 | Contextual lambda parameter types | implemented: a binding annotation, a parameter requirement or a result contract supplies them. A lambda with no expectation anywhere is still rejected (`lambda-annotation`) |
-| `F64` | **specified in `syntax.md` §1, not implemented**: an IEEE-754 double, so division by zero is an infinity or a NaN rather than a trap, a NaN comparison is false, and the integer conversions round one way and truncate the other. It also needs a float literal, which this syntax does not have yet |
 | Imports (`use util.helper`) | implemented: the dotted name is a file next to the importing one, the last segment is a namespace over that file's export list, a name that is not exported stays private, each file loads once, a cycle rejects, and all modules share one translation unit and one initialiser |
 | Two different callables selected by one conditional | implemented as a tagged callable: a tag plus a union of the arm environments. A call tests the tag and runs that arm's own code directly, so it needs no function pointer. The same code identity in both arms needs no tag |
 | Erasing a runtime-tagged callable into a signature (`callable-erase`) | **rejected**: a view does not retain the environment that carries the tag. Call it where it was selected, or select the arm first |
@@ -104,6 +103,7 @@ host compiler.
 
 
 - [syntax.md](syntax.md): Wordlet source syntax and semantic decisions.
+- [GUIDE.md](GUIDE.md): how to design and name software in Wordlet — requirements, keyed supply, binding time, specialization and CPS, with the rule that a named definition must annotate every parameter.
 - [architecture.md](architecture.md): structured evaluator/IR implementation contract.
 - [interfaces.md](interfaces.md): pass order, module APIs, side tables, builder state, facade API.
 - `ast.asdl`, `ir.asdl`: concrete ASDL schemas, parsed and checked by `tests/schemas.lua`.
