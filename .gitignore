@@ -3,3 +3,4 @@ dist/
 
 # Local agent tooling state.
 .pi/
+.aider*

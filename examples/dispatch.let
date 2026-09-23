@@ -8,7 +8,7 @@
 --
 -- Expected: main() = 7
 
-let Op = OneOf({ push: U32, add: Unit, halt: Unit })
+let Op = OneOf { push: U32, add: Unit, halt: Unit }
 
 let Machine = {
   code: Array(Op, 4),

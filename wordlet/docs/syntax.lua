@@ -29,7 +29,6 @@ lambda. Reserved keywords are `let`, `extern`, `do`, `defer`, `end`, `if`, `then
 `true`, and `false`. Primitive names U32, U8, U16, I32, U64, I64, F64, Bool, Unit and Type are
 predefined bindings, as are the type constructors `OneOf` (section 8.1), `Ref` (section 8.2), `Array`
 and `Slice` (sections 8.3 and 8.4), `Ptr` (section 8.5) and the null pointer `Null` (section 8.5).
-type constructor `OneOf` (section 8.1).
 
 Numeric literals are decimal, hexadecimal prefixed by 0x, or binary prefixed by 0b. A single
 underscore may separate any two digits, so 1_000_000 and 0b1010_1010 read as they look; a separator
@@ -37,8 +36,8 @@ that leads, trails or doubles rejects rather than being ignored into a different
 that fits a
 word is a U32 and one that does not is a U64, so 0xFFFFFFFFFFFFFFFF can be written directly; a
 literal above 64 bits rejects rather than wrapping. A leading minus is an operator, not part of a
-literal. There are no nil or implicit tuple literals. A string literal is a byte sequence, specified
-specified in section 8.4.
+literal. There are no nil or implicit tuple literals. A string literal is a byte sequence, specified in
+section 8.4.
 
 The integer types are `U8`, `U16`, `U32`, `I32`, `U64` and `I64`. `I32` is
 two's complement, so it wraps, its division truncates toward zero with the remainder taking the
@@ -255,10 +254,9 @@ the same list is rejected as unreachable.
 Blocks may contain declarations, field assignments, compound field assignments, call statements,
 statement conditionals, deferred actions and returns. A call statement must be saturated; it evaluates
 the call and discards its result vector, and a deferred action is a call statement that runs when the
-block it is written in is left (section 8.8).
-discards its result vector. Discarding an incomplete word is an error, not a call for effects.
-Arbitrary unused arithmetic expressions are not statements. `do ... end` is a body form, not a
-standalone value expression or a declaration-scope statement.
+block it is written in is left (section 8.8). Discarding an incomplete word is an error, not a call
+for effects. Arbitrary unused arithmetic expressions are not statements. `do ... end` is a body form,
+not a standalone value expression or a declaration-scope statement.
 
 Conditionals have two grammatical forms:
 
@@ -364,17 +362,21 @@ Power binds tighter than unary on its left: `-x ^ 2` means `-(x ^ 2)`. Unary is 
 of power, so `x ^ -1` means `x ^ (-1)`. Here -1 is modular U32 negation, not a signed exponent. Two
 comparisons cannot chain without explicit grouping; `a < b < c` rejects.
 
-Arithmetic and bitwise operators require U32, except that `+`, `-`, `*` and `/` also apply to F64.
-Add/subtract/multiply/negate/power operate modulo 2^32.
-`0 ^ 0` is 1. Division is unsigned integer quotient; remainder is unsigned remainder. A known zero
-divisor rejects; a dynamic zero divisor aborts at runtime. Shifts are logical; an amount at least 32
-yields zero. Raw literals outside the U32 range reject before operations. No implicit Bool/integer
-conversion exists.
+Arithmetic and bitwise operators require one integer type, except that `+`, `-`, `*` and `/` also
+apply to F64. As section 1 says, a literal adopts the other operand's type when its value fits,
+mixed widths of one signedness widen to the wider one, and mixing signed and unsigned rejects.
+Add/subtract/multiply/negate/power wrap at the width the type names.
+`0 ^ 0` is 1. Division truncates toward zero, with the remainder taking the dividend's sign; a known
+zero divisor rejects and a dynamic one aborts at runtime. A right shift is logical for an unsigned
+type and arithmetic for a signed one, so it keeps the sign bit; a shift amount at least the width
+yields zero, or the sign fill for an arithmetic right shift. No implicit Bool/integer conversion
+exists.
 
-Ordered comparison requires U32 or F64, and equality requires equal scalar types U32, Bool, F64 or
-Unit; Unit equals
-Unit. Two `String` values compare by content, since a byte sequence has no identity a program can
-observe. Record, word, type, slice and callable equality are not added by the equality tokens.
+Ordered comparison requires one integer type or F64, and equality requires equal scalar types (one
+integer type, Bool, F64 or Unit; Unit equals Unit). A comparison widens its operands to one integer
+type the way an arithmetic operation does. Two `String` values compare by content, since a byte
+sequence has no identity a program can observe. Record, word, type, slice and callable equality are
+not added by the equality tokens.
 
 `and`, `or`, `not` require Bool and produce Bool. There is no truthiness and no operand-valued Lua
 and/or behavior. `and` and `or` short-circuit. Other binary operators evaluate operands left-to-right;
@@ -653,12 +655,12 @@ A slice is a runtime-length view of storage someone else owns. It is the one arr
 length is not part of the type, which is what lets one word accept a sequence of any extent:
 
 ```
-let sum(xs: Slice(U32)) : U32 = do
-  let n = xs.length
-  let i: U32 = 0
-  let total: U32 = 0
-  return total
+let sum_from(xs: Slice(U32), i: U32, total: U32) : U32 = do
+  if i == 0 then return total end
+  return sum_from(xs, i - 1, total + xs[i - 1])
 end
+
+let sum(xs: Slice(U32)) : U32 = sum_from(xs, xs.length, 0)
 ```
 
 `Slice(T)` is an ordinary word, like `Ref`: applied to a type it produces a type, and applied to an
@@ -826,7 +828,7 @@ and no function pointer is involved. When the combinator's own body is foldable 
 has no effect of its own -- the whole call folds away and nothing at all is left, which is the case
 measured for a body of pure arithmetic. So a known body costs at most one direct call; what it never
 costs is a dynamic one. When the body arrives as a run-time view the combinator is an indirect call
-call and the release still runs. A `return` inside the body returns from the *body*, not from the
+and the release still runs. A `return` inside the body returns from the *body*, not from the
 combinator, so the release runs on every normal path.
 
 What this does not do is enforce anything. A pointer into the region may be returned, stored in module

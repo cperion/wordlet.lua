@@ -113,6 +113,21 @@ field assignment and record return copy data. A local alias to an existing insta
 instance; selecting/copying a method view preserves its receiver borrow. Copying the record does not
 retarget an already selected method.
 
+A record is mutable, but storage is only what makes a store observable, so a constructor does not
+demand it. `Make(fields)` is the value, and a field read is a projection of it, until something
+needs an address: a field store, a reference, or a borrowed receiver. The first such demand spills
+the record once into its binding's storage, and storage is authoritative from then on, so a later
+store is visible to every read. The storage is created where the record is constructed, at the
+scope that dominates every use, and a record that never demands one emits no storage. An array
+follows the same rule. This is why a record built in one arm and joined in another is stored once
+rather than read back field by field.
+
+A by-value parameter is the same case: the C parameter is already a copy of the caller's value,
+so a record or array parameter owns storage only when a write or an address demands it. A read-only
+parameter therefore reads the input directly, and a read-only place a spill would have named aliases
+the C parameter instead of paying for a second copy. A parameter that is written keeps its own
+storage, because a read taken before the write must snapshot the pre-write value.
+
 An immutable aggregate value crossing a storage boundary is materialized once into fresh storage.
 A place crossing a by-value boundary is snapshotted before installation in the destination. Scalar
 reads happen when their expressions are evaluated; argument and constructor binding cannot move
@@ -414,6 +429,8 @@ through when either arm does.
 Fold typed constant operations and Get(Make(...)). Known zero division rejects. Dynamic division
 emits a Trap on the zero predicate, then materializes the checked quotient/remainder into an immutable
 value at that point. It is not left as a freely movable division expression whose guard could be lost.
+An identical adjacent Trap is emitted once, since the predicate is pure over immutable values: `/`
+and `%` by one run-time divisor are the common case.
 The same rule applies to any future potentially trapping operation.
 
 `Builder:intern` unifies structurally equal expressions, so the IR is a DAG and one `Ir.Expr` node can
@@ -424,6 +441,20 @@ covers arms and loops with no separate dominance check. An operand shared by the
 first, and a `Const` or `Ref` is never named, because duplicating a leaf is free. This is why an
 `Ir.Expr` must stay pure: a trap or a read is a statement materialised at its point, so no guarded
 operation is ever hoisted out of the arm that guards it.
+
+A definition with one use is lowered where it is used rather than into a local. A pure definition
+(`Let`, a variant construction, a tag test, a payload projection) may move to its use freely; a
+`Read` may move only to a use that no store or call reaches in between, because it is a snapshot.
+This is how the evaluator's explicit definitions become C expressions rather than copies; it is not
+a general optimizer, and a definition with more than one use keeps its local. A direct call whose
+single result is the next `Store` or `Return` is likewise emitted at that use, so the result never
+lands in a temporary that only the next statement reads. A `Var` initialized from a by-value
+parameter and never written is a place with no storage of its own, so the emitter aliases it to the
+parameter; the value's storage is only real when a write or an address made it so.
+
+A conditional whose continuing arms agree on one known scalar folds to that scalar. The arms still
+run for their effects, but there is no join slot, no read back out, and no `If` at all when both
+arms are empty.
 
 ## 8. Callables, captures and owners
 
@@ -439,7 +470,7 @@ Returning or copying that callable copies its environment. Its code is known sta
 call can be direct.
 
 An implicit receiver field read captures a value only if that read actually occurs before closure
-creation. Capturing a receiver/record instance or a method view retains its place and is borrowed.
+creation. Capturing a receiver/record/array instance or a method view retains its place and is borrowed.
 Lexical resolution and capture planning must distinguish these cases rather than guessing from a
 shared signature.
 
@@ -485,7 +516,9 @@ It checks:
 2. call operands against the TARGET interface, including hidden receiver/environment bindings;
 3. immutable value definitions, scope and availability at every use;
 4. distinct storage identities and valid, typed receiver/capture roots;
-5. definite initialization of join storage on every continuing path before Read;
+5. definite initialization of join storage on every continuing path before Read, which the builder
+   establishes by construction and the C compiler's own definite-initialization analysis confirms
+   (an independent dataflow re-check is a section 14 obligation);
 6. return vector agreement and explicit completion of every reachable function path;
 7. Next only under its owning Loop, with safe simultaneous parameter updates;
 8. no use of a branch-local value outside its scope and no code after unconditional termination;
@@ -516,7 +549,10 @@ private definition is spelled `WORDLET_PRIVATE`, which is `static inline __attri
 on GCC and clang and plain `static` on another C11 compiler. Forced inlining is the default because a
 residual specialization usually has one caller, and it removes the out-of-line copies a cost model
 keeps for the larger bodies; a host that defines `WORDLET_NO_FORCED_INLINE`, or a caller that passes
-`inline = false`, gets plain `static` and the compiler's own decision instead.
+`inline = false`, gets plain `static` and the compiler's own decision instead. A function with a
+non-tail direct self-call keeps plain `static` whatever the option says: a self-tail call becomes a
+`Loop` back edge, so a remaining self-call is genuine recursion, and GCC refuses to force-inline a
+recursive function.
 
 The same artifact is consumable without C glue: `artifact:cdef(namespace)` renders the type
 declarations and the exported prototypes for `ffi.cdef`, and a `symbolPrefix` namespaces every export
@@ -601,7 +637,12 @@ the root of the scope chain it was written in rather than a global one.
 Names use wordlet_<escaped export> and private wordletfn_<number>. Escape non-ASCII-alphanumeric bytes,
 including underscore, as _XX. Numbering follows deterministic traversal, not hash-table order.
 Public type aliases hide private numbered layout names. Headers have include guards and C++ linkage
-wrappers. Packing and arbitrary foreign layout are not promised by the portable C11 backend.
+wrappers. Packing and arbitrary foreign layout are not promised by the portable C11 backend. The
+emitted unit includes only the headers it uses: `<stdint.h>` always, and `<stdbool.h>`,
+`<stddef.h>`, `<stdlib.h>`, `<string.h>` or `<math.h>` when a bool, a null pointer, an abort, a byte
+or bit-copy helper, or a float special actually appears. A join slot is declared without an
+initialiser: the checker proved every reachable continuation assigns it, so zeroing it would be
+storage the program does not need.
 
 The C compiler may perform further optimization. The Wordlet compiler still owns correctness of storage
 reads, guards, argument order and the self-tail transformations it promises.

@@ -158,7 +158,9 @@ declared `WORDLET_PRIVATE`, which is `static inline __attribute__((always_inline
 and plain `static` on another C11 compiler. The forced inlining is on by default because a residual
 specialization usually has one caller; `--no-inline` (or `inline = false`) leaves the choice to the
 compiler, and a host can define `WORDLET_NO_FORCED_INLINE` to do the same, which is what a debug
-build wants.
+build wants. A function with a non-tail direct self-call always keeps plain `static`, because GCC
+refuses to force-inline a genuinely recursive function; a self-tail call is a `Loop` back edge and is
+unaffected.
 The bootstrap has no LuaRocks, network, external Lua library or C compiler dependency. Its bit module
 is supplied by LuaJIT itself.
 
