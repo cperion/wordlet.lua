@@ -480,16 +480,6 @@ function Eval:exportedValue(program, name, top)
     D.reject("unknown-name", "Unknown exported function: " .. tostring(name))
 end
 
-function Eval:exportedWord(slot, span, name)
-    if slot.kind == "word" then return V.word(slot.def, {}, span) end
-    local demanded = self:demand(slot, span)
-    local value = demanded.value
-    if V.tag(value) ~= "word" then
-        D.reject("function-required", "Exported function " .. tostring(name) .. " is not a word", span)
-    end
-    return value
-end
-
 -- A builtin word whose terminal is compiler code rather than a source body. It receives the
 -- supplied arguments and returns frontend values; it never runs a source terminal.
 function Eval:builtin(name, parameters, intrinsic)
@@ -901,18 +891,9 @@ function Eval:canonicalize(ty)
     return ty
 end
 
--- The record type a reference points at, unwinding the cell a recursive definition reserved.
--- The type an address points at, unwinding the cell a recursive definition reserved. A reference and a
--- raw pointer name their target the same way, so one unwinding serves both.
+-- The type an address points at, unwinding the cell a recursive definition reserved. A reference
+-- and a raw pointer name their target the same way, so one unwinding serves both.
 function Eval:pointeeType(ty)
-    local target = S.environmentOf(ty.target)
-    if S.isNamed(target) then target = self:resolveType(target) end
-    return target
-end
-
-Eval.refTargetType = Eval.pointeeType
-
-function Eval:refTargetType(ty)
     local target = S.environmentOf(ty.target)
     if S.isNamed(target) then target = self:resolveType(target) end
     return target
@@ -957,7 +938,7 @@ function Eval:derefPlace(ctx, value, span)
     -- An address is a pointer; `value.place` is where that pointer lives, so the target is
     -- one dereference further on. The pointee type travels with the place, like every other typed
     -- IR node, so the verifier needs no type-cell table to check it.
-    local pointee = S.environmentOf(self:refTargetType(value.ty))
+    local pointee = S.environmentOf(self:pointeeType(value.ty))
     if value.place then return Ir.Deref(value.place, pointee) end
     if ctx.mode ~= "residual" then
         D.reject("runtime-in-normalization", "A runtime reference needs runtime code", span)
@@ -1044,9 +1025,6 @@ function Eval:evalPtr(ctx, expr)
         elseif tag == "array" then
             reached = { place = self:arrayPlace(ctx, held, expr.span), ty = held.ty }
         end
-    end
-    if not reached.place then
-        D.reject("not-a-place", "Ptr needs an element type or a place to address", expr.span)
     end
     if not reached.place then
         D.reject("not-a-place", "Ptr needs a place to address", expr.span)
@@ -1319,25 +1297,14 @@ function Eval:arrayExpr(ctx, value)
     return ctx.builder:make(value.ty, exprs)
 end
 
-function Eval:requireArray(value, span)
-    if not S.isArray(value.ty) then
-        D.reject("type-mismatch", "Expected an array but found " .. S.encode(value.ty or S.Unit), span)
-    end
-    return value.ty
+-- A name no binding declares. There is no "known but unimplemented" state: a name is either bound
+-- or it is not.
+function Eval:unknownName(name, span)
+    D.reject("unknown-name", "Unknown name: " .. name, span)
 end
 
 -- The place an lvalue expression names, without reading it. Every assignable target and every
 -- reference target is a chain of selections over a root, so this is the one place that knows how to
--- A name the reference specifies but this implementation does not provide is a known-but-unimplemented
--- feature rather than an unknown name. Nothing is in that state now that F64 exists, so the table is
--- empty; a name goes here when its rules are written down and its implementation is not.
-local UNIMPLEMENTED_NAMES = {}
-function Eval:unknownName(name, span)
-    local note = UNIMPLEMENTED_NAMES[name]
-    if note then D.todo("unimplemented", note, span) end
-    D.reject("unknown-name", "Unknown name: " .. name, span)
-end
-
 -- reach storage. A concrete result describes a compile-time container; a residual one is an
 -- `Ir.Place` with the type it refers to.
 --   { concrete = "field", record = <value>, name = <field>, ty = <ty> }
@@ -1503,7 +1470,7 @@ function Eval:derefContainer(ctx, container, span)
             ty = object.ty, container = object }
     end
     if held and held.ty and S.isRef(held.ty) and V.tag(held) == "ir" then
-        local target = self:refTargetType(held.ty)
+        local target = self:pointeeType(held.ty)
         local place = ctx.mode == "residual" and self:derefPlace(ctx, held, span) or nil
         return { place = place, ty = target, container = { retaining = true } }
     end
@@ -2072,7 +2039,6 @@ function Eval:evalReference(ctx, expr)
     if not slot then self:unknownName(name, expr.name.span) end
     if slot.kind == "value" then
         local demanded = self:demand(slot, expr.name.span)
-        if demanded.value == nil then D.reject("value-required", name .. " has no value", expr.name.span) end
         if slot.atTop and ctx.mode == "residual"
             and (V.tag(demanded.value) == "record"
                 or (V.tag(demanded.value) == "array" and demanded.value.place == nil)) then
@@ -2368,7 +2334,7 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
         elseif op == "<<" then result = wrap(ty, x * 2 ^ y)
         elseif op == ">>" then
             -- A signed shift is arithmetic: it keeps the sign bit.
-            result = S.isSigned(ty) and math.floor(x / 2 ^ y) or math.floor(x / 2 ^ y)
+            result = math.floor(x / 2 ^ y)
         elseif op == "&" then result = wrap(ty, bit.band(x, y))
         elseif op == "|" then result = wrap(ty, bit.bor(x, y))
         else result = wrap(ty, bit.bxor(x, y)) end
@@ -2707,7 +2673,7 @@ function Eval:evalFieldSelect(ctx, expr)
         -- the same projection one dereference on; only the lifetime rule differs, and a pointer has
         -- none to check.
         -- A runtime reference is a pointer, so the field lives at the place it points to.
-        local ty = S.field(self:refTargetType(base.ty), name)
+        local ty = S.field(self:pointeeType(base.ty), name)
         if not ty then D.reject("unknown-member", "Record has no field " .. name, expr.field.span) end
         local place = Ir.Project(self:derefPlace(ctx, base, expr.span), Ir.Field(name))
         local read = ctx.builder:read(ctx.body, ty, place)
@@ -2759,40 +2725,6 @@ function Eval:execStore(ctx, stmt)
     local value = self:evalExpr(ctx, stmt.value)
     local combined = self:binaryOp(ctx, binary, old, value, stmt.target.span, stmt.value.span, stmt.span)
     return self:writeSlot(ctx, slot, place, combined)
-end
-
--- Either a residual IR place or a concrete interpreter field.
-function Eval:readSlot(ctx, slot, place, span)
-    if slot.kind == "concrete-field" then return slot.record.fields[slot.name] or V.unit() end
-    if slot.kind == "concrete-index" then return slot.array.items[slot.index + 1] end
-    return self:readFieldValue(ctx, slot, span)
-end
-
-function Eval:writeSlot(ctx, slot, place, value)
-    if slot.kind == "concrete-index" then
-        slot.array.items[slot.index + 1] = value
-        if self:isBorrowed(value) then slot.array.borrowed = true end
-        return
-    end
-    if slot.kind == "concrete-field" then
-        slot.record.fields[slot.name] = value
-        if self:isBorrowed(value) then slot.record.borrowed = true end
-        return
-    end
-    -- Assigning callable code to a signature-typed field builds a view whose environment is a
-    -- local adapter, so the assignment is a borrow even when the code itself is not.
-    local becomesBorrowed = self:isBorrowed(value) or S.isView(slot.ty)
-    if V.tag(value) == "ref" and value.tied and (slot.retaining or (slot.record and slot.record.module)) then
-        D.reject("ref-escape", self:refEscapeMessage(), ctx.span)
-    end
-    if becomesBorrowed and (slot.retaining or (slot.record and slot.record.module)) then
-        D.reject("borrow-escape",
-            "Module storage outlives the activation that made this borrow, so it cannot hold one",
-            ctx.span)
-    end
-    ctx.builder:store(ctx.body, place, self:expression(ctx, value, slot.ty))
-    -- Storing a borrow into an instance makes that instance non-retaining too.
-    if becomesBorrowed and slot.record then slot.record.borrowed = true end
 end
 
 -- Resolves a store target to a place, plus the slot describing it.
@@ -2971,10 +2903,8 @@ function Eval:makeView(ctx, value, sig)
     end
     local id = ctx.builder:valueId()
     ctx.builder:emit(ctx.body, Ir.View(id, viewType, entry, S.list(slots)))
-    -- The environment points at a local adapter, so the view is not retaining. The frontend value
-    -- records that, so the borrow can be tracked to its escape.
-    ctx.borrowedViews = ctx.borrowedViews or {}
-    ctx.borrowedViews[id.id] = true
+    -- The environment points at a local adapter, so the view is not retaining. The `Ir.BorrowArg`
+    -- slots above are what record that: the checker sees the borrowed places through them.
     return ctx.builder:ref(id, viewType)
 end
 
@@ -3456,17 +3386,6 @@ function Eval:buildCallableInstance(key, callable, args, span)
     return instance
 end
 
--- Calling a closure value or an IR value whose Owned type names its code.
-function Eval:applyCallable(ctx, def, codeKey, envValues, envTys, args, span)
-    local plan = self:planOf({ entry = codeKey }, span)
-    local callable = { plan = plan, envValues = envValues }
-    if envValues == nil then
-        -- The environment is inside the callable value; read its fields positionally.
-        callable.envExprs = {}
-    end
-    return self:callClosure(ctx, callable, args, span)
-end
-
 -- Bodies --------------------------------------------------------------------------------------
 
 -- A deferred action hands the rest of the list to a nested block over the same context, so every way
@@ -3746,6 +3665,12 @@ end
 
 function pow(ty, base, exponent)
     if ty == S.U32 then return U32Kernel.pow(base, exponent) end
+    if ty == S.I32 then
+        -- A signed power wraps at 32 bits exactly as an unsigned one does, so the exact kernel does
+        -- the arithmetic on the two's complement words and the result is mapped back into range.
+        -- Doing it here would multiply values whose product exceeds what a Lua number holds.
+        return wrap(ty, U32Kernel.pow(base % 4294967296, exponent))
+    end
     local result, b, e = 1, base, exponent
     while e > 0 do
         if e % 2 == 1 then result = wrap(ty, result * b) end
@@ -3872,8 +3797,6 @@ function Eval:applyConversion(ctx, ty, args, span)
     if S.isInteger(ty) and S.isF64(value.ty) then
         return self:truncateToInt(ctx, ty, value, span)
     end
-    if #args ~= 1 then D.reject("arity", "A conversion takes one value", span) end
-    local value = args[1]
     if not S.isInteger(value.ty) then
         D.reject("type-mismatch", S.encode(ty) .. " needs an integer, found "
             .. S.encode(value.ty or S.Unit), span)

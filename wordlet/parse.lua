@@ -321,7 +321,7 @@ end
 
 function Parser:lambda()
     local open = self:expect("|")
-    local params = self:parameters("|", false, false)
+    local params = self:parameters("|", false)
     self:expect("|", "'|' closing the lambda parameters")
     self:expect("->", "'->' after lambda parameters")
     local body = self:body()
@@ -341,8 +341,10 @@ end
 -- parameters -----------------------------------------------------------------
 
 -- Groups of `Name (',' Name)*` optionally followed by `':' expr`. Annotations are
--- mandatory in definitions and optional in lambdas (the context supplies them).
-function Parser:parameters(closing, requireAnnotation, allowPipe)
+-- mandatory in definitions and optional in lambdas (the context supplies them). A parameter
+-- annotation ends at the next `|` at its own level, which is the lambda's closing pipe; the full
+-- expression grammar (including bitwise `|`) applies inside parentheses.
+function Parser:parameters(closing, requireAnnotation)
     local params = {}
     if self:at(closing) then return asList(params) end
     repeat
@@ -354,7 +356,8 @@ function Parser:parameters(closing, requireAnnotation, allowPipe)
         local annotation = nil
         if self:take(":") then
             local saved = self.pipeAllowed
-            self.pipeAllowed = allowPipe and true or false
+            -- `|` closes the parameter list, so a bitwise-or in an annotation needs parentheses.
+            self.pipeAllowed = false
             local ok, parsed = pcall(self.expression, self)
             self.pipeAllowed = saved
             if not ok then error(parsed, 0) end
@@ -406,7 +409,6 @@ function Parser:declaration()
         local def = A.c.ForeignDef(A.name(name), params, result)
         return A.c.ForeignDecl(def, mergeSpan(first.span, spanOf(result) or name.span))
     end
-    local first = self:peek()
     if first.kind == "name" and first.text == "use" then return self:useDecl() end
     local let = self:expect("let")
     local name = self:expectName("a definition name")

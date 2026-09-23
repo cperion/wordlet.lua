@@ -149,51 +149,9 @@ function Builder:un(op, operand, ty)
     end)
 end
 
-local function foldBinary(op, ty, a, b)
-    if a.kind ~= "Const" or b.kind ~= "Const" then return nil end
-    -- A 64-bit constant is two words and a wide type wraps at its own width, so it is left to the
-    -- evaluator's exact folding rather than folded here.
-    if a.literal.kind ~= "UInt" or b.literal.kind ~= "UInt" then return nil end
-    if S.isWide(ty) then return nil end
-    local x, y = a.literal.value, b.literal.value
-    if S.isInteger(ty) and ty ~= S.U32 then
-        -- A narrower width wraps at its own width, so the exact 32-bit kernel does not apply.
-        local modulus, bit = S.maxOf(ty) + 1, require("bit")
-        if op == "Add" then return (x + y) % modulus end
-        if op == "Sub" then return (x - y) % modulus end
-        if op == "Mul" then return (x * y) % modulus end
-        if op == "Div" then if y == 0 then return nil end return math.floor(x / y) end
-        if op == "Rem" then if y == 0 then return nil end return x % y end
-        -- The bit operations yield a signed 32-bit value, so the width normalises it again.
-        if op == "BitAnd" then return bit.band(x, y) % modulus end
-        if op == "BitOr" then return bit.bor(x, y) % modulus end
-        if op == "BitXor" then return bit.bxor(x, y) % modulus end
-        if op == "Shl" then return (x * 2 ^ y) % modulus end
-        if op == "Shr" then return math.floor(x / 2 ^ y) end
-        return nil   -- Power and the rest are left to the evaluator's own folding.
-    end
-    local U = require("wordletkit.u32")
-    local ok, result = pcall(function()
-        if op == "Add" then return U.add(x, y) end
-        if op == "Sub" then return U.sub(x, y) end
-        if op == "Mul" then return U.mul(x, y) end
-        if op == "Div" then return U.div(x, y) end
-        if op == "Rem" then return U.mod(x, y) end
-        if op == "Pow" then return U.pow(x, y) end
-        if op == "BitAnd" then return U.band(x, y) end
-        if op == "BitOr" then return U.bor(x, y) end
-        if op == "BitXor" then return U.bxor(x, y) end
-        if op == "Shl" then return U.shl(x, y) end
-        if op == "Shr" then return U.shr(x, y) end
-        error("unknown")
-    end)
-    if not ok then return nil end
-    return result
-end
-
+-- A binary operation. The evaluator is the one authority on per-width arithmetic, so a constant
+-- operation is left to it rather than re-folded here.
 function Builder:bin(op, left, right, ty)
-    local folded = foldBinary(op, ty, left, right)
-    if folded then return self:u32(folded) end
     local constructor = Ir[op]
     if not constructor then D.bug("ir-op", "Unknown binary operation: " .. tostring(op)) end
     return self:intern("bin|" .. op .. "|" .. left.id .. "|" .. right.id .. "|" .. S.encode(ty),

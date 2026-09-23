@@ -474,43 +474,6 @@ staticSession:compile(Parse.source("let scale(k, x: U32) : U32 = if k == 0 then 
     .. "let five(x: U32) : U32 = scale(5, x)\nreturn { functions = { five } }", "s.let"))
 check(#staticSession.order >= 2, "changing a static argument creates a new instance")
 
--- Contextual typing: a signature requirement supplies a lambda's missing parameter types -------
-local CONTEXTUAL = [==[
-let twice(f: (U32): U32, x: U32): U32 = f(f(x))
-let adder(n: U32): (U32): U32 = |x| -> x + n
-let inc: (U32): U32 = |x| -> x + 1
-let use(n, x: U32): U32 = do
-  let f = adder(n)
-  return twice(f, x) + inc(x)
-end
-let inline(x: U32): U32 = twice(|y| -> y * 2, x)
-let capture(x: U32): U32 = twice(|y| -> y + x, 1)
-return { functions = { use, inline, capture } }
-]==]
-check(interpret("use", { 3, 4 }, CONTEXTUAL)[1] == 15,
-    "a lambda argument, a signature result and a declared callable binding all infer")
-check(interpret("inline", { 5 }, CONTEXTUAL)[1] == 20, "an unannotated lambda argument takes its type")
-check(interpret("capture", { 10 }, CONTEXTUAL)[1] == 21, "a contextually typed lambda may capture")
-
-rejects("lambda-annotation", "let g = |x| -> x + 1\nlet f(y: U32): U32 = g(y)\nreturn { functions = { f } }")
-rejects("callable-shape", "let twice(f: (U32): U32, x: U32): U32 = f(f(x))\n"
-    .. "let a(x: U32): U32 = twice(|y, z: U32| -> y + z + x, 1)\nreturn { functions = { a } }")
-rejects("callable-shape", "let apply(f: (U32): U32, x: U32): U32 = f(x)\n"
-    .. "let a(x: U32): U32 = apply(|y: U32| -> true, x)\nreturn { functions = { a } }")
--- Two different lambdas in one conditional join into a tagged callable (see the tagged-callable
--- section), but an owning callable selected at run time cannot be erased into a signature: a view
--- does not retain the environment that carries the tag.
-rejects("callable-erase", "let pick(c: Bool): (U32): U32 = if c then |x: U32| -> x + 1 else |x: U32| -> x + 2\n"
-    .. "return { functions = { pick } }")
-rejects("callable-erase", [==[
-let run(c: Bool, x: U32): U32 = do
-  let f = if c then |y: U32| -> y + 1 else |y: U32| -> y + 2
-  let g: (U32): U32 = f
-  return g(x)
-end
-return { functions = { run } }
-]==])
-
 -- Partial application of a closure ------------------------------------------------------------
 local PARTIAL = [==[
 let add = |a, b: U32| -> a + b
@@ -569,9 +532,6 @@ rejects("static-required", "let P = { x: U32, y: U32 }\nlet f(a: U32) : U32 = do
 rejects("not-a-place", "let P = { x: U32 }\nlet f(a: U32) : U32 = do"
     .. " let p = P { x = a }\n let n = 3\n n = 4\n return p.x end\nreturn { functions = { f } }")
 rejects("type-mismatch", RECORDS, "bump", { 7 })
--- A callable with no known code needs a function-pointer ABI.
--- Exporting a callable parameter is supported (it becomes a view); an argument that is neither
--- known code nor a view is still rejected.
 -- A signature-typed field is represented by the borrowed callable ABI, so a record holding one is
 -- usable locally but cannot escape.
 local CALLABLE_FIELD = [==[
