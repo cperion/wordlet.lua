@@ -791,18 +791,14 @@ function Eval:matchResidual(ctx, base, handlers, span)
             end
         end
     end
-    -- Nest from the last alternative outwards, so each test sits in the path that reaches it.
-    local child = pieces[#pieces].list
-    for index = #pieces - 1, 1, -1 do
-        local piece = pieces[index]
-        -- Both statements are emitted into `parent` explicitly, so the ambient body is untouched.
-        local parent = {}
-        local id = builder:valueId()
-        builder:emit(parent, Ir.VariantMatches(id, variant, base.ty, piece.name))
-        builder:emit(parent, Ir.If(builder:ref(id, S.Bool), S.list(piece.list), S.list(child)))
-        child = parent
+    -- One switch on the tag. The last alternative carries the fallback flag and is emitted as C's
+    -- `default`, so the branch is total and a dense alternative set lowers to a jump table rather
+    -- than a chain of compares.
+    local cases = {}
+    for index, piece in ipairs(pieces) do
+        cases[index] = Ir.Case(piece.name, index == #pieces, S.list(piece.list))
     end
-    for _, stmt in ipairs(child) do ctx.body[#ctx.body + 1] = stmt end
+    builder:emit(ctx.body, Ir.Switch(variant, base.ty, S.list(cases)))
     local out = {}
     for index, ty in ipairs(resultTypes) do
         out[index] = V.ir(builder:ref(builder:read(ctx.body, ty, places[index]), ty), ty)

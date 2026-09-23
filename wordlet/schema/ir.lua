@@ -86,6 +86,10 @@ module Ir {
        | Call(Value* results, string target, Arg* arguments)
        | Indirect(Value* results, Expr callable, Arg* arguments)
        | If(Expr test, Stmt* yes, Stmt* no)
+       # A multi-way branch on a sum's tag. The cases are the alternatives in canonical order; the
+       # last one carries `fallback` and is emitted as C's `default`, so the switch is total and a
+       # dense tag range becomes one jump table instead of a chain of compares.
+       | Switch(Value variant, Ty.V sum, Case* cases)
        | Loop(Stmt* body)
        | Next
        | Trap(Expr failure, string reason)
@@ -93,6 +97,8 @@ module Ir {
        | VariantMatches(Value value, Value variant, Ty.V sum, string tag)
        | VariantPayload(Value value, Value variant, Ty.V sum, string tag)
        | Return(Expr* values)
+
+  Case = (string tag, boolean fallback, Stmt* body)
 
   # Actual ABI inputs, including the hidden owner/capture prefix at input 0..hidden-1.
   Param = ValueParam(number input, Value binding, Ty.V type)

@@ -1691,6 +1691,10 @@ end
 return { types = { Point, Op }, functions = { total, point_at, code_at } }
 ]==]
     local generated = wordlet.compile{ source = source, name = "matchptr.let" }:unit()
+    check(generated:find("switch (", 1, true) ~= nil,
+        "an opaque match lowers to a switch, not a chain of compares")
+    check(generated:find("default: {", 1, true) ~= nil,
+        "the switch is total: the last alternative is the default")
     local pointType = generated:match("(wordletrecord_%d+) %* host_points")
     check(pointType ~= nil, "the pointer target has a named layout")
     local path = directory .. "/matchptr.c"

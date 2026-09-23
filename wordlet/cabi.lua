@@ -35,6 +35,7 @@ local function liveInstances(compilation)
             if stmt.kind == "Call" then mark(stmt.target)
             elseif stmt.kind == "View" then mark(stmt.entry)
             elseif stmt.kind == "If" then walk(stmt.yes) walk(stmt.no)
+            elseif stmt.kind == "Switch" then for _, case in ipairs(stmt.cases) do walk(case.body) end
             elseif stmt.kind == "Loop" then walk(stmt.body)
             end
         end

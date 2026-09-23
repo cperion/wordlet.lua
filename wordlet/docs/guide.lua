@@ -1039,6 +1039,12 @@ Prefer the hot state as the loop's **parameters** rather than a record: a code
 aggregate at all, and the handlers return the transition instead of the machine.
 `examples/interpreter.let` is that form — one back edge, no per-step copy.
 
+An opaque match lowers to a C `switch` on the tag, with the last alternative as
+`default`, so the branch is total. A small opcode set becomes a couple of compares;
+a dozen arms that do distinct work compile to one `jmp *` jump table, which is
+O(1) dispatch rather than a chain of compares. The switch is the reason a Wordlet
+interpreter stays fast as the opcode set grows.
+
 The choice is binding time, not syntax. A handler set known at compile time becomes
 direct, specialised code — a tag test with the arm inlined — while a handler set
 that arrives at run time becomes the callable ABI, an invocation pointer, which is

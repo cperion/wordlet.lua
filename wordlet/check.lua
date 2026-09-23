@@ -15,6 +15,11 @@ local function falls(list)
     if kind == "Return" or kind == "Trap" or kind == "Next" then return false end
     if kind == "Loop" then return false end
     if kind == "If" then return falls(last.yes) or falls(last.no) end
+    if kind == "Switch" then
+        -- A switch falls through only if some case can fall; it selects exactly one case.
+        for _, case in ipairs(last.cases) do if falls(case.body) then return true end end
+        return false
+    end
     return true
 end
 M.falls = falls
@@ -33,6 +38,20 @@ local function initialized(list, input)
             local both = {}
             for key in pairs(yes) do if no[key] then both[key] = true end end
             set = both
+        elseif kind == "Switch" then
+            -- Storage is definitely assigned after a switch only if every case assigns it.
+            local joined = nil
+            for _, case in ipairs(stmt.cases) do
+                local arm = initialized(case.body, set)
+                if joined == nil then
+                    joined = arm
+                else
+                    local both = {}
+                    for key in pairs(joined) do if arm[key] then both[key] = true end end
+                    joined = both
+                end
+            end
+            if joined ~= nil then set = joined end
         elseif kind == "Loop" then
             -- Loop does not fall through, so it contributes nothing to the continuation.
         elseif kind == "Store" then
@@ -92,6 +111,17 @@ function M.function_(fn, definitions, seeded)
                 M.expr(stmt.test, visible, storages)
                 checkList(stmt.yes, set, copy(visible), storages, inLoop)
                 checkList(stmt.no, set, copy(visible), storages, inLoop)
+            elseif kind == "Switch" then
+                if not S.isTaggedType(stmt.sum) then D.bug("ir-type", "Switch needs a sum type") end
+                if visible[stmt.variant.id] ~= stmt.sum then
+                    D.bug("ir-type", "Switch tests a value that is not of that sum type")
+                end
+                for _, case in ipairs(stmt.cases) do
+                    if not S.caseOf(stmt.sum, case.tag) then
+                        D.bug("ir-type", "Switch has no alternative " .. case.tag)
+                    end
+                    checkList(case.body, set, copy(visible), storages, inLoop)
+                end
             elseif kind == "Loop" then
                 -- A loop body may fall through only if it never falls out; the builder always ends
                 -- it with a Return or a Next, so an empty body is the only rejected shape.

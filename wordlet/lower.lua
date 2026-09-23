@@ -430,6 +430,8 @@ function Emitter:statements(list)
                 self.indent = self.indent - 1
             end
             self:line("}")
+        elseif kind == "Switch" then
+            self:switch(stmt)
         elseif kind == "Loop" then
             self:line("for (;;) {")
             self.indent = self.indent + 1
@@ -463,6 +465,26 @@ function Emitter:statements(list)
             D.todo("c-stmt", "No C lowering for statement " .. tostring(kind))
         end
     end
+end
+
+-- A tag switch. The last case carries `fallback` and becomes `default`, so the switch is total and a
+-- dense tag range lowers to one jump table instead of a chain of compares. Each case body is braced
+-- so a declaration right after the label is valid C and a case cannot fall into the next.
+function Emitter:switch(stmt)
+    self:line("switch (" .. self:value(stmt.variant.id) .. ".wordlet_tag) {")
+    for _, case in ipairs(stmt.cases) do
+        if case.fallback then
+            self:line("default: {")
+        else
+            self:line("case " .. S.tagIndex(stmt.sum, case.tag) .. ": {")
+        end
+        self.indent = self.indent + 1
+        self:statements(case.body)
+        self:line("break;")
+        self.indent = self.indent - 1
+        self:line("}")
+    end
+    self:line("}")
 end
 
 -- A variant is a compound literal with the tag and the one payload member set by name.
@@ -945,6 +967,7 @@ local function usedStorages(fn)
             elseif kind == "Loop" then statements(stmt.body)
             elseif kind == "Trap" then expr(stmt.failure)
             elseif kind == "ConstructVariant" then expr(stmt.payload)
+            elseif kind == "Switch" then for _, case in ipairs(stmt.cases) do statements(case.body) end
             elseif kind == "Return" then for _, value in ipairs(stmt.values) do expr(value) end
             end
         end
@@ -999,6 +1022,9 @@ local function usedValues(fn)
             elseif kind == "Loop" then statements(stmt.body)
             elseif kind == "Trap" then expr(stmt.failure)
             elseif kind == "ConstructVariant" then expr(stmt.payload)
+            elseif kind == "Switch" then
+                used[stmt.variant.id] = true
+                for _, case in ipairs(stmt.cases) do statements(case.body) end
             elseif kind == "VariantMatches" or kind == "VariantPayload" then used[stmt.variant.id] = true
             elseif kind == "Return" then for _, value in ipairs(stmt.values) do expr(value) end
             end
@@ -1103,7 +1129,10 @@ local function analyzeSharing(fn)
                 end
             end
             if stmt.kind == "If" then walkList(stmt.yes); walkList(stmt.no)
-            elseif stmt.kind == "Loop" then walkList(stmt.body) end
+            elseif stmt.kind == "Loop" then walkList(stmt.body)
+            elseif stmt.kind == "Switch" then
+                for _, case in ipairs(stmt.cases) do walkList(case.body) end
+            end
             stack[#stack] = nil
         end
     end

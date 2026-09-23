@@ -95,7 +95,7 @@ emits a local adapter that binds its hidden inputs, and the field stores the res
 adapter lives in the assigning activation, the record holding it is non-retaining: it may be used,
 copied and called locally, but returning it or storing it in module state is rejected.
 
-`tests/eval.lua` (591 checks) and `tests/c.lua` (673 checks, 40 programs, compiling and running the
+`tests/eval.lua` (591 checks) and `tests/c.lua` (675 checks, 40 programs, compiling and running the
 generated C11 under strict warnings) cover this. `tests/sha256.lua` runs a real program,
 `examples/sha256.let`, against the published NIST vector and against the interpreter for runtime
 seeds. `tests/jit.lua` exercises the LuaJIT FFI front end, building and loading an artifact with the

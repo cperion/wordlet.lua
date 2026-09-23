@@ -66,6 +66,8 @@ function M.eachStmt(statements, fn)
         elseif kind == "If" then
             M.eachExpr(stmt.test, fn)
             M.eachStmt(stmt.yes, fn); M.eachStmt(stmt.no, fn)
+        elseif kind == "Switch" then
+            for _, case in ipairs(stmt.cases) do M.eachStmt(case.body, fn) end
         elseif kind == "Loop" then
             M.eachStmt(stmt.body, fn)
         elseif kind == "Trap" then
