@@ -289,13 +289,19 @@ function Eval:load(program)
     -- `Array(T, N)` is a type: N elements of T, with the length part of the type so a static index is
     -- checked while compiling and only a run-time index needs a bounds guard.
     declare(top, "Array", { kind = "word", name = "Array",
-        def = self:builtin("Array", { { name = "element" }, { name = "length" } },
+        -- The element is a type, so it is resolved on the type path: that is what lets a definition
+        -- mention itself through an array and be told it is a type cycle rather than an eager demand.
+        def = self:builtin("Array", { { name = "element", isType = true }, { name = "length" } },
             function(engine, ctx, values, span)
                 local element = engine:asType(values[1], span)
                 if not element then
                     D.reject("type-required", "Array needs an element type", span)
                 end
-                S.checkRuntime(element, span)
+                -- A named cell is what an open definition hands back while its own layout is being
+                -- computed. It is a placeholder rather than a value, so it is allowed through here and
+                -- judged by the cycle checker when the definition is sealed; anything else must be a
+                -- type a value can actually have.
+                if not S.hasNamed(element) then S.checkRuntime(element, span) end
                 local length = values[2]
                 if not V.isInteger(length) or length.ty ~= S.U32 then
                     D.reject("type-required", "Array needs a length as a literal U32", span)
@@ -581,8 +587,6 @@ function Eval:checkNoValueCycle(ty, slot, span, seen)
             .. "needs an indirection boundary, as in Ref(" .. slot.name .. ") or Ptr(" .. slot.name
             .. ")", span)
     end
-    -- A reference and a raw pointer are both indirection boundaries; a signature and a view hold no
-    -- storage of their own. Everything else would embed the definition in itself.
     -- A reference, a raw pointer and a slice are all indirection boundaries: the first two are an
     -- address and a slice is an address with a length, so none of them depends on the size of what it
     -- names. A signature and a view hold no storage of their own. Everything else would embed the
@@ -594,6 +598,9 @@ function Eval:checkNoValueCycle(ty, slot, span, seen)
         for _, field in ipairs(ty.fields) do self:checkNoValueCycle(field.type, slot, span, seen) end
     elseif S.isTuple(ty) then
         for _, item in ipairs(ty.fields) do self:checkNoValueCycle(item, slot, span, seen) end
+    elseif S.isArray(ty) then
+        -- An element is embedded by value, so a cycle that crosses an array crosses no boundary at all.
+        self:checkNoValueCycle(ty.element, slot, span, seen)
     elseif S.isTaggedType(ty) then
         for _, field in ipairs(S.alternatives(ty)) do self:checkNoValueCycle(field.type, slot, span, seen) end
     elseif S.isOwned(ty) then
@@ -3601,28 +3608,41 @@ function Eval:evalArguments(ctx, exprs, callee)
     local values = {}
     for index, expr in ipairs(exprs) do
         local param = sc and def.params[index] or nil
-        local expected
-        -- The requirement decides, not how it was spelled: an alias of a signature is a signature, so
-        -- a lambda passed to `f: Endo` gets its parameter type from it just as one passed to a written
-        -- `(U32): U32` does. Only a signature is used this way, since that is what types a lambda.
-        if param and param.annotation then
-            local ty = self:typeOf(param.annotation, sc, param.span)
-            if S.isSig(ty) then expected = ty end
-        end
-        local value = self:evalExpected(ctx, expr, expected)
-        if index < #exprs then
-            local adjusted = self:first(value)
-            values[#values + 1] = adjusted
-            -- A builtin parameter is a plain name table, not a source binder, so there is nothing to
-            -- declare for it.
-            if param and param.name and param.name.text then
-                declare(sc, param.name.text, { kind = "value", name = param.name.text,
-                    value = adjusted }, param.span)
+        if param and param.isType then
+            -- A builtin parameter that names a type is resolved on the type path, which is the path that
+            -- hands back the cell an open definition reserved instead of demanding its layout. Without
+            -- this, `Array(Node, 2)` inside Node's own definition was refused as an eager initializer
+            -- cycle before the cycle checker could say what was actually wrong.
+            local held = V.type(self:typeOf(expr, sc, expr.span))
+            values[#values + 1] = held
+            if param.name and param.name.text then
+                declare(sc, param.name.text, { kind = "value", name = param.name.text, value = held },
+                    param.span)
             end
         else
-            for _, item in ipairs(self:expand(value)) do values[#values + 1] = item end
+            local expected
+            -- The requirement decides, not how it was spelled: an alias of a signature is a signature,
+            -- so a lambda passed to `f: Endo` gets its parameter type from it just as one passed to a
+            -- written `(U32): U32` does. Only a signature is used this way, as that is what types a
+            -- lambda.
+            if param and param.annotation then
+                local ty = self:typeOf(param.annotation, sc, param.span)
+                if S.isSig(ty) then expected = ty end
+            end
+            local value = self:evalExpected(ctx, expr, expected)
+            if index < #exprs then
+                local adjusted = self:first(value)
+                values[#values + 1] = adjusted
+                if param and param.name and param.name.text then
+                    declare(sc, param.name.text, { kind = "value", name = param.name.text,
+                        value = adjusted }, param.span)
+                end
+            else
+                for _, item in ipairs(self:expand(value)) do values[#values + 1] = item end
+            end
         end
     end
+
     return values
 end
 

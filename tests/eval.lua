@@ -1496,6 +1496,21 @@ do
     check(pointed:find("wordletrecord_1", 1, true) ~= nil,
         "a recursive type through a pointer has a finite layout")
     rejects("type-cycle", "let Bad = { child: Bad }\nreturn { functions = { } }")
+    -- An array element is embedded by value, so a cycle that crosses one crosses no boundary at all.
+    -- The element is resolved on the type path, which hands back the cell an open definition reserved
+    -- instead of demanding its layout, so the checker gets to say what is wrong rather than the demand
+    -- reporting an eager initializer cycle.
+    rejects("type-cycle", "let Bad = { items: Array(Bad, 2) }\nreturn { functions = { } }")
+    rejects("type-cycle", "let Bad = Array(Bad, 2)\nreturn { functions = { } }")
+    rejects("type-cycle", "let A = { b: Array(B, 2) }\nlet B = { a: Array(A, 2) }\n"
+        .. "return { functions = { } }")
+    -- A type declared later is not a cycle, and an indirection inside the array is a boundary.
+    check(compile("let Good = { items: Array(Node, 2) }\nlet Node = { value: U32 }\n"
+        .. "return { functions = { } }") ~= nil,
+        "an array of a type declared later is not a cycle")
+    check(compile("let Node = { value: U32, kids: Array(Ref(Node), 2) }\n"
+        .. "return { functions = { } }") ~= nil,
+        "an array of references may mention the type that holds it")
 
     -- A requirement types a lambda however it was spelled, so an alias is as good as a signature.
     local aliased = "let Endo = (U32): U32\n"

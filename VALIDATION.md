@@ -198,7 +198,10 @@ Gates 1–5 and 9–11 have their first executable form in `tests/parse.lua`, `t
    decides module storage from the place as well as from the name route, so `Ref(r[i])` through a local
    reference to module storage is module storage and its store reaches the module array, while the
    interpreter says it needs storage rather than blaming the target's lifetime; and a requirement types
-   a lambda however it is spelled, so an alias of a signature is as good as a written one.
+   a lambda however it is spelled, so an alias of a signature is as good as a written one. The cycle
+   checker also walks an array's element, so a cycle that crosses an array reports `type-cycle` rather
+   than an eager initializer demand and names the boundary that would have made it finite; a type
+   declared later is still not a cycle, and an indirection inside the array is still a boundary.
 9. **IR/checking:** storage/value distinction, scope and definite assignment, target signature checks,
    module storage seeded outside every function,
    dynamic failure guards, transitive borrow provenance, finite layouts, no metadata runtime slots.

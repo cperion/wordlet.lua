@@ -215,6 +215,34 @@ function M.isString(t) return t == M.String end
 function M.named(cell) return Ty.Named(cell) end
 function M.isNamed(t) return type(t) == "table" and t.kind == "Named" end
 
+-- Whether a type still mentions a named cell anywhere inside it. A cell is what an open definition
+-- hands back while its own layout is computed, so a type that mentions one is not finished yet: it
+-- cannot be judged as a value type until the definition is sealed, and the cycle checker is what
+-- judges it then. A record that holds one by value is a by-value cycle in progress.
+function M.hasNamed(t, seen)
+    if M.isNamed(t) then return true end
+    seen = seen or {}
+    if seen[t] then return false end
+    seen[t] = true
+    if M.isRef(t) or M.isPtr(t) then return M.hasNamed(t.target, seen) end
+    if M.isSlice(t) then return M.hasNamed(t.element, seen) end
+    if M.isArray(t) then return M.hasNamed(t.element, seen) end
+    if M.isRecord(t) or M.isTuple(t) then
+        for _, field in ipairs(t.fields) do
+            if M.hasNamed(field.type, seen) then return true end
+        end
+        return false
+    end
+    if M.isTaggedType(t) then
+        for _, field in ipairs(M.alternatives(t)) do
+            if M.hasNamed(field.type, seen) then return true end
+        end
+        return false
+    end
+    if M.isOwned(t) then return M.hasNamed(t.environment, seen) end
+    return false
+end
+
 function M.isOwned(t) return type(t) == "table" and t.kind == "Owned" end
 -- The runtime representation of a type: an Owned callable is represented by its environment.
 function M.environmentOf(t) return M.isOwned(t) and t.environment or t end
