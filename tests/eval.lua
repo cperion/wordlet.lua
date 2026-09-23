@@ -73,6 +73,24 @@ do
     rejects("numeric-range", "let f(): U32 = U32(18446744073709551615.0)\nreturn { functions = { f } }")
 end
 
+-- A bare `return` is one Unit result and `Unit()` is the Unit value (syntax.md §1, §6). A Unit slot
+-- is logical but has no runtime representation, so the IR drops it while a binding list keeps its
+-- position.
+do
+    local source = "let nothing() : Unit = do return end\n"
+        .. "let explicit() : Unit = do return; end\n"
+        .. "let unit_value() : Unit = Unit()\n"
+        .. "let pair(x: U32) : (Unit, U32) = do return Unit(), x end\n"
+        .. "let use(x: U32) : U32 = do let u, y = pair(x) return y end\n"
+        .. "return { functions = { nothing, explicit, unit_value, pair, use } }"
+    check(interpret("nothing", {}, source)[1] == "unit", "a bare return is the Unit value")
+    check(interpret("explicit", {}, source)[1] == "unit", "return; is a bare return")
+    check(interpret("unit_value", {}, source)[1] == "unit", "Unit() is the Unit value")
+    -- The Unit slot is first, so a positional binding is only right if it stayed logical.
+    check(interpret("use", { 7 }, source)[1] == 7, "a Unit slot keeps its position in a result vector")
+    compile(source)
+end
+
 -- Static evaluation ----------------------------------------------------------------------------
 check(interpret("affine", { 3, 7, 4 },
     "let affine(a, b, x: U32) : U32 = a * x + b\nreturn { functions = { affine } }")[1] == 19,
@@ -477,9 +495,9 @@ rejects("callable-required", "let f(x: U32) : U32 = x\nlet g(x: U32) : U32 = f(1
 rejects("type-mismatch", "let f(x: U32) : U32 = x + true\nreturn { functions = { f } }")
 rejects("division-zero", "let f(x: U32) : U32 = x / 0\nreturn { functions = { f } }")
 rejects("recursive-result", "let f(x: U32) = if x == 0 then 0 else f(x - 1)\nreturn { functions = { f } }")
--- A block must end in `return`, so an unterminated block is a parse error rather than a silent
--- fall-through; the evaluator keeps the defensive check anyway.
-rejects("parse", "let f(x: U32) : U32 = do let y = x + 1 end\nreturn { functions = { f } }")
+-- A block need not end in `return` (syntax.md §12); one that can fall through is rejected by the
+-- reachability check, which is a semantic error rather than a parse error.
+rejects("no-return", "let f(x: U32) : U32 = do let y = x + 1 end\nreturn { functions = { f } }")
 rejects("duplicate", "let f(x: U32) : U32 = do let y = x let y = x return y end\nreturn { functions = { f } }")
 rejects("unknown-name", "return { functions = { missing } }")
 rejects("function-required", "let x = 3\nreturn { functions = { x } }")

@@ -1513,6 +1513,9 @@ let present() : Bool = host_region(4) == Null(U8)
 -- type may mention itself through one and still have a finite layout.
 let Point = { x: U32, y: U32 }
 extern let host_point() : Ptr(Point)
+-- `Null(T)` names any element type, including a user record: the pointer is the runtime value, so
+-- what must have a representation is `Ptr(T)`, not `T` itself.
+let nothing() : Ptr(Point) = Null(Point)
 let total() : U32 = host_point().x + host_point().y
 let raised() : U32 = do
   host_point().x += 10
@@ -1534,7 +1537,7 @@ let set(i: U32, v: U32) : U32 = do
   Ptr(pool[i])[0] = v
   return Ptr(pool[i])[0]
 end
-return { functions = { sum, missing, present, at, set, total, raised, chain } }
+return { functions = { sum, missing, present, at, set, total, raised, chain, nothing } }
 ]==]
     local generated = wordlet.compile{ source = source, name = "ptr.let" }:unit()
     check(generated:find("uint8_t * host_region(uint32_t", 1, true) ~= nil,
@@ -1593,6 +1596,7 @@ int main(void) {
       %s *next = (%s *)((unsigned char *)slot + 32);
       n->f_value = 5; n->f_next = next; next->f_value = 6; }
     assert(wordlet_chain() == UINT32_C(11));
+    assert(wordlet_nothing() == NULL);
     return 0;
 }
 ]]):format(pointType, pointType, nodeType, nodeType, pointType, pointType,
@@ -1602,6 +1606,47 @@ int main(void) {
         "pointer C failed to compile:\n" .. read(directory .. "/ptrerr.txt"))
     check(shell("timeout --kill-after=2s 10s '" .. directory .. "/ptr'") == 0,
         "a pointer or a scoped region did not run correctly")
+end
+
+-- A bare `return` and `Unit()` are one Unit result, which the ABI erases to `void`. The slot stays
+-- logical, so a Unit in a multiple-result vector keeps its position while the C result drops it.
+do
+    local source = [==[
+extern let sink(x: U32) : Unit
+let announce(x: U32) : Unit = do sink(x) return end
+let explicit(x: U32) : Unit = do sink(x) return; end
+let value(x: U32) : Unit = do sink(x) return Unit() end
+let pair(x: U32) : (Unit, U32) = do return Unit(), x end
+let use(x: U32) : U32 = do let u, y = pair(x) return y end
+return { functions = { announce, explicit, value, pair, use } }
+]==]
+    local generated = wordlet.compile{ source = source, name = "unit.let" }:unit()
+    check(generated:find("void wordlet_announce", 1, true) ~= nil, "a bare Unit return erases to void")
+    check(generated:find("void wordlet_explicit", 1, true) ~= nil, "return; erases to void")
+    check(generated:find("void wordlet_value", 1, true) ~= nil, "Unit() erases to void")
+    check(generated:find("uint32_t wordlet_pair", 1, true) ~= nil,
+        "a Unit slot erases from a multiple-result vector")
+    local path = directory .. "/unit.c"
+    write(path, generated .. [[
+
+#include <assert.h>
+static uint32_t calls;
+void sink(uint32_t x) { calls += x; }
+int main(void) {
+    wordlet_announce(UINT32_C(1));
+    wordlet_explicit(UINT32_C(2));
+    wordlet_value(UINT32_C(4));
+    assert(calls == UINT32_C(7));
+    assert(wordlet_use(UINT32_C(9)) == UINT32_C(9));
+    assert(wordlet_pair(UINT32_C(5)) == UINT32_C(5));
+    return 0;
+}
+]])
+    check(shell("timeout --kill-after=2s 30s " .. CC .. " -std=c11 -Wall -Wextra -Werror -O2 -o '"
+        .. directory .. "/unit' '" .. path .. "' 2> " .. directory .. "/uniterr.txt") == 0,
+        "Unit C failed to compile:\n" .. read(directory .. "/uniterr.txt"))
+    check(shell("timeout --kill-after=2s 10s '" .. directory .. "/unit'") == 0,
+        "a Unit result did not erase and run correctly")
 end
 
 -- A pointer is not a reference, in either direction: it cannot satisfy a `Ref` requirement, and

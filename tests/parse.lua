@@ -57,6 +57,19 @@ local ret = multi.declarations[1].def.body.statements[1]
 check(ret.kind == "ReturnStmt" and #ret.values == 2, "two returned values")
 check(#parses("let a, b = f(1)\nreturn { functions = {} }").declarations[1].def.binders == 2, "result-list binding")
 
+-- `return` is a statement, not a required trailing token (syntax.md §12). A bare return is one Unit
+-- result (syntax.md §6), and `;` spells it explicitly (syntax.md §1).
+local bare = parses("let f(x: U32) : Unit = do return end\nreturn { functions = { f } }")
+local bareReturn = bare.declarations[1].def.body.statements[1]
+check(bareReturn.kind == "ReturnStmt" and #bareReturn.values == 1
+    and bareReturn.values[1].kind == "UnitLiteral", "a bare return is one Unit value")
+check(#parses("let f(x: U32) : Unit = do return; end\nreturn { functions = { f } }")
+    .declarations[1].def.body.statements == 1, "return; is a bare return")
+check(parses("let f(x: U32) : U32 = do if x == 0 then return 1 else return 2 end end\n"
+    .. "return { functions = { f } }").declarations[1].def.body.statements[1].kind == "IfStmt",
+    "a block may end in a statement conditional")
+rejects("unreachable", "let f(x: U32) : U32 = do return 1\n return 2 end\nreturn { functions = { f } }")
+
 -- lambdas and signatures ------------------------------------------------------
 check(parses("let g = |x| -> x + 1\nreturn { functions = {} }").declarations[1].def.values[1].kind == "Lambda",
     "untyped lambda")

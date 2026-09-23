@@ -274,12 +274,14 @@ function Eval:load(program)
             local ty = engine:asType(values[1], span)
             if not ty then D.reject("type-required", "Null needs an element type, as in Null(U8)", span) end
             local target = engine:canonicalize(ty)
-            S.checkRuntime(target, span)
+            -- `Ptr(T)` is the runtime value, so the pointer is what must be representable, not `T`:
+            -- a named record is a fine target even though it is not itself a runtime value.
+            local pointer = S.ptr(target)
+            S.checkRuntime(pointer, span)
             if ctx.mode ~= "residual" then
                 D.reject("runtime-in-normalization",
                     "A null pointer exists only in compiled code", span)
             end
-            local pointer = S.ptr(target)
             return V.ir(ctx.builder:nullPtr(pointer), pointer)
         end) })
     declare(top, "Ref", { kind = "word", name = "Ref", def = refBuiltin })
@@ -1951,6 +1953,7 @@ function Eval:evalExpr(ctx, expr)
         literal.literal = true
         return literal
     elseif kind == "BoolLiteral" then return V.bool(expr.value)
+    elseif kind == "UnitLiteral" then return V.unit()
     elseif kind == "Reference" then return self:evalReference(ctx, expr)
     elseif kind == "UnaryExpr" then return self:evalUnary(ctx, expr)
     elseif kind == "BinaryExpr" then return self:evalBinary(ctx, expr)
@@ -3149,17 +3152,17 @@ function Eval:emitCallableCall(ctx, instance, envArgs, args, span)
         operands[#operands + 1] = Ir.ValueArg(self:expression(ctx, args[position],
             instance.inputTypes[#envArgs + index]))
     end
+    local runtime = instance.runtimeResults or self:runtimeResults(instance.results)
     local results = {}
-    for _ = 1, #instance.results do results[#results + 1] = builder:valueId() end
+    for _ = 1, #runtime do results[#results + 1] = builder:valueId() end
     builder:emit(ctx.body, Ir.Call(S.list(results), instance.target, S.list(operands)))
-    if #instance.results == 0 then return V.unit() end
-    if #instance.results == 1 then
-        return V.ir(builder:ref(results[1], instance.results[1]), instance.results[1])
+    local ir = {}
+    for index, ty in ipairs(runtime) do
+        ir[index] = V.ir(builder:ref(results[index], ty), ty)
     end
-    local out = {}
-    for index, ty in ipairs(instance.results) do
-        out[index] = V.ir(builder:ref(results[index], ty), ty)
-    end
+    local out = self:logicalResults(instance.results, ir)
+    if #out == 0 then return V.unit() end
+    if #out == 1 then return out[1] end
     return V.results(out)
 end
 
@@ -3305,7 +3308,8 @@ function Eval:buildCallableInstance(key, callable, args, span)
     end
     local statements = setup
     for _, stmt in ipairs(body) do statements[#statements + 1] = stmt end
-    instance.fn = Ir.Fn(instance.target, Ir.Body, 0, S.list(inputs), S.list(instance.results),
+    instance.runtimeResults = self:runtimeResults(instance.results)
+    instance.fn = Ir.Fn(instance.target, Ir.Body, 0, S.list(inputs), S.list(instance.runtimeResults),
         S.list(params), S.list(statements))
     self:leaveBuild()
     instance.status = "done"
@@ -3441,7 +3445,29 @@ end
 function Eval:materializeAll(ctx, values, wants)
     local out = {}
     for index, value in ipairs(values) do
-        out[index] = self:expression(ctx, value, wants and wants[index] or nil)
+        -- A Unit slot is logical but has no runtime representation, exactly as a Unit parameter has
+        -- none, so it is dropped here and the IR result list is the erased one.
+        if value.ty ~= S.Unit then
+            out[#out + 1] = self:expression(ctx, value, wants and wants[index] or nil)
+        end
+    end
+    return out
+end
+
+-- A Unit slot erases from a result vector the way it erases from a parameter list (syntax.md §6).
+-- The function's IR results are the non-Unit ones; a call site reinserts the Unit values so a
+-- binding list keeps its positions, while a return simply drops them.
+function Eval:runtimeResults(results)
+    local out = {}
+    for _, ty in ipairs(results or {}) do if ty ~= S.Unit then out[#out + 1] = ty end end
+    return out
+end
+
+function Eval:logicalResults(results, runtime)
+    local out, index = {}, 1
+    for _, ty in ipairs(results or {}) do
+        if ty == S.Unit then out[#out + 1] = V.unit()
+        else out[#out + 1] = runtime[index]; index = index + 1 end
     end
     return out
 end
@@ -3786,7 +3812,12 @@ function Eval:evalApply(ctx, expr)
         return self:applyTagged(ctx, callee, args, expr.span)
     end
     if tag == "type" then
-        -- Applying an integer type converts; applying any other type is not a call.
+        -- `Unit()` is the Unit value (syntax.md §1). An integer or float type converts; any other
+        -- type is not a call.
+        if callee.value == S.Unit then
+            if #args ~= 0 then D.reject("arity", "Unit() takes no value", expr.span) end
+            return V.unit()
+        end
         if S.isInteger(callee.value) or S.isF64(callee.value) then
             return self:applyConversion(ctx, callee.value, args, expr.span)
         end
@@ -4089,17 +4120,17 @@ function Eval:emitCall(ctx, instance, values, span, receiver)
                 instance.inputTypes[index]))
         end
     end
+    local runtime = instance.runtimeResults or self:runtimeResults(instance.results)
     local results = {}
-    for _ = 1, #instance.results do results[#results + 1] = builder:valueId() end
+    for _ = 1, #runtime do results[#results + 1] = builder:valueId() end
     builder:emit(ctx.body, Ir.Call(S.list(results), instance.target, S.list(args)))
-    if #instance.results == 0 then return V.unit() end
-    if #instance.results == 1 then
-        return V.ir(builder:ref(results[1], instance.results[1]), instance.results[1])
+    local ir = {}
+    for index, ty in ipairs(runtime) do
+        ir[index] = V.ir(builder:ref(results[index], ty), ty)
     end
-    local out = {}
-    for index, ty in ipairs(instance.results) do
-        out[index] = V.ir(builder:ref(results[index], ty), ty)
-    end
+    local out = self:logicalResults(instance.results, ir)
+    if #out == 0 then return V.unit() end
+    if #out == 1 then return out[1] end
     return V.results(out)
 end
 
@@ -4327,6 +4358,7 @@ function Eval:buildInstance(key, def, values, span, receiver)
                 "A result that is pure code with no environment has no runtime representation", span)
         end
     end
+    instance.runtimeResults = self:runtimeResults(instance.results)
     -- Loop-carried parameter storage lives outside the loop so it survives each iteration.
     local statements = setup
     local header = instance.loopHeader or {}
@@ -4341,7 +4373,7 @@ function Eval:buildInstance(key, def, values, span, receiver)
         for _, stmt in ipairs(body) do statements[#statements + 1] = stmt end
     end
     instance.fn = Ir.Fn(instance.target, Ir.Body, receiver and 1 or 0, S.list(inputs),
-        S.list(instance.results), S.list(params), S.list(statements))
+        S.list(instance.runtimeResults), S.list(params), S.list(statements))
     instance.paramTypes = paramTypes
     self:leaveBuild()
     instance.status = "done"

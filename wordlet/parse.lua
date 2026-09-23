@@ -468,20 +468,42 @@ end
 
 function Parser:body()
     if not self:at("do") then return A.c.Expression(self:expression()) end
+    local open = self:peek()
     self:next()
-    local statements = {}
-    while not self:at("end") and not self:at("return") do
-        statements[#statements + 1] = self:statement()
-    end
-    statements[#statements + 1] = self:returnStatement()
+    local statements = self:statementList("end")
     local close = self:expect("end")
     local list = asList(statements)
-    list.span = mergeSpan(statements[1].span, close.span)
+    list.span = #statements > 0 and mergeSpan(statements[1].span, close.span)
+        or mergeSpan(open.span, close.span)
     return A.c.Block(list)
+end
+
+-- A statement list ends at any of `closers`. `return` terminates the list, so a statement after it
+-- could never run and is rejected here rather than silently dropped (syntax.md §5). Because the list
+-- is not required to end in `return`, a block may close with a statement conditional whose arms all
+-- return; the reachability check in the evaluator is what requires every path to return.
+function Parser:statementList(...)
+    local closers = { ... }
+    local function closed()
+        for _, text in ipairs(closers) do if self:at(text) then return true end end
+        return false
+    end
+    local statements = {}
+    while not closed() do
+        local statement = self:statement()
+        statements[#statements + 1] = statement
+        if statement.kind == "ReturnStmt" and not closed() then
+            D.reject("unreachable", "A statement after `return` can never run", self:peek().span)
+        end
+    end
+    return statements
 end
 
 function Parser:statement()
     local token = self:peek()
+    if token.kind == "keyword" and token.text == "return" then
+        return self:returnStatement()
+    end
     if token.kind == "keyword" and token.text == "defer" then
         -- A deferred action is a call statement, so it needs the saturation a call statement has.
         self:next()
@@ -517,11 +539,7 @@ function Parser:assignmentOperator()
 end
 
 function Parser:statementArm()
-    local statements = {}
-    while not self:at("else") and not self:at("end") and not self:at("return") do
-        statements[#statements + 1] = self:statement()
-    end
-    if self:at("return") then statements[#statements + 1] = self:returnStatement() end
+    local statements = self:statementList("else", "end")
     local list = asList(statements)
     if #statements > 0 then list.span = listSpan(statements) end
     return list
@@ -538,9 +556,15 @@ function Parser:ifStatement()
     return A.c.IfStmt(test, yes, no, mergeSpan(open.span, close.span))
 end
 
+-- A bare `return` denotes one Unit result, not zero results (syntax.md §6). A `;` spells the same
+-- thing explicitly, which is how a Unit return before an expression statement is written
+-- (syntax.md §1); that following statement is unreachable and is rejected by the statement list.
 function Parser:returnStatement()
     local open = self:expect("return")
-    if self:at("end") or self:at("else") then return A.c.ReturnStmt(A.List({}), S(open.span)) end
+    local explicit = self:take(";")
+    if explicit or self:at("end") or self:at("else") then
+        return A.c.ReturnStmt(A.List({ A.c.UnitLiteral(S(open.span)) }), S(open.span))
+    end
     local values = self:expressionList()
     return A.c.ReturnStmt(values, mergeSpan(open.span, spanOf(values) or open.span))
 end
