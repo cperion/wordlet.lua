@@ -302,7 +302,7 @@ check(#retSession.order == 4, "a returned closure has one body and one caller sp
 local sawOwnedInput = false
 for _, instance in ipairs(retSession.order) do
     for _, input in ipairs(instance.fn.inputs) do
-        if S.isOwned(input.type) then sawOwnedInput = true end
+        if input.type:isOwned() then sawOwnedInput = true end
     end
 end
 check(sawOwnedInput, "the callable travels as a by-value environment input")
@@ -408,7 +408,7 @@ externalSession:compile(Parse.source(EXTERNAL, "external.let"))
 local viewInputs, indirectInstances = 0, 0
 for _, instance in ipairs(externalSession.order) do
     for _, input in ipairs(instance.fn.inputs) do
-        if S.isView(input.type) then viewInputs = viewInputs + 1 end
+        if input.type:isView() then viewInputs = viewInputs + 1 end
     end
     if A.dump(instance.fn):find("Indirect", 1, true) then indirectInstances = indirectInstances + 1 end
 end
@@ -1632,6 +1632,55 @@ do
     local reached = compile(throughRef):unit()
     check(reached:find("wordletmodule_1.f_data", 1, true) ~= nil,
         "a store through a local reference reaches module storage")
+end
+
+-- The intrinsic predicates and the folds that carry a visited set (structure.md §2.4). A predicate
+-- reads only the node, so it is a method on the interned type; a fold's `seen` set is contextual
+-- state, so it stays a free function. The `false` a signature requirement leaves in a result slot
+-- is not a type at all, and every fold answers about it rather than raising.
+do
+    check(S.U32:isInteger() and not S.U32:isWide() and not S.U32:isSigned(),
+        "U32 is an integer of one word, unsigned")
+    check(S.I64:isInteger() and S.I64:isWide() and S.I64:isSigned(),
+        "I64 is a signed integer of two words")
+    check(S.F64:isF64() and not S.F64:isInteger(), "a double is a float, never an integer width")
+    check(S.Bool:isBool() and S.Unit:isUnit() and not S.Bool:isUnit(),
+        "the scalar variants are one value each")
+
+    local record = S.record({ a = S.U32 })
+    check(record:isRecord() and not record:isArray() and not record:isIndirection(),
+        "a record is a record")
+    check(S.sig({}, {}):isSig() and not S.sig({}, {}):isRecord(), "a signature is its own kind")
+    check(S.sum({ none = S.Unit }):isSum() and S.sum({ none = S.Unit }):isTaggedType(),
+        "a sum is a sum, and a tagged type")
+    check(not S.sum({ none = S.Unit }):isTagged() and S.tagged(S.sig({}, {}), {}):isTagged(),
+        "a tagged callable carries a tag but is not a sum")
+    check(S.ref(S.U32):isIndirection() and S.ptr(S.U32):isIndirection() and S.String:isIndirection(),
+        "a reference, a pointer and a slice have a representation that stops")
+    check(not S.array(S.U32, 2):isIndirection(), "an array is embedded, so it is not an indirection")
+    check(S.String:isString() and not S.slice(S.U32):isString(), "String is the byte slice")
+
+    -- A cell behind an indirection leaves a definition open, but it is not embedded by value: the
+    -- layout holds an address, so the cycle through it is finite.
+    local open = S.record({ next = S.ref(S.named("node")) })
+    check(S.hasNamed(open) and not S.embedsCell(open), "a cell behind a reference is not embedded")
+    check(S.embedsCell(S.record({ child = S.named("node") })),
+        "a cell in a field is embedded by value")
+    check(S.embedsCell(S.named("node")), "a bare cell is the cell itself")
+    check(not S.embedsCell(record), "a finished record embeds no cell")
+
+    -- A nominal alias chain that returns to its own cell has no layout to anchor it.
+    local cells = { a = S.ref(S.named("b")), b = S.ref(S.named("a")) }
+    check(S.reachesCell(S.named("a"), "a", cells),
+        "a reference chain back to its own cell is an infinite alias")
+    check(not S.reachesCell(S.record({ next = S.ref(S.named("a")) }), "a", cells),
+        "a record anchors the chain, so the same cell is finite there")
+
+    check(S.runtime(false) == false and S.representable(false) == false
+        and S.hasNamed(false) == false and S.embedsCell(false) == false
+        and S.reachesCell(false, "a", {}) == false and S.field(false, "a") == nil
+        and S.alternatives(false) == nil,
+        "an unfixed signature result slot is not a type, and no fold raises on it")
 end
 
 -- Exhausting a budget is a diagnostic, not a crash. A recursive word whose static arguments change

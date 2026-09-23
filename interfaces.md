@@ -39,6 +39,7 @@ Lua-level signatures. `Diag` values are raised with `error`, not returned.
 | `wordlet/lex.lua` | `tokens(source, name) -> Token[]` | free-form lexer; every token has a span |
 | `wordlet/parse.lua` | `program(Token[]) -> Ast.Program` | builds `ast.asdl` nodes; exports are a separate grammar |
 | `wordlet/resolve.lua` | `module(Ast.Program) -> Resolution` | scopes, bindings, captures, tail positions |
+| `wordlet/schema.lua` | `Ty`/`Ir` contexts and `Ty` constructors, the intrinsic `Ty:` predicates, `runtime`/`representable`/`hasNamed`/`embedsCell`/`reachesCell` | interned descriptions; a fold owns its visited set |
 | `wordlet/session.lua` | `new(options) -> Session` | one compilation's descriptions, occurrences and budgets |
 | `wordlet/eval.lua` | `compile(program, loadedTop) -> Compilation` | a session method: keys, instances, IR, type application |
 | `wordlet/check.lua` | `program(fnList, modules, foreigns)` | raises `bug` diagnostics only |

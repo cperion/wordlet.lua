@@ -222,7 +222,7 @@ function M.close(compilation)
     layouts.arrayLayout = arrayLayout
     layouts.sumLayout = sumLayout
     layouts.taggedLayout = taggedLayout
-    function layouts.tagLayout(ty) return S.isTagged(ty) and taggedLayout(ty) or sumLayout(ty) end
+    function layouts.tagLayout(ty) return ty:isTagged() and taggedLayout(ty) or sumLayout(ty) end
 
     function layouts:resolveNamed(ty)
         local cell = layouts.typeCells[ty.cell]
@@ -233,12 +233,12 @@ function M.close(compilation)
     end
 
     function layouts:cType(ty)
-        if S.isNamed(ty) then return layouts:cType(layouts:resolveNamed(ty)) end
-        if S.isPtr(ty) then
+        if ty:isNamed() then return layouts:cType(layouts:resolveNamed(ty)) end
+        if ty:isPtr() then
             -- Same C type as a reference, and deliberately a different language type.
             return layouts:cType(ty.target) .. " *"
         end
-        if S.isRef(ty) then
+        if ty:isRef() then
             -- A pointer to a target, so the target needs a declaration but not a definition here.
             return layouts:cType(ty.target) .. " *"
         end
@@ -270,14 +270,14 @@ function M.close(compilation)
             return "bool"
         end
         if ty == S.Unit then return "void" end
-        if S.isView(ty) then return viewLayout(ty).name end
-        if S.isOwned(ty) and S.environmentOf(ty) ~= S.Unit then return layouts:cType(ty.environment) end
-        if S.isOwned(ty) then return viewLayout(ty).name end
-        if S.isRecord(ty) then return recordLayout(ty).name end
-        if S.isArray(ty) then return arrayLayout(ty).name end
-        if S.isSlice(ty) then return sliceLayout(ty).name end
-        if S.isSum(ty) then return sumLayout(ty).name end
-        if S.isTagged(ty) then return taggedLayout(ty).name end
+        if ty:isView() then return viewLayout(ty).name end
+        if ty:isOwned() and S.environmentOf(ty) ~= S.Unit then return layouts:cType(ty.environment) end
+        if ty:isOwned() then return viewLayout(ty).name end
+        if ty:isRecord() then return recordLayout(ty).name end
+        if ty:isArray() then return arrayLayout(ty).name end
+        if ty:isSlice() then return sliceLayout(ty).name end
+        if ty:isSum() then return sumLayout(ty).name end
+        if ty:isTagged() then return taggedLayout(ty).name end
         D.todo("c-type", "No C representation for " .. S.encode(ty))
     end
 
@@ -346,7 +346,7 @@ function M.close(compilation)
     layouts.typeExports = {}
     for _, entry in ipairs(compilation.types or {}) do
         -- A sum is nameable too; only the numbered layout name differs.
-        local layout = S.isSum(entry.type) and sumLayout(entry.type) or recordLayout(entry.type)
+        local layout = entry.type:isSum() and sumLayout(entry.type) or recordLayout(entry.type)
         layouts.typeExports[#layouts.typeExports + 1] = {
             name = "wordtype_" .. M.escape(entry.name), layout = layout, entry = entry,
         }

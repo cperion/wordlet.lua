@@ -210,7 +210,7 @@ local function describe(session, value, seen, depth)
     -- type, so the value is handed back as one rather than as a rounded string.
     if tag == "float" then return value.n end
     if tag == "int" and value.high ~= nil then
-        return require("wordletkit.u64").tostring(value.high, value.low, S.isSigned(value.ty))
+        return require("wordletkit.u64").tostring(value.high, value.low, value.ty:isSigned())
     end
     if tag == "int" then return value.n end
     if tag == "bool" then return value.b end

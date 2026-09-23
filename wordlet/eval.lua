@@ -31,7 +31,7 @@ end
 function wordsFit(ty, high, low)
     local minHigh, minLow = S.minWordsOf(ty)
     local maxHigh, maxLow = S.maxWordsOf(ty)
-    local compare = S.isSigned(ty) and U64Kernel.sle or U64Kernel.le
+    local compare = ty:isSigned() and U64Kernel.sle or U64Kernel.le
     return compare(minHigh, minLow, high, low) and compare(high, low, maxHigh, maxLow)
 end
 
@@ -46,9 +46,9 @@ function become(value, ty, high, low)
         value.ty = ty
         return value
     end
-    if S.isWide(ty) then
+    if ty:isWide() then
         value.ty, value.n, value.high, value.low = ty, nil, high, low
-    elseif S.isSigned(ty) and low >= 2147483648 then
+    elseif ty:isSigned() and low >= 2147483648 then
         value.ty, value.n, value.high, value.low = ty, low - 4294967296, nil, nil
     else
         value.ty, value.n, value.high, value.low = ty, low, nil, nil
@@ -63,7 +63,7 @@ function fitsAlways(from, to)
     local maxFromHigh, maxFromLow = S.maxWordsOf(from)
     local minToHigh, minToLow = S.minWordsOf(to)
     local maxToHigh, maxToLow = S.maxWordsOf(to)
-    local compare = (S.isSigned(from) or S.isSigned(to)) and U64Kernel.sle or U64Kernel.le
+    local compare = (from:isSigned() or to:isSigned()) and U64Kernel.sle or U64Kernel.le
     return compare(minToHigh, minToLow, minFromHigh, minFromLow)
         and compare(maxFromHigh, maxFromLow, maxToHigh, maxToLow)
 end
@@ -79,8 +79,8 @@ end
 -- bound is exact and the 64-bit bounds are powers of two, so comparing against them decides the range
 -- exactly rather than approximately.
 local function floatBounds(ty)
-    if S.isWide(ty) then
-        if S.isSigned(ty) then return 9223372036854775808.0, -9223372036854775808.0 end
+    if ty:isWide() then
+        if ty:isSigned() then return 9223372036854775808.0, -9223372036854775808.0 end
         return 18446744073709551616.0, 0.0
     end
     return S.maxOf(ty) + 1, S.minOf(ty)
@@ -88,7 +88,7 @@ end
 
 -- A readable form of an integer value's words, for a diagnostic.
 function describeWords(ty, high, low)
-    if S.isWide(ty) then return U64Kernel.tostring(high, low, S.isSigned(ty)) end
+    if ty:isWide() then return U64Kernel.tostring(high, low, ty:isSigned()) end
     return tostring(high * 4294967296 + low)
 end
 
@@ -345,7 +345,7 @@ function Eval:compile(program, loadedTop)
         local value = resolve(item)
         local ty = self:asType(value, item.name.span)
         -- Records and sums are both named structures with a C layout a host may need to build.
-        if not ty or not (S.isRecord(ty) or S.isSum(ty)) then
+        if not ty or not (ty:isRecord() or ty:isSum()) then
             D.reject("type-required", "Exported type " .. item.name.text
                 .. " is not a record or a sum type", item.name.span)
         end
@@ -381,7 +381,7 @@ function Eval:moduleInitialiser(modules, span)
     ctx.builder, ctx.body, ctx.fn = builder, body, fn
     for _, module in ipairs(modules) do
         local fields = {}
-        if S.isArray(module.type) then
+        if module.type:isArray() then
             for index, item in ipairs(module.initial.items or {}) do
                 fields[index] = self:expression(ctx, item, module.type.element)
             end
@@ -421,7 +421,7 @@ function Eval:moduleObject(slot, span)
     -- function-local storage ids the builder hands out.
     self.nextModule = self.nextModule + 1
     local storage = Ir.Storage(MODULE_STORAGE_BASE + self.nextModule)
-    if S.isArray(value.ty) then
+    if value.ty:isArray() then
         local array = V.array(value.ty, nil, Ir.Local(storage))
         array.module = true
         array.backing = value
@@ -550,28 +550,11 @@ function Eval:sealCell(slot, span)
         self.types.byMeaning[S.encode(ty)] = S.named(slot.cell)
     end
     if ty and self.types.referenced[slot.cell] then
-        -- A recursive alias must be nominal. A reference, pointer or slice chain that unfolds to
-        -- the cell itself is an infinite type with no record or sum to name, and it has no finite
-        -- layout: follow the chain before the ordinary value-cycle walk, which treats every
-        -- indirection as a boundary.
-        local function reachesCell(current, seen)
-            if S.isNamed(current) then
-                if current.cell == slot.cell then return true end
-                local resolved = self.types.cells[current.cell]
-                if resolved and not (seen and seen[current.cell]) then
-                    seen = seen or {}
-                    seen[current.cell] = true
-                    return reachesCell(resolved, seen)
-                end
-                return false
-            end
-            if S.isRef(current) or S.isPtr(current) then return reachesCell(current.target, seen) end
-            -- A slice is a nominal layout that names its element through a pointer and registers
-            -- itself before doing so, so a slice self-reference is finite; a bare reference or
-            -- pointer chain has no record or sum to anchor and no finite C alias.
-            return false
-        end
-        if reachesCell(ty) then
+        -- A recursive alias must be nominal. The chain is `schema.reachesCell`: a name, or a
+        -- reference or pointer to one, is a nominal chain with no layout to anchor it, so following
+        -- it back to the cell itself is an infinite type. A slice registers itself before naming its
+        -- element, so a slice self-reference is finite and the fold stops there.
+        if S.reachesCell(ty, slot.cell, self.types.cells) then
             D.reject("type-cycle", "Type " .. slot.name .. " refers to itself with no record or sum "
                 .. "to give it a finite layout; a recursive type needs a record or sum boundary", span)
         end
@@ -581,31 +564,13 @@ function Eval:sealCell(slot, span)
 end
 
 -- A cell may only appear behind a reference. Every other occurrence would embed the definition in
--- itself, which no finite layout can represent.
-function Eval:checkNoValueCycle(ty, slot, span, seen)
-    seen = seen or {}
-    if S.isNamed(ty) then
-        D.reject("type-cycle", "Type " .. slot.name .. " contains itself by value; a recursive type "
-            .. "needs an indirection boundary, as in Ref(" .. slot.name .. ") or Ptr(" .. slot.name
-            .. ")", span)
-    end
-    -- A reference, a raw pointer and a slice are all indirection boundaries: the first two are an
-    -- address and a slice is an address with a length, so none of them depends on the size of what it
-    -- names. A signature and a view hold no storage of their own. Everything else would embed the
-    -- definition in itself.
-    if S.isRef(ty) or S.isPtr(ty) or S.isSlice(ty) or S.isSig(ty) or S.isView(ty) then return end
-    if seen[ty] then return end
-    seen[ty] = true
-    if S.isRecord(ty) then
-        for _, field in ipairs(ty.fields) do self:checkNoValueCycle(field.type, slot, span, seen) end
-    elseif S.isArray(ty) then
-        -- An element is embedded by value, so a cycle that crosses an array crosses no boundary at all.
-        self:checkNoValueCycle(ty.element, slot, span, seen)
-    elseif S.isTaggedType(ty) then
-        for _, field in ipairs(S.alternatives(ty)) do self:checkNoValueCycle(field.type, slot, span, seen) end
-    elseif S.isOwned(ty) then
-        self:checkNoValueCycle(S.environmentOf(ty), slot, span, seen)
-    end
+-- itself, which no finite layout can represent, and the walk that decides it is `embedsCell`:
+-- by-value children only, stopping at every indirection.
+function Eval:checkNoValueCycle(ty, slot, span)
+    if not S.embedsCell(ty) then return end
+    D.reject("type-cycle", "Type " .. slot.name .. " contains itself by value; a recursive type "
+        .. "needs an indirection boundary, as in Ref(" .. slot.name .. ") or Ptr(" .. slot.name
+        .. ")", span)
 end
 
 -- Result adjustment ---------------------------------------------------------------------------
@@ -842,7 +807,7 @@ end
 -- A named cell resolves to the definition it reserved. Every other type is already its own meaning,
 -- so this is the one place recursion has to be unwound for inspection.
 function Eval:resolveType(ty, span)
-    if S.isNamed(ty) then
+    if ty:isNamed() then
         local cell = self.types.cells[ty.cell]
         if not cell then
             D.bug("type-cell", "A named type cell has no definition: " .. tostring(ty.cell))
@@ -858,12 +823,12 @@ end
 function Eval:canonicalize(ty)
     local named = self.types.byMeaning and self.types.byMeaning[S.encode(ty)]
     if named then return named end
-    if S.isPtr(ty) then
+    if ty:isPtr() then
         local target = self:canonicalize(ty.target)
         if target ~= ty.target then return S.ptr(target) end
         return ty
     end
-    if S.isRef(ty) then
+    if ty:isRef() then
         local target = self:canonicalize(ty.target)
         if target ~= ty.target then return S.ref(target) end
     end
@@ -874,7 +839,7 @@ end
 -- and a raw pointer name their target the same way, so one unwinding serves both.
 function Eval:pointeeType(ty)
     local target = S.environmentOf(ty.target)
-    if S.isNamed(target) then target = self:resolveType(target) end
+    if target:isNamed() then target = self:resolveType(target) end
     return target
 end
 
@@ -901,7 +866,7 @@ function Eval:placeObject(value)
     if V.tag(value) ~= "ref" then return nil end
     local target = S.environmentOf(self:resolveType(value.ty.target))
     local schema = value.schema
-    if not schema and S.isRecord(target) then
+    if not schema and target:isRecord() then
         schema = { fields = S.fieldsOf(target), fieldNames = S.fieldNames(target),
             statics = {}, readonly = {}, methods = {}, type = target }
     end
@@ -1125,7 +1090,9 @@ end
 function Eval:evalArray(ctx, expr, expected)
     local items = {}
     for index, item in ipairs(expr.items) do items[index] = self:evalExpr(ctx, item) end
-    local ty = S.isArray(expected) and expected or nil
+    -- An array literal consumes an annotation only when the annotation is an array type, and there
+    -- is usually none: `evalExpr` reaches this with no expectation at all.
+    local ty = expected and expected:isArray() and expected or nil
     if not ty then
         if #items == 0 then
             D.reject("type-required",
@@ -1180,7 +1147,7 @@ function Eval:evalSlice(ctx, expr)
         return V.type(S.slice(self:canonicalize(element)))
     end
     local ty = container.ty
-    if not S.isArray(ty) then
+    if not ty:isArray() then
         D.reject("type-mismatch", "Slice needs an array, found " .. S.encode(ty or S.Unit), expr.span)
     end
     -- A reference to module storage may leave the activation; a view of anything else may not.
@@ -1367,7 +1334,7 @@ function Eval:placeOf(ctx, expr, span)
         -- `p + i`, so the pointer's target is that element rather than a container to index into.
         -- Dereferencing first, the way a reference is handled, would read the element and then try to
         -- index it.
-        if base.ty and S.isPtr(base.ty) then
+        if base.ty and base.ty:isPtr() then
             local element = self:pointeeType(base.ty)
             local index = self:evalExpr(ctx, expr.index)
             self:requireType(index, S.U32, expr.index.span)
@@ -1380,7 +1347,7 @@ function Eval:placeOf(ctx, expr, span)
             return { place = ctx.builder:ptrIndex(view, indexExpr, element), ty = element }
         end
         local container = self:derefContainer(ctx, base, expr.span)
-        if S.isSlice(container.ty) then
+        if container.ty:isSlice() then
             local element = container.ty.element
             local index = self:evalExpr(ctx, expr.index)
             self:requireType(index, S.U32, expr.index.span)
@@ -1406,7 +1373,7 @@ function Eval:placeOf(ctx, expr, span)
             return { place = ctx.builder:sliceIndex(view, indexExpr, element), ty = element,
                 readonly = true }
         end
-        if not S.isArray(container.ty) then
+        if not container.ty:isArray() then
             D.reject("type-mismatch",
                 "Expected an array but found " .. S.encode(container.ty or S.Unit), expr.span)
         end
@@ -1467,7 +1434,7 @@ function Eval:derefContainer(ctx, container, span)
         return { concrete = object.backing, value = object.backing, place = object.place,
             ty = object.ty, container = object }
     end
-    if held and held.ty and S.isRef(held.ty) and V.tag(held) == "ir" then
+    if held and held.ty and held.ty:isRef() and V.tag(held) == "ir" then
         local target = self:pointeeType(held.ty)
         local place = ctx.residual and self:derefPlace(ctx, held, span) or nil
         return { place = place, ty = target, container = { retaining = true } }
@@ -1475,7 +1442,7 @@ function Eval:derefContainer(ctx, container, span)
     -- A selection directly off a reference field or a runtime reference: the place holds the
     -- pointer, so the target is one dereference further on. This is checked after the value cases,
     -- because a frontend reference already names the target place.
-    if container.ty and S.isPtr(container.ty) then
+    if container.ty and container.ty:isPtr() then
         -- The pointer is a value, so it is spilled once to reach the record it addresses; from there the
         -- selection is the same route a reference takes.
         local target = self:pointeeType(container.ty)
@@ -1490,7 +1457,7 @@ function Eval:derefContainer(ctx, container, span)
         end
         return { place = Ir.Deref(place, target), ty = target, container = { retaining = true } }
     end
-    if container.ty and S.isRef(container.ty) then
+    if container.ty and container.ty:isRef() then
         local target = self:pointeeType(container.ty)
         if not container.place then return container end
         return { place = Ir.Deref(container.place, target), ty = target,
@@ -1635,7 +1602,8 @@ end
 function Eval:joinCallables(yesValue, noValue, span)
     local keyA, envA, sigA = self:callableArm(yesValue, span)
     local keyB, envB, sigB = self:callableArm(noValue, span)
-    if S.encode(sigA) ~= S.encode(sigB) then
+    -- Two signatures are one interned `Ty.Sig` value when they are the same shape.
+    if sigA ~= sigB then
         D.reject("callable-branch", "Both arms must be callable the same way: "
             .. S.encode(sigA) .. " and " .. S.encode(sigB), span)
     end
@@ -1680,15 +1648,15 @@ end
 -- instead of building mistyped IR.
 function Eval:expression(ctx, value, want)
     local tag = V.tag(value)
-    if want and (S.isSig(want) or S.isView(want)) and value.ty and S.isTagged(value.ty) then
+    if want and (want:isSig() or want:isView()) and value.ty and value.ty:isTagged() then
         self:rejectTaggedErase(ctx.span)
     end
     if (tag == "closure" or tag == "word" or tag == "method") and want
-        and (S.isSig(want) or S.isView(want)) then
+        and (want:isSig() or want:isView()) then
         if not ctx.residual then
             D.reject("runtime-in-normalization", "A view needs runtime code", ctx.span)
         end
-        return self:makeView(ctx, value, S.isView(want) and want.visible or want)
+        return self:makeView(ctx, value, want:isView() and want.visible or want)
     end
     if tag == "ir" then
         if value.cast then
@@ -1776,10 +1744,10 @@ end
 function Eval:sigMatches(a, b)
     if #a.inputs ~= #b.inputs or #a.results ~= #b.results then return false end
     for index = 1, #a.inputs do
-        if S.encode(a.inputs[index]) ~= S.encode(b.inputs[index]) then return false end
+        if a.inputs[index] ~= b.inputs[index] then return false end
     end
     for index = 1, #a.results do
-        if S.encode(a.results[index]) ~= S.encode(b.results[index]) then return false end
+        if a.results[index] ~= b.results[index] then return false end
     end
     return true
 end
@@ -1798,7 +1766,7 @@ end
 
 -- A value type that satisfies a signature requirement: a callable whose visible shape matches.
 function Eval:typeMatchesSignature(ty, sig)
-    if S.isOwned(ty) then return self:sigMatches(ty.visible, sig) end
+    if ty:isOwned() then return self:sigMatches(ty.visible, sig) end
     return false
 end
 
@@ -1806,7 +1774,7 @@ end
 -- has that shape and still cannot be returned as a signature, because a view cannot retain the
 -- environment that carries its tag, so that case reports the erasure rather than a shape mismatch.
 function Eval:requireResultSignature(actual, sig, span)
-    if actual and actual.ty and S.isTagged(actual.ty) and self:sigMatches(actual.ty.visible, sig) then
+    if actual and actual.ty and actual.ty:isTagged() and self:sigMatches(actual.ty.visible, sig) then
         self:rejectTaggedErase(span)
     end
     if not actual or not self:typeMatchesSignature(actual.ty, sig) then
@@ -1817,8 +1785,8 @@ end
 -- Checks a value against a requirement. A signature requirement is satisfied by a callable whose
 -- shape matches, which is what lets an unannotated lambda be checked against it.
 function Eval:requireAgainst(value, ty, span)
-    local wanted = (S.isSig(ty) and ty) or (S.isView(ty) and ty.visible) or nil
-    if wanted and value.ty and S.isTagged(value.ty) then
+    local wanted = (ty:isSig() and ty) or (ty:isView() and ty.visible) or nil
+    if wanted and value.ty and value.ty:isTagged() then
         self:rejectTaggedErase(span)
     end
     if wanted and (V.tag(value) == "closure" or V.tag(value) == "word" or V.tag(value) == "method") then
@@ -1827,7 +1795,7 @@ function Eval:requireAgainst(value, ty, span)
         end
         return
     end
-    if S.isView(ty) and V.tag(value) == "ir" and value.ty == ty then return end
+    if ty:isView() and V.tag(value) == "ir" and value.ty == ty then return end
     self:requireType(value, ty, span)
 end
 
@@ -1851,18 +1819,18 @@ end
 -- is defined and needs no check; any other change that cannot lose a value is implicit, and one that
 -- can is accepted only for a known value that fits.
 function Eval:convert(value, ty, span)
-    if S.isF64(ty) then
+    if ty:isF64() then
         -- An integer becomes a double implicitly only when the double is exact: rounding can lose a
         -- value, so the rounding is written `F64(x)` where it happens.
-        if not S.isInteger(value.ty) then return nil end
+        if not value.ty:isInteger() then return nil end
         local from = value.ty
         if V.isKnown(value) then
             local high, low = wordsOf(value)
             local rounded
             -- Only a signed wide value is negative: the same bits are a large positive U64.
-            if S.isWide(from) and S.isSigned(from) and U64Kernel.slt(high, low, 0, 0) then
+            if from:isWide() and from:isSigned() and U64Kernel.slt(high, low, 0, 0) then
                 rounded = -U64Kernel.tofloat(U64Kernel.neg(high, low))
-            elseif S.isWide(from) then
+            elseif from:isWide() then
                 rounded = U64Kernel.tofloat(high, low)
             else
                 rounded = value.n
@@ -1872,7 +1840,7 @@ function Eval:convert(value, ty, span)
             D.reject("numeric-range", "Value " .. describeWords(from, high, low)
                 .. " is not exactly an F64; write F64(x) to round it", span)
         end
-        if S.isWide(from) then return nil end
+        if from:isWide() then return nil end
         -- Every value of a 32-bit or narrower type is exactly a double.
         if V.tag(value) == "ir" then
             value.cast = true
@@ -1883,10 +1851,10 @@ function Eval:convert(value, ty, span)
     end
     local from = value.ty
     if from == ty then return value end
-    if not (S.isInteger(from) and S.isInteger(ty)) then return nil end
+    if not (from:isInteger() and ty:isInteger()) then return nil end
     if S.widthOf(from) == S.widthOf(ty) then
         -- The same width with a different signedness: the bits are the value.
-        if S.isSigned(from) == S.isSigned(ty) then return nil end
+        if from:isSigned() == ty:isSigned() then return nil end
         if V.tag(value) == "ir" then value.cast = true end
         if V.isKnown(value) then return become(value, ty, wordsOf(value)) end
         return become(value, ty, 0, 0)
@@ -1909,7 +1877,7 @@ end
 function Eval:requireType(value, ty, span)
     if value.ty == ty then return end
     if self:convert(value, ty, span) then return end
-    if S.isInteger(value.ty) and S.isInteger(ty) then
+    if value.ty:isInteger() and ty:isInteger() then
         D.reject("numeric-range", "Expected " .. S.encode(ty) .. " but found " .. S.encode(value.ty)
             .. "; narrow a run-time value with an explicit conversion such as "
             .. S.encode(ty):lower() .. "(x)", span)
@@ -2040,7 +2008,7 @@ function Eval:floatOp(ctx, op, left, right, leftSpan, rightSpan, span)
     for _, side in ipairs({ { left, leftSpan }, { right, rightSpan } }) do
         local value, where = side[1], side[2]
         if value.ty ~= S.F64 then
-            if S.isInteger(value.ty) and value.literal then
+            if value.ty:isInteger() and value.literal then
                 -- A literal adopts F64, which is what lets `2.0 * 3` read as it looks.
                 self:requireType(value, S.F64, where)
             else
@@ -2081,7 +2049,7 @@ function Eval:evalUnary(ctx, expr)
         if V.tag(value) == "bool" then return V.bool(not value.b) end
         return V.ir(ctx.builder:un("Not", self:expression(ctx, value), S.Bool), S.Bool)
     end
-    if S.isF64(value.ty) then
+    if value.ty:isF64() then
         -- Only negation applies to a float; complement and shift are integer operations.
         if op ~= "-" then
             D.reject("type-mismatch", "Negation is the only unary operator F64 has, not " .. op,
@@ -2090,12 +2058,12 @@ function Eval:evalUnary(ctx, expr)
         if V.isKnown(value) then return V.f64(-value.n) end
         return V.ir(ctx.builder:un("Neg", self:expression(ctx, value), S.F64), S.F64)
     end
-    if not S.isInteger(value.ty) then
+    if not value.ty:isInteger() then
         D.reject("type-mismatch", "Expected an integer but found " .. S.encode(value.ty), expr.operand.span)
     end
     local ty = value.ty
     if V.isInteger(value) then
-        if S.isWide(ty) then
+        if ty:isWide() then
             local high, low = wordsOf(value)
             if op == "-" then return V.int64(ty, U64Kernel.neg(high, low)) end
             return V.int64(ty, U64Kernel.bnot(high, low))
@@ -2116,7 +2084,7 @@ end
 
 -- One implementation of every binary operator, shared by expressions and compound stores.
 function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
-    if S.isPtr(left.ty) or S.isPtr(right.ty) then
+    if left.ty:isPtr() or right.ty:isPtr() then
         -- Two addresses of one element type compare by address. A pointer has no order and no integer
         -- value, so nothing else about it is offered.
         if (op ~= "==" and op ~= "!=") or left.ty ~= right.ty then
@@ -2129,11 +2097,11 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
         return V.ir(ctx.builder:bin(COMPARE[op], self:expression(ctx, left),
             self:expression(ctx, right), S.Bool), S.Bool)
     end
-    if S.isF64(left.ty) or S.isF64(right.ty) then
+    if left.ty:isF64() or right.ty:isF64() then
         return self:floatOp(ctx, op, left, right, leftSpan, rightSpan, span)
     end
     leftSpan, rightSpan, span = leftSpan or ctx.span, rightSpan or ctx.span, span or ctx.span
-    if (op == "==" or op == "!=") and S.isString(left.ty) and S.isString(right.ty) then
+    if (op == "==" or op == "!=") and left.ty:isString() and right.ty:isString() then
         -- Strings compare by content: a byte sequence has no identity a program can observe, so
         -- pointer equality would be a surprising answer rather than the useful one.
         if V.tag(left) == "string" and V.tag(right) == "string" then
@@ -2145,7 +2113,7 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
         return V.ir(ctx.builder:bin(COMPARE[op], self:expression(ctx, left), self:expression(ctx, right),
             S.Bool), S.Bool)
     end
-    if (op == "==" or op == "!=") and S.isBool(left.ty) and S.isBool(right.ty) then
+    if (op == "==" or op == "!=") and left.ty:isBool() and right.ty:isBool() then
         -- A Bool compares by value. The operation is not ordered: section 7 offers Bool only
         -- equality, exactly as it offers only equality for Unit.
         if V.isKnown(left) and V.isKnown(right) then
@@ -2154,14 +2122,14 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
         return V.ir(ctx.builder:bin(COMPARE[op], self:expression(ctx, left),
             self:expression(ctx, right), S.Bool), S.Bool)
     end
-    if (op == "==" or op == "!=") and S.isUnit(left.ty) and S.isUnit(right.ty) then
+    if (op == "==" or op == "!=") and left.ty:isUnit() and right.ty:isUnit() then
         -- Unit has one value and no runtime representation, so both operands already ran for their
         -- effects and the answer is known: Unit equals Unit.
         return V.bool(op == "==")
     end
     if COMPARE[op] then
         -- A comparison widens both sides, which is always safe and never narrows.
-        if S.isInteger(left.ty) and S.isInteger(right.ty) and left.ty ~= right.ty then
+        if left.ty:isInteger() and right.ty:isInteger() and left.ty ~= right.ty then
             local wider
             if left.literal and not right.literal and wordsFit(right.ty, wordsOf(left)) then
                 wider = right.ty
@@ -2178,7 +2146,7 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
             self:requireType(left, wider, leftSpan)
             self:requireType(right, wider, rightSpan)
         end
-        if not S.isInteger(left.ty) or left.ty ~= right.ty then
+        if not left.ty:isInteger() or left.ty ~= right.ty then
             D.reject("type-mismatch", "Comparison needs two integers of one width, found "
                 .. S.encode(left.ty or S.Unit) .. " and " .. S.encode(right.ty or S.Unit), span)
         end
@@ -2200,13 +2168,13 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
     if not irOp then D.bug("operator", "Unknown binary operator " .. tostring(op)) end
     -- A shift takes its amount as a plain U32; every other operator needs both sides at one width.
     if op == "<<" or op == ">>" then
-        if not S.isInteger(left.ty) then
+        if not left.ty:isInteger() then
             D.reject("type-mismatch", "A shift needs an integer to shift, found "
                 .. S.encode(left.ty or S.Unit), leftSpan)
         end
         self:requireType(right, S.U32, rightSpan)
     else
-        if not S.isInteger(left.ty) or not S.isInteger(right.ty) then
+        if not left.ty:isInteger() or not right.ty:isInteger() then
             D.reject("type-mismatch", "Arithmetic needs two integers, found "
                 .. S.encode(left.ty or S.Unit) .. " and " .. S.encode(right.ty or S.Unit), span)
         end
@@ -2235,7 +2203,7 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
     if (op == "/" or op == "%") and V.isInteger(right) and right.n == 0 then
         D.reject("division-zero", "Known zero divisor", rightSpan)
     end
-    if S.isWide(ty) and V.isInteger(left) and V.isInteger(right) then
+    if ty:isWide() and V.isInteger(left) and V.isInteger(right) then
         local ah, al = wordsOf(left)
         local bh, bl = wordsOf(right)
         local high, low
@@ -2243,15 +2211,15 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
         elseif op == "-" then high, low = U64Kernel.sub(ah, al, bh, bl)
         elseif op == "*" then high, low = U64Kernel.mul(ah, al, bh, bl)
         elseif op == "/" then
-            if S.isSigned(ty) then high, low = U64Kernel.sdivmod(ah, al, bh, bl)
+            if ty:isSigned() then high, low = U64Kernel.sdivmod(ah, al, bh, bl)
             else high, low = U64Kernel.divmod(ah, al, bh, bl) end
         elseif op == "%" then
-            if S.isSigned(ty) then _, _, high, low = U64Kernel.sdivmod(ah, al, bh, bl)
+            if ty:isSigned() then _, _, high, low = U64Kernel.sdivmod(ah, al, bh, bl)
             else _, _, high, low = U64Kernel.divmod(ah, al, bh, bl) end
         elseif op == "^" then high, low = U64Kernel.pow(ah, al, bh, bl)
         elseif op == "<<" then high, low = U64Kernel.shl(ah, al, bl)
         elseif op == ">>" then
-            if S.isSigned(ty) then high, low = U64Kernel.sar(ah, al, bl)
+            if ty:isSigned() then high, low = U64Kernel.sar(ah, al, bl)
             else high, low = U64Kernel.shr(ah, al, bl) end
         elseif op == "&" then high, low = U64Kernel.band(ah, al, bh, bl)
         elseif op == "|" then high, low = U64Kernel.bor(ah, al, bh, bl)
@@ -2264,11 +2232,11 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
         if op == "+" then result = wrap(ty, x + y)
         elseif op == "-" then result = wrap(ty, x - y)
         elseif op == "*" then result = mulExact(ty, x, y)
-        elseif op == "/" then result = S.isSigned(ty) and signedDiv(ty, x, y) or math.floor(x / y)
+        elseif op == "/" then result = ty:isSigned() and signedDiv(ty, x, y) or math.floor(x / y)
         elseif op == "%" then
-            result = S.isSigned(ty) and signedRem(ty, x, y) or x - y * math.floor(x / y)
+            result = ty:isSigned() and signedRem(ty, x, y) or x - y * math.floor(x / y)
         elseif op == "^" then
-            if S.isSigned(ty) and y < 0 then
+            if ty:isSigned() and y < 0 then
                 D.reject("numeric-range", "A signed power needs a power that is not negative", span)
             end
             result = pow(ty, x, y)
@@ -2284,7 +2252,7 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
     local builder = ctx.builder
     local leftExpr, rightExpr = self:expression(ctx, left), self:expression(ctx, right)
     -- A signed power with a negative exponent has no result, so a run-time one is checked first.
-    if op == "^" and S.isSigned(ty) then
+    if op == "^" and ty:isSigned() then
         if V.isKnown(right) and right.n < 0 then
             D.reject("numeric-range", "A signed power needs a power that is not negative", rightSpan)
         end
@@ -2428,7 +2396,7 @@ function Eval:newSchema(ctx, expr, statics, readonly, base)
             local ty = self:typeOf(member.type, ctx.scope, member.span)
             -- A field declared as a signature is represented by the borrowed callable ABI: the
             -- field holds an invocation pointer and an environment pointer, not callable code.
-            if S.isSig(ty) then ty = S.view(ty) end
+            if ty:isSig() then ty = S.view(ty) end
             if def.fields[name] or def.methods[name] then
                 D.reject("duplicate", "Duplicate schema member " .. name, member.name.span)
             end
@@ -2463,7 +2431,7 @@ function Eval:evalSupply(ctx, expr)
         if #expr.fields == 0 and base.caseType == S.Unit then
             return self:makeVariant(ctx, base, nil, expr.span)
         end
-        if not S.isRecord(base.caseType) then
+        if not base.caseType:isRecord() then
             D.reject("variant-payload",
                 "Alternative " .. base.case .. " does not take a record; apply it to one value instead",
                 expr.span)
@@ -2488,7 +2456,7 @@ function Eval:evalSupply(ctx, expr)
         end
         return self:makeVariant(ctx, base, self:constructRecord(ctx, base.caseType, values, nil), expr.span)
     end
-    if V.tag(base) == "variant" or (V.tag(base) == "ir" and S.isSum(base.ty)) then
+    if V.tag(base) == "variant" or (V.tag(base) == "ir" and base.ty:isSum()) then
         return self:evalMatch(ctx, base, expr, nil)
     end
     if V.tag(base) == "word" and base.def.keyed then
@@ -2560,7 +2528,7 @@ function Eval:constructRecord(ctx, ty, values, def)
         exprs[index] = self:expression(ctx, fieldValue, field.type)
         -- A signature-typed field is a view whose environment points at a local adapter, so an
         -- instance holding one is itself tied to this activation.
-        if self:isBorrowed(fieldValue) or S.isView(field.type) then borrowed = true end
+        if self:isBorrowed(fieldValue) or field.type:isView() then borrowed = true end
     end
     -- The Make is the value until a place is demanded (a field store, a reference, or a borrowed
     -- receiver). `body` is where that spill goes, so a demand from inside an arm still names storage
@@ -2574,7 +2542,7 @@ function Eval:evalFieldSelect(ctx, expr)
     -- Selection through a reference selects from the instance it names, so the reference is read as
     -- that instance and the ordinary member rules apply.
     base = self:placeObject(base) or base
-    if base.ty and S.isSlice(base.ty) and name == "length" then
+    if base.ty and base.ty:isSlice() and name == "length" then
         local known = self:sliceCount(base)
         if known then return V.u32(known) end
         if not ctx.residual then
@@ -2604,12 +2572,12 @@ function Eval:evalFieldSelect(ctx, expr)
                 expr.field.span)
         end
         return member
-    elseif tag == "type" and S.isSum(base.value) then
+    elseif tag == "type" and base.value:isSum() then
         -- A sum type's member names a constructor for one alternative.
         local caseType = S.caseOf(base.value, name)
         if not caseType then D.reject("unknown-member", "Sum type has no alternative " .. name, expr.field.span) end
         return V.ctor(base.value, name, caseType)
-    elseif tag == "ir" and (S.isRef(base.ty) or S.isPtr(base.ty)) then
+    elseif tag == "ir" and (base.ty:isRef() or base.ty:isPtr()) then
         -- A reference and a raw pointer reach the record they address the same way, so the field is
         -- the same projection one dereference on; only the lifetime rule differs, and a pointer has
         -- none to check.
@@ -2619,7 +2587,7 @@ function Eval:evalFieldSelect(ctx, expr)
         local place = Ir.Project(self:derefPlace(ctx, base, expr.span), Ir.Field(name))
         local read = ctx.builder:read(ctx.body, ty, place)
         return V.ir(ctx.builder:ref(read, ty), ty)
-    elseif tag == "ir" and S.isRecord(base.ty) then
+    elseif tag == "ir" and base.ty:isRecord() then
         local ty = S.field(base.ty, name)
         if not ty then D.reject("unknown-member", "Record has no field " .. name, expr.field.span) end
         if not ctx.residual then
@@ -2750,7 +2718,7 @@ function Eval:writeSlot(ctx, slot, place, value)
     end
     -- Assigning callable code to a signature-typed field builds a view whose environment is a
     -- local adapter, so the assignment is a borrow even when the code itself is not.
-    local becomesBorrowed = self:isBorrowed(value) or S.isView(slot.ty)
+    local becomesBorrowed = self:isBorrowed(value) or slot.ty:isView()
     if V.tag(value) == "ref" and value.tied and (slot.retaining or (slot.record and slot.record.module)) then
         D.reject("ref-escape", self:refEscapeMessage(), ctx.span)
     end
@@ -2843,7 +2811,7 @@ end
 -- three former entry points (`applyOwned`, `applyView`, `applyTagged`) each had in front of them.
 function Eval:invokeRuntime(ctx, value, args, span)
     local tag, ty = V.tag(value), value.ty
-    if tag == "ir" and ty and S.isOwned(ty) then
+    if tag == "ir" and ty and ty:isOwned() then
         local plan = self:planOf(ty, span)
         if #plan.borrowedOrder > 0 then
             D.bug("borrowed-callable-value",
@@ -2861,7 +2829,7 @@ function Eval:invokeRuntime(ctx, value, args, span)
         end
         return self:invokeClosure(ctx, plan, envExprs, args, span, nil)
     end
-    if tag == "ir" and ty and S.isView(ty) then
+    if tag == "ir" and ty and ty:isView() then
         -- An opaque callable is invoked through its view: the environment pointer plus the argument
         -- list.
         if not ctx.residual then
@@ -2890,7 +2858,7 @@ function Eval:invokeRuntime(ctx, value, args, span)
         end
         return V.results(out)
     end
-    if (tag == "ir" or tag == "variant") and ty and S.isTagged(ty) then
+    if (tag == "ir" or tag == "variant") and ty and ty:isTagged() then
         -- A call on a tagged callable: test the tag, then run that arm's code directly. Every arm
         -- shares the one visible signature, so the results join through a slot per result.
         if not ctx.residual then
@@ -3038,14 +3006,14 @@ function Eval:evalLambda(ctx, expr, expected)
             -- materialises here. The closure is then non-retaining, and returning it escapes.
             local place = object.place
             if ctx.residual then
-                if S.isArray(object.ty) then
+                if object.ty:isArray() then
                     place = self:arrayPlace(ctx, object, expr.span)
                 else
                     place = self:recordPlace(ctx, object, expr.span)
                 end
             end
             plan.borrowedOrder[#plan.borrowedOrder + 1] = name
-            if S.isArray(object.ty) then
+            if object.ty:isArray() then
                 plan.borrowed[name] = { kind = "array", ty = object.ty, place = place,
                     record = place == nil and object or nil }
             else
@@ -3162,7 +3130,7 @@ function Eval:callableKey(plan, args)
             -- Matches instanceKey: unsupplied and ordinary runtime arguments agree, while a
             -- runtime callable is distinguished by its code identity.
             local ty = value and value.ty
-            parts[#parts + 1] = (ty and S.isOwned(ty)) and ("!" .. ty.entry) or "*"
+            parts[#parts + 1] = (ty and ty:isOwned()) and ("!" .. ty.entry) or "*"
         end
     end
     return table.concat(parts, "/")
@@ -3285,7 +3253,7 @@ function Eval:constructCallableInstance(key, callable, args, span)
         paramTypes[#paramTypes + 1] = borrowed.ty
         instance.inputTypes[#instance.inputTypes + 1] = borrowed.ty
         -- The place parameter belongs to the caller, so the object is an enclosing owner here.
-        if S.isArray(borrowed.ty) then
+        if borrowed.ty:isArray() then
             declare(sc, name, { kind = "value", name = name,
                 value = V.array(borrowed.ty, nil, Ir.Local(storage), true) }, span)
         else
@@ -3307,7 +3275,7 @@ function Eval:constructCallableInstance(key, callable, args, span)
         local ty = plan.paramTypes[index] or self:requirement(def, index, sc, span)
         local supplied = args[index]
         local bound = false
-        if S.isSig(ty) then
+        if ty:isSig() then
             -- A callable parameter: static code is specialised away entirely; otherwise the Owned
             -- type carries the code identity, so the call stays direct and only the environment
             -- travels as a by-value input.
@@ -3330,9 +3298,9 @@ function Eval:constructCallableInstance(key, callable, args, span)
                 -- A method borrows its receiver, so it is non-retaining for the same reason a
                 -- borrowing closure is: the parameter takes a view.
                 ty = S.view(ty)
-            elseif supplied ~= nil and V.tag(supplied) == "ir" and S.isOwned(supplied.ty) then
+            elseif supplied ~= nil and V.tag(supplied) == "ir" and supplied.ty:isOwned() then
                 ty = supplied.ty
-            elseif supplied ~= nil and V.tag(supplied) == "ir" and S.isView(supplied.ty) then
+            elseif supplied ~= nil and V.tag(supplied) == "ir" and supplied.ty:isView() then
                 ty = supplied.ty
             elseif supplied == nil then
                 -- An entry face with no call site: the callable arrives from outside, so it needs
@@ -3361,7 +3329,7 @@ function Eval:constructCallableInstance(key, callable, args, span)
                 inputs[#inputs + 1] = S.inValue(ty)
                 paramTypes[#paramTypes + 1] = ty
                 instance.paramPositions[#instance.paramPositions + 1] = index
-                if S.isRecord(ty) then
+                if ty:isRecord() then
                     declare(sc, param.name.text, { kind = "value", name = param.name.text,
                         value = V.object(ty, nil, { fields = S.fieldsOf(ty),
                             fieldNames = S.fieldNames(ty), statics = {}, readonly = {}, methods = {}, type = ty },
@@ -3550,7 +3518,7 @@ function Eval:evalValueDef(ctx, def)
             local ty = self:typeOf(binder.annotation, ctx.scope, binder.span)
             -- A signature annotation types an unannotated lambda; any other annotation is what an
             -- array literal with no elements of its own has to take its type from.
-            if S.isSig(ty) or S.isArray(ty) then expectations[index] = ty end
+            if ty:isSig() or ty:isArray() then expectations[index] = ty end
         end
     end
     local values = {}
@@ -3620,7 +3588,7 @@ local U32Kernel = require("wordletkit.u32")
 -- own range, which is what makes two's complement wrap around.
 function wrap(ty, n)
     local wrapped = n % S.modulusOf(ty)
-    if S.isSigned(ty) and wrapped > S.maxOf(ty) then wrapped = wrapped - S.modulusOf(ty) end
+    if ty:isSigned() and wrapped > S.maxOf(ty) then wrapped = wrapped - S.modulusOf(ty) end
     return wrapped
 end
 
@@ -3710,7 +3678,7 @@ function Eval:evalArguments(ctx, exprs, callee)
             -- lambda.
             if param and param.annotation then
                 local ty = self:typeOf(param.annotation, sc, param.span)
-                if S.isSig(ty) then expected = ty end
+                if ty:isSig() then expected = ty end
             end
             local value = self:evalExpected(ctx, expr, expected)
             if index < #exprs then
@@ -3737,10 +3705,10 @@ function Eval:roundToFloat(ctx, value, span)
     local from = value.ty
     if V.isKnown(value) then
         local high, low = wordsOf(value)
-        if S.isWide(from) and S.isSigned(from) and U64Kernel.slt(high, low, 0, 0) then
+        if from:isWide() and from:isSigned() and U64Kernel.slt(high, low, 0, 0) then
             return V.f64(-U64Kernel.tofloat(U64Kernel.neg(high, low)))
         end
-        if S.isWide(from) then return V.f64(U64Kernel.tofloat(high, low)) end
+        if from:isWide() then return V.f64(U64Kernel.tofloat(high, low)) end
         return V.f64(value.n)
     end
     return V.ir(ctx.builder:convert(self:expression(ctx, value), S.F64), S.F64)
@@ -3759,7 +3727,7 @@ function Eval:truncateToInt(ctx, ty, value, span)
             D.reject("numeric-range", "Value " .. string.format("%.17g", value.n)
                 .. " does not fit in " .. S.encode(ty), span)
         end
-        if S.isWide(ty) then return V.int64(ty, wordsOfDouble(truncated)) end
+        if ty:isWide() then return V.int64(ty, wordsOfDouble(truncated)) end
         return V.int(ty, truncated)
     end
     local builder, expr = ctx.builder, self:expression(ctx, value)
@@ -3777,22 +3745,22 @@ end
 function Eval:applyConversion(ctx, ty, args, span)
     if #args ~= 1 then D.reject("arity", "A conversion takes one value", span) end
     local value = args[1]
-    if S.isF64(ty) then
-        if S.isF64(value.ty) then return value end
-        if not S.isInteger(value.ty) then
+    if ty:isF64() then
+        if value.ty:isF64() then return value end
+        if not value.ty:isInteger() then
             D.reject("type-mismatch", "F64 needs a number, found " .. S.encode(value.ty or S.Unit), span)
         end
         return self:roundToFloat(ctx, value, span)
     end
-    if S.isInteger(ty) and S.isF64(value.ty) then
+    if ty:isInteger() and value.ty:isF64() then
         return self:truncateToInt(ctx, ty, value, span)
     end
-    if not S.isInteger(value.ty) then
+    if not value.ty:isInteger() then
         D.reject("type-mismatch", S.encode(ty) .. " needs an integer, found "
             .. S.encode(value.ty or S.Unit), span)
     end
     local reinterprets = S.widthOf(value.ty) == S.widthOf(ty)
-        and S.isSigned(value.ty) ~= S.isSigned(ty)
+        and value.ty:isSigned() ~= ty:isSigned()
     if reinterprets then
         -- The same width read the other way keeps every bit, so nothing is checked.
         if V.isKnown(value) then return become(value, ty, wordsOf(value)) end
@@ -3808,7 +3776,7 @@ function Eval:applyConversion(ctx, ty, args, span)
     local sourceMaxHigh, sourceMaxLow = S.maxWordsOf(value.ty)
     local minHigh, minLow = S.minWordsOf(ty)
     local maxHigh, maxLow = S.maxWordsOf(ty)
-    local compare = (S.isSigned(value.ty) or S.isSigned(ty)) and U64Kernel.slt or U64Kernel.lt
+    local compare = (value.ty:isSigned() or ty:isSigned()) and U64Kernel.slt or U64Kernel.lt
     if compare(sourceMinHigh, sourceMinLow, minHigh, minLow) then
         ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Lt", expr,
             self:constInt(ctx, value.ty, minHigh, minLow), S.Bool), "numeric-range"))
@@ -3822,7 +3790,7 @@ end
 
 -- An integer constant of a type, which a 64-bit one holds as its two words.
 function Eval:constInt(ctx, ty, high, low)
-    if S.isWide(ty) then return ctx.builder:int64(ty, high, low) end
+    if ty:isWide() then return ctx.builder:int64(ty, high, low) end
     return ctx.builder:int(ty, low)
 end
 
@@ -3851,7 +3819,7 @@ function Eval:evalApply(ctx, expr)
             if #args ~= 0 then D.reject("arity", "Unit() takes no value", expr.span) end
             return V.unit()
         end
-        if S.isInteger(callee.value) or S.isF64(callee.value) then
+        if callee.value:isInteger() or callee.value:isF64() then
             return self:applyConversion(ctx, callee.value, args, expr.span)
         end
         D.reject("callable-required", S.encode(callee.value) .. " is a type, not a callable",
@@ -4049,7 +4017,7 @@ function Eval:applyKeyed(ctx, word, fields, span, tail)
         local expected
         if param.annotation then
             local ty = self:typeOf(param.annotation, lexical, param.span)
-            if S.isSig(ty) then expected = ty end
+            if ty:isSig() then expected = ty end
         end
         bound[name] = self:evalExpected(ctx, field.value, expected)
     end
@@ -4243,7 +4211,7 @@ function Eval:instanceKey(def, values, receiver)
             -- A runtime callable carries its code identity in its type, so two different closures
             -- must not share an instance. Other runtime arguments are fixed by the requirement.
             local ty = value and value.ty
-            parts[#parts + 1] = (ty and S.isOwned(ty)) and ("!" .. ty.entry) or "*"
+            parts[#parts + 1] = (ty and ty:isOwned()) and ("!" .. ty.entry) or "*"
         end
     end
     return table.concat(parts, "/")
@@ -4324,7 +4292,7 @@ function Eval:constructInstance(key, def, values, span, receiver)
 
     for index, param in ipairs(def.params) do
         local ty = self:requirement(def, index, sc, span)
-        if S.isSig(ty) then
+        if ty:isSig() then
             -- A callable parameter: static code is specialised away entirely; otherwise the Owned
             -- type carries the code identity, so the call stays direct and only the environment
             -- travels as a by-value input.
@@ -4348,9 +4316,9 @@ function Eval:constructInstance(key, def, values, span, receiver)
                 -- A method borrows its receiver, so it is non-retaining for the same reason a
                 -- borrowing closure is: the parameter takes a view.
                 ty = S.view(ty)
-            elseif supplied ~= nil and V.tag(supplied) == "ir" and S.isOwned(supplied.ty) then
+            elseif supplied ~= nil and V.tag(supplied) == "ir" and supplied.ty:isOwned() then
                 ty = supplied.ty
-            elseif supplied ~= nil and V.tag(supplied) == "ir" and S.isView(supplied.ty) then
+            elseif supplied ~= nil and V.tag(supplied) == "ir" and supplied.ty:isView() then
                 ty = supplied.ty
             elseif supplied == nil then
                 -- An entry face with no call site: the callable arrives from outside, so it needs
@@ -4395,12 +4363,12 @@ function Eval:constructInstance(key, def, values, span, receiver)
             -- The call site needs each input's type to materialise its argument, so the two lists
             -- are maintained together.
             instance.inputTypes[#instance.inputTypes + 1] = ty
-            if S.isArray(ty) then
+            if ty:isArray() then
                 -- A by-value array parameter owns fresh storage only when an element is addressed;
                 -- a whole-value use reads the input directly.
                 declare(sc, param.name.text, { kind = "value", name = param.name.text,
                     value = V.array(ty, nil, nil, false, builder:ref(value, ty), setup) }, param.span)
-            elseif S.isRecord(ty) then
+            elseif ty:isRecord() then
                 -- A by-value record parameter owns fresh storage only when a write or an address
                 -- demands one, so a read-only parameter reads the input directly. A loop-carried
                 -- parameter needs its storage up front because the back edge names it.
@@ -4503,7 +4471,7 @@ function Eval:declaredResult(def, sc, span)
     local types, requirements = {}, {}
     for index, expr in ipairs(expressions) do
         local ty = self:typeOf(expr, sc, span)
-        if S.isSig(ty) then
+        if ty:isSig() then
             types[index], requirements[index] = false, ty
         else
             S.checkRuntime(ty, span)

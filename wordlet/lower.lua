@@ -150,12 +150,12 @@ function Emitter:render(expr)
     local kind = expr.kind
     if kind == "Const" then
         if expr.literal.kind == "UInt64" then
-            local text = U64Kernel.tostring(expr.literal.high, expr.literal.low, S.isSigned(expr.type))
-            if S.isSigned(expr.type) then return "INT64_C(" .. text .. ")" end
+            local text = U64Kernel.tostring(expr.literal.high, expr.literal.low, expr.type:isSigned())
+            if expr.type:isSigned() then return "INT64_C(" .. text .. ")" end
             return "UINT64_C(" .. text .. ")"
         end
         if expr.literal.kind == "UInt" then
-            if S.isSigned(expr.type) then return "INT32_C(" .. expr.literal.value .. ")" end
+            if expr.type:isSigned() then return "INT32_C(" .. expr.literal.value .. ")" end
             return "UINT32_C(" .. expr.literal.value .. ")"
         end
         if expr.literal.kind == "Boolean" then return expr.literal.value and "true" or "false" end
@@ -189,8 +189,8 @@ function Emitter:render(expr)
         if op == "Not" then return "(!(" .. self:expr(expr.operand) .. "))" end
         local operand = self:expr(expr.operand)
         -- A double negates as itself; the bit-pattern dance below is for integers only.
-        if S.isF64(expr.type) then return "(-(" .. operand .. "))" end
-        if S.isSigned(expr.type) then
+        if expr.type:isF64() then return "(-(" .. operand .. "))" end
+        if expr.type:isSigned() then
             -- Negation and complement of a signed value are done on the bit pattern.
             if op == "Neg" then
                 return "wordlet_i32(UINT32_C(0) - wordlet_u32(" .. operand .. "))"
@@ -203,7 +203,7 @@ function Emitter:render(expr)
         if op == "Pow" then
             self.layouts.usespow32 = true
             local resultType = self.layouts:cType(expr.type)
-            if S.isSigned(expr.type) then
+            if expr.type:isSigned() then
                 return "wordlet_i32(wordlet_pow(wordlet_u32(" .. left .. "), " .. right .. "))"
             end
             if resultType == "uint32_t" then return "wordlet_pow(" .. left .. ", " .. right .. ")" end
@@ -211,25 +211,25 @@ function Emitter:render(expr)
         end
         local cOp = BINARY_OP[op]
         if not cOp then D.bug("c-op", "No C operator for " .. tostring(op)) end
-        if S.isF64(expr.left.type) or S.isF64(expr.right.type) then
+        if expr.left.type:isF64() or expr.right.type:isF64() then
             -- IEEE arithmetic and comparison are exactly C's, including a NaN comparing false and a
             -- division by zero producing an infinity rather than trapping.
             return "(" .. self:expr(expr.left) .. ") " .. cOp .. " (" .. self:expr(expr.right) .. ")"
         end
         local resultType = self.layouts:cType(expr.type)
-        if S.isWide(expr.type) then
+        if expr.type:isWide() then
             -- A signed 64-bit operation reinterprets the bit pattern of its operands.
-            if S.isSigned(expr.type) then
+            if expr.type:isSigned() then
                 self.layouts.usesi64 = true
                 self.layouts.usesu64 = true
             end
             if op == "Div" then
-                if S.isSigned(expr.type) then self.layouts.usesdiv = true end
-                if S.isSigned(expr.type) then return "wordlet_div_i64(" .. left .. ", " .. right .. ")" end
+                if expr.type:isSigned() then self.layouts.usesdiv = true end
+                if expr.type:isSigned() then return "wordlet_div_i64(" .. left .. ", " .. right .. ")" end
                 return "(" .. left .. " / " .. right .. ")"
             end
             if op == "Rem" then
-                if S.isSigned(expr.type) then
+                if expr.type:isSigned() then
                     self.layouts.usesrem = true
                     return "wordlet_rem_i64(" .. left .. ", " .. right .. ")"
                 end
@@ -237,13 +237,13 @@ function Emitter:render(expr)
             end
             if op == "Pow" then
                 self.layouts.usespow = true
-                if S.isSigned(expr.type) then
+                if expr.type:isSigned() then
                     return "wordlet_i64(wordlet_pow64(wordlet_u64(" .. left .. "), wordlet_u64("
                         .. right .. ")))"
                 end
                 return "wordlet_pow64(" .. left .. ", " .. right .. ")"
             end
-            if S.isSigned(expr.type) then
+            if expr.type:isSigned() then
                 -- Arithmetic on the bit pattern, so overflow wraps rather than being undefined.
                 if op == "Add" or op == "Sub" or op == "Mul" then
                     return "wordlet_i64(wordlet_u64(" .. left .. ") " .. cOp .. " wordlet_u64("
@@ -266,13 +266,13 @@ function Emitter:render(expr)
                 end
             end
         end
-        if op == "Div" and S.isSigned(expr.type) then
+        if op == "Div" and expr.type:isSigned() then
             return "wordlet_div_i32(" .. left .. ", " .. right .. ")"
         end
-        if op == "Rem" and S.isSigned(expr.type) then
+        if op == "Rem" and expr.type:isSigned() then
             return "wordlet_rem_i32(" .. left .. ", " .. right .. ")"
         end
-        if S.isSigned(expr.type) then
+        if expr.type:isSigned() then
             -- Arithmetic on the bit pattern, then reinterpreted, so overflow wraps.
             if op == "Add" or op == "Sub" or op == "Mul" then
                 return "wordlet_i32((uint32_t)((uint64_t)wordlet_u32(" .. left
@@ -308,7 +308,7 @@ function Emitter:render(expr)
         if op == "BitAnd" or op == "BitOr" or op == "BitXor" then
             return "(" .. resultType .. ")((" .. left .. ") " .. cOp .. " (" .. right .. "))"
         end
-        if (op == "Eq" or op == "Ne") and S.isString(expr.left.type) then
+        if (op == "Eq" or op == "Ne") and expr.left.type:isString() then
             -- A byte string compares by content. The helper tests the length first, so unequal
             -- strings never read either buffer.
             self.layouts.usesstreq = true
@@ -318,12 +318,12 @@ function Emitter:render(expr)
         -- A comparison keeps its operands parenthesised but not the whole expression: an extra outer
         -- pair makes clang's -Wparentheses-equality fire when the comparison is a condition.
         return "(" .. left .. ") " .. cOp .. " (" .. right .. ")"
-    elseif kind == "Make" and S.isSlice(expr.type) then
+    elseif kind == "Make" and expr.type:isSlice() then
         -- A slice is a compound literal: the address of the first element and the length.
         local layout = self.layouts.sliceLayout(expr.type)
         return "(" .. layout.name .. "){ .f_data = " .. self:expr(expr.fields[1])
             .. ", .f_length = " .. self:expr(expr.fields[2]) .. " }"
-    elseif kind == "Make" and S.isArray(S.environmentOf(expr.type)) then
+    elseif kind == "Make" and (S.environmentOf(expr.type)):isArray() then
         -- An array is a struct holding a C array, so its elements initialise that member.
         local layout = self.layouts.arrayLayout(S.environmentOf(expr.type))
         local items = {}
@@ -345,16 +345,16 @@ function Emitter:render(expr)
         -- bit pattern. The source type is cast first, so a widening sign extends when it should.
         local operand = self:expr(expr.operand)
         local from, to = expr.operand.type, expr.type
-        if S.isSigned(from) ~= S.isSigned(to) and S.widthOf(from) == S.widthOf(to) then
-            if S.isWide(to) then
-                if S.isSigned(to) then
+        if from:isSigned() ~= to:isSigned() and S.widthOf(from) == S.widthOf(to) then
+            if to:isWide() then
+                if to:isSigned() then
                     self.layouts.usesi64 = true
                     return "wordlet_i64(" .. operand .. ")"
                 end
                 self.layouts.usesu64 = true
                 return "wordlet_u64(" .. operand .. ")"
             end
-            if S.isSigned(to) then return "wordlet_i32(" .. operand .. ")" end
+            if to:isSigned() then return "wordlet_i32(" .. operand .. ")" end
             return "wordlet_u32(" .. operand .. ")"
         end
         return "(" .. self.layouts:cType(to) .. ")(" .. self.layouts:cType(from) .. ")(" .. operand .. ")"
@@ -650,7 +650,7 @@ end
 -- An opaque callable is invoked through the pointer its view carries.
 function Emitter:indirect(stmt)
     local types = stmt.callable.type
-    if not S.isView(types) then D.bug("c-view", "Indirect needs a view-typed callable") end
+    if not types:isView() then D.bug("c-view", "Indirect needs a view-typed callable") end
     local layout = self.layouts.viewLayout(types)
     local args = {}
     for _, arg in ipairs(stmt.arguments) do
@@ -677,7 +677,7 @@ end
 function Emitter:makeView(stmt)
     local types = stmt.type
     -- Either an erased callable view, or pure code: an owned callable with an empty environment.
-    if not S.isView(types) and not (S.isOwned(types) and S.environmentOf(types) == S.Unit) then
+    if not types:isView() and not (types:isOwned() and S.environmentOf(types) == S.Unit) then
         D.bug("c-view", "View needs a view type or an empty-environment callable type")
     end
     local layout = self.layouts.viewLayout(types)
