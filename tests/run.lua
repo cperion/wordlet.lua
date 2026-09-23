@@ -16,6 +16,7 @@ end
 local kit = require("wordletkit")
 local here = source:match("^(.*[/])") or "./"
 dofile(here .. "schemas.lua")
+dofile(here .. "machine.lua")
 dofile(here .. "walk.lua")
 dofile(here .. "u64.lua")
 dofile(here .. "parse.lua")
