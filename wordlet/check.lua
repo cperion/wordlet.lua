@@ -116,7 +116,9 @@ function M.function_(fn, definitions, seeded)
                     end
                 end
                 for index, arg in ipairs(stmt.arguments) do
-                    M.arg(arg, visible, storages)
+                    -- The argument is checked once, and its type is what the target input is compared
+                    -- against; re-deriving it here would check the same node twice.
+                    local argType = M.arg(arg, visible, storages)
                     if target then
                         local input = target.inputs[index]
                         if not input then
@@ -128,16 +130,8 @@ function M.function_(fn, definitions, seeded)
                         if input.kind == "InPlace" and arg.kind ~= "BorrowArg" then
                             D.bug("ir-arg", "A borrowed input needs a place argument")
                         end
-                        if arg.kind == "ValueArg" and input.kind == "InValue"
-                            and arg.value.type ~= nil then
-                            if M.expr(arg.value, visible, storages) ~= input.type then
-                                D.bug("ir-type", "Call argument type does not match the target input")
-                            end
-                        end
-                        if arg.kind == "BorrowArg" and input.kind == "InPlace" then
-                            if M.place(arg.place, storages, visible) ~= input.type then
-                                D.bug("ir-type", "Borrowed argument type does not match the target input")
-                            end
+                        if argType ~= input.type then
+                            D.bug("ir-type", "Call argument type does not match the target input")
                         end
                     end
                 end

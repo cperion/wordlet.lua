@@ -114,9 +114,7 @@ end
 -- M.compile_file loads the module graph, then compiles the entry module with its own top scope. A
 -- source string with no path cannot resolve an import, so only a file may use one.
 function M.compile_file(path, options)
-    local merged = {}
-    for key, value in pairs(options or {}) do merged[key] = value end
-    local engine = Eval.session(merged)
+    local engine = Eval.session(options)
     local module = loadModule(engine, path, {}, {})
     engine.top = module.top
     local compilation = engine:compile(module.program, module.top)

@@ -10,8 +10,7 @@ local Walk = require("wordlet.walk")
 
 local M = {}
 
--- Free names of a lambda body: referenced but not bound by its parameters or its own `let`s.
--- A method body belongs to the schema it is written in and is not entered here.
+-- A set copy, so a nested scope can add bindings without leaking them to its siblings.
 local function copy(bound)
     local out = {}
     for key in pairs(bound) do out[key] = true end

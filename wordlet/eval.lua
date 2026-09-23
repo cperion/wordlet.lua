@@ -155,7 +155,7 @@ function M.session(options)
         -- Sealed definitions of named cells, keyed by the identity a recursive definition reserved.
         typeCells = {},
         nextTypeCell = 0,
-        nextDef = 0, nextFn = 0, steps = 0,
+        nextDef = 0, nextFn = 0, nextModule = 0, steps = 0,
         maxSteps = limits.steps or 1000000,
         -- Three separate budgets, because they bound three different recursions. Specialization
         -- nesting is the depth of nested instance building; static depth is nested compile-time
@@ -178,13 +178,15 @@ end
 -- nests another build. The host's Lua stack gives out long before a thousand nested builds would reach
 -- the key budget, so the nesting is bounded here and its exhaustion names a resource instead of
 -- surfacing as an unlabelled stack overflow.
+-- The check is made before the depth changes, so a refused entry leaves the session as it found it
+-- and the caller that restores the depth has nothing to restore.
 function Eval:enterBuild(span)
-    self.buildDepth = self.buildDepth + 1
-    if self.buildDepth > self.maxBuildDepth then
+    if self.buildDepth >= self.maxBuildDepth then
         D.resource("depth", "Specialization nests more than " .. self.maxBuildDepth
             .. " deep; a recursive word whose static arguments change specializes once per value, so"
             .. " bind the changing value at run time", span)
     end
+    self.buildDepth = self.buildDepth + 1
 end
 
 function Eval:leaveBuild() self.buildDepth = self.buildDepth - 1 end
@@ -193,13 +195,13 @@ function Eval:leaveBuild() self.buildDepth = self.buildDepth - 1 end
 -- fold that runs out of depth is compiled instead. The reference interpreter has no such fallback, so
 -- it is given the largest bound it can have without reaching the host stack limit.
 function Eval:enterStatic(def, span)
-    self.staticDepth = self.staticDepth + 1
     local allowed = self.run and self.maxInterpretDepth or self.maxStaticDepth
-    if self.staticDepth > allowed then
+    if self.staticDepth >= allowed then
         D.resource("static-depth", "Static evaluation nests more than " .. allowed .. " deep in "
             .. def.name .. "; a recursive word with a run-time argument is compiled instead, and"
             .. " the reference interpreter is bounded", span)
     end
+    self.staticDepth = self.staticDepth + 1
 end
 
 function Eval:leaveStatic() self.staticDepth = self.staticDepth - 1 end
@@ -442,7 +444,7 @@ function Eval:moduleObject(slot, span)
     local value = slot.value
     -- Module storage ids live in a disjoint range so they can never collide with the
     -- function-local storage ids the builder hands out.
-    self.nextModule = (self.nextModule or 0) + 1
+    self.nextModule = self.nextModule + 1
     local storage = Ir.Storage(MODULE_STORAGE_BASE + self.nextModule)
     if S.isArray(value.ty) then
         local array = V.array(value.ty, nil, Ir.Local(storage))
@@ -943,15 +945,19 @@ end
 -- `Ref(x)`: a reference to the place `x` names. A file-scope binding is module storage, which the
 -- interpreter already holds as a record and residual code promotes to a named object, so both modes
 -- classify it the same way.
--- A binding whose initialiser is a schema literal is a type definition, so a demand that arrives
--- while it is open is the recursion knot rather than a value demand.
+-- The words that build a type out of other types. A definition written with one of these is a type
+-- definition, so a demand that arrives while it is open is the recursion knot rather than a value
+-- demand; a definition written any other way is a value, and a value that demands itself is an
+-- initializer cycle.
+local TYPE_CONSTRUCTORS = { Ref = true, Ptr = true, Slice = true, Array = true, OneOf = true }
+
 function Eval:isTypeDefinition(slot)
     local def = slot.decl and slot.decl.def
     if not def or #def.binders ~= 1 or #def.values ~= 1 then return false end
     local value = def.values[1]
-    -- A schema literal or a type-constructor application denotes a type; anything else is a value,
-    -- and a value that demands itself is an initializer cycle rather than a recursive type.
-    return value.kind == "SchemaExpr" or value.kind == "Apply"
+    if value.kind == "SchemaExpr" then return true end
+    return value.kind == "Apply" and value.callee.kind == "Reference"
+        and TYPE_CONSTRUCTORS[value.callee.name.text] == true
 end
 
 -- Where a place expression's storage comes from: "module" for a file-scope binding, "enclosing" for
@@ -3226,15 +3232,34 @@ end
 function Eval:callableInstance(callable, args, span)
     local key = self:callableKey(callable.plan, args)
     local existing = self.instances[key]
-    if existing then return existing end
+    if existing then
+        if existing.failure then error(existing.failure, 0) end
+        return existing
+    end
     local count = 0
     for _ in pairs(self.instances) do count = count + 1 end
     if count >= (self.limits.keys or 1024) then D.resource("keys", "Residual instance budget exhausted", span) end
     return self:buildCallableInstance(key, callable, args, span)
 end
 
+-- The same shape as `buildInstance`: the depth is restored and the failure is recorded here, so a
+-- probe that swallows the diagnostic still leaves the session usable.
 function Eval:buildCallableInstance(key, callable, args, span)
     self:enterBuild(span)
+    local ok, result = pcall(self.constructCallableInstance, self, key, callable, args, span)
+    self:leaveBuild()
+    if not ok then
+        local instance = self.instances[key]
+        if instance then
+            instance.failure = result
+            instance.status = "failed"
+        end
+        error(result, 0)
+    end
+    return result
+end
+
+function Eval:constructCallableInstance(key, callable, args, span)
     local plan, def = callable.plan, callable.plan.def
     self.nextFn = self.nextFn + 1
     local instance = { key = key, def = def, plan = plan, target = "wordletfn_" .. self.nextFn,
@@ -3372,7 +3397,6 @@ function Eval:buildCallableInstance(key, callable, args, span)
     instance.runtimeResults = self:runtimeResults(instance.results)
     instance.fn = Ir.Fn(instance.target, Ir.Body, 0, S.list(inputs), S.list(instance.runtimeResults),
         S.list(params), S.list(statements))
-    self:leaveBuild()
     instance.status = "done"
     return instance
 end
@@ -4282,7 +4306,12 @@ function Eval:instanceFor(def, span, values, receiver)
     values = values or {}
     local key = self:instanceKey(def, values, receiver)
     local existing = self.instances[key]
-    if existing then return existing end
+    if existing then
+        -- A build that failed is remembered, so a later call with the same key reports the same
+        -- diagnostic rather than finding an instance that was never finished.
+        if existing.failure then error(existing.failure, 0) end
+        return existing
+    end
     local count = 0
     for _ in pairs(self.instances) do count = count + 1 end
     if count >= (self.limits.keys or 1024) then D.resource("keys", "Residual instance budget exhausted", span) end
@@ -4294,8 +4323,26 @@ function Eval:loopTarget(instance, position, storage, ty)
     instance.loopTargets[#instance.loopTargets + 1] = { position = position, storage = storage, ty = ty }
 end
 
+-- A build nests, and its depth is a budget rather than a wall: a failed build must leave the session
+-- as it found it, so the depth is restored and the half-made instance is remembered as failed
+-- whatever the attempt did. One place owning that is what lets the probes that call this through a
+-- `pcall` swallow a diagnostic without leaving the session believing it is deeper than it is.
 function Eval:buildInstance(key, def, values, span, receiver)
     self:enterBuild(span)
+    local ok, result = pcall(self.constructInstance, self, key, def, values, span, receiver)
+    self:leaveBuild()
+    if not ok then
+        local instance = self.instances[key]
+        if instance then
+            instance.failure = result
+            instance.status = "failed"
+        end
+        error(result, 0)
+    end
+    return result
+end
+
+function Eval:constructInstance(key, def, values, span, receiver)
     self.nextFn = self.nextFn + 1
     local instance = { key = key, def = def, target = "wordletfn_" .. self.nextFn,
         status = "building", args = values, inputPlan = {}, inputTypes = {} }
@@ -4493,7 +4540,6 @@ function Eval:buildInstance(key, def, values, span, receiver)
     instance.fn = Ir.Fn(instance.target, Ir.Body, receiver and 1 or 0, S.list(inputs),
         S.list(instance.runtimeResults), S.list(params), S.list(statements))
     instance.paramTypes = paramTypes
-    self:leaveBuild()
     instance.status = "done"
     return instance
 end

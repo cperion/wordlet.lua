@@ -383,7 +383,7 @@ end
 -- every definition begins with `let`, so a declaration starting with the name `use` can only be an
 -- import, and `let use = ...` keeps working.
 function Parser:useDecl()
-    local keyword = self:expectName("a module name")
+    local start = self:expectName("a module name")
     local path, last = {}, nil
     while true do
         local name = self:expectName("a module name")
@@ -392,7 +392,7 @@ function Parser:useDecl()
         if not self:at(".") then break end
         self:next()
     end
-    return A.c.UseDecl(A.name(last), table.concat(path, "."), S(keyword.span))
+    return A.c.UseDecl(A.name(last), table.concat(path, "."), S(start.span))
 end
 
 function Parser:declaration()
@@ -429,10 +429,10 @@ function Parser:declaration()
         return A.c.WordDecl(def, mergeSpan(let.span, spanOf(def) or name.span))
     end
     local binders = {}
-    local first = true
+    local firstBinder = true
     repeat
-        local binder = first and name or self:expectName("a binding name")
-        first = false
+        local binder = firstBinder and name or self:expectName("a binding name")
+        firstBinder = false
         local annotation = nil
         if self:take(":") then annotation = self:expression() end
         binders[#binders + 1] = A.c.Binder(A.name(binder), annotation,
@@ -584,10 +584,8 @@ function Parser:assignmentOperator()
 end
 
 function Parser:statementArm()
-    local statements = self:statementList("else", "end")
-    local list = asList(statements)
-    if #statements > 0 then list.span = listSpan(statements) end
-    return list
+    -- `asList` already spans the items it is given, so an arm needs no span of its own here.
+    return asList(self:statementList("else", "end"))
 end
 
 function Parser:ifStatement()
