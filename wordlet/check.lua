@@ -360,7 +360,8 @@ function M.expr(expr, locals, storages)
         local record = S.environmentOf(expr.type)
         if S.isArray(record) then
             if #expr.fields ~= record.length then
-                D.bug("ir-arity", "Make element count does not match the array length")
+                D.bug("ir-arity", "Make element count " .. #expr.fields .. " does not match the array length "
+                    .. record.length .. " of " .. S.encode(expr.type))
             end
             for _, item in ipairs(expr.fields) do
                 if M.expr(item, locals, storages) ~= record.element then

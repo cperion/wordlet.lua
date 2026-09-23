@@ -75,12 +75,23 @@ end
 local Emitter = {}
 Emitter.__index = Emitter
 local function newEmitter(layouts, signature, usedStorages, usedValues, plan)
+    -- The value ids of the function's by-value parameters: a storage initialized from one of them can
+    -- alias the parameter when the function never writes it.
+    local paramValues = {}
+    for _, param in ipairs(signature and signature.fn and signature.fn.params or {}) do
+        if param.kind == "ValueParam" and param.binding then paramValues[param.binding.id] = true end
+    end
     return setmetatable({ layouts = layouts, lines = {}, indent = 1,
         placeParams = (signature and signature.placeParams) or {},
         usedStorages = usedStorages or {},
         usedValues = usedValues or {},
+        mutatedStorages = plan and plan.mutatedStorages or nil,
+        paramValues = paramValues,
+        storageAlias = {},
         shared = plan and plan.shared or nil,
         decls = plan and plan.decls or nil,
+        inline = plan and plan.inline or nil,
+        useCount = plan and plan.useCount or nil,
         assigned = {}, nextTemp = 0 }, Emitter)
 end
 function Emitter:line(text) self.lines[#self.lines + 1] = string.rep("    ", self.indent) .. text end
@@ -93,6 +104,45 @@ function Emitter:expr(expr)
     local name = self.assigned and self.assigned[expr]
     if name then return name end
     return self:render(expr)
+end
+
+-- The compound literal a variant construction prints as. Used both for the definition statement and
+-- for a single-use definition lowered at its use.
+function Emitter:constructText(stmt)
+    local layout = self.layouts.tagLayout(stmt.type)
+    local cased = layout.cases[S.tagIndex(stmt.type, stmt.tag) + 1]
+    local text = "(" .. layout.name .. "){ .wordlet_tag = " .. cased.tag
+    if stmt.payload then
+        text = text .. ", .payload." .. cased.name .. " = " .. self:expr(stmt.payload)
+    end
+    return text .. " }"
+end
+
+-- The C expression a single-use definition lowers to.
+function Emitter:definitionText(stmt)
+    if stmt.kind == "Let" then return self:expr(stmt.expr) end
+    if stmt.kind == "ConstructVariant" then return self:constructText(stmt) end
+    if stmt.kind == "VariantMatches" then
+        -- No outer parentheses: the consumer parenthesises an operand, and an extra pair around a
+        -- comparison used as a condition fires clang's -Wparentheses-equality.
+        local tag = S.tagIndex(stmt.sum, stmt.tag)
+        return self:valueOrInline(stmt.variant.id) .. ".wordlet_tag == " .. tostring(tag)
+    end
+    if stmt.kind == "VariantPayload" then
+        local cased = self.layouts.tagLayout(stmt.sum).cases[S.tagIndex(stmt.sum, stmt.tag) + 1]
+        return "(" .. self:valueOrInline(stmt.variant.id) .. ".payload." .. cased.name .. ")"
+    end
+    D.bug("c-inline", "No inline form for " .. tostring(stmt.kind))
+end
+
+-- A value lowered at its use, or its own local when it has more than one use.
+function Emitter:valueOrInline(id)
+    local inlined = self.inline and self.inline[id]
+    if inlined then
+        if inlined.place then return self:placeC(inlined.place) end
+        return self:definitionText(inlined.stmt)
+    end
+    return self:value(id)
 end
 
 function Emitter:tempName()
@@ -154,7 +204,7 @@ function Emitter:render(expr)
         end
         D.bug("c-literal", "Unknown literal")
     elseif kind == "Ref" then
-        return self:value(expr.value.id)
+        return self:valueOrInline(expr.value.id)
     elseif kind == "Un" then
         local op = expr.op.kind
         if op == "Not" then return "(!(" .. self:expr(expr.operand) .. "))" end
@@ -333,6 +383,7 @@ function Emitter:render(expr)
         -- The address of a place: a root plus field names, with no load.
         return "&(" .. self:placeC(expr.place) .. ")"
     elseif kind == "Null" then
+        self.layouts.usesNull = true
         return "NULL"
     elseif kind == "SliceLength" then
         return "(" .. self:expr(expr.view) .. ").f_length"
@@ -344,6 +395,8 @@ function Emitter:placeC(place)
     if place.kind == "Local" then
         local module = self.layouts.modules and self.layouts.modules[place.storage]
         if module then return module.name end
+        local alias = self.storageAlias and self.storageAlias[place.storage.id]
+        if alias then return alias end
         local name = self:storage(place.storage.id)
         -- A place parameter is already a pointer; a Var is the storage itself.
         return self.placeParams[place.storage.id] and ("(*" .. name .. ")") or name
@@ -378,22 +431,17 @@ function Emitter:declare(ty, name, initial)
     if initial then
         self:line(cType .. " " .. name .. " = " .. initial .. ";")
     else
-        -- An aggregate without an initialiser still needs valid storage, because a branch that
-        -- assigns it is not guaranteed to run. A scalar takes a zero initialiser; an aggregate
-        -- is zeroed with an explicit memset rather than `= {0}`, which GCC's
-        -- -Wmaybe-uninitialized misreads when a union-bearing aggregate is later assigned from
-        -- a temporary.
-        if S.isInteger(ty) or ty == S.Bool then
-            self:line(cType .. " " .. name .. " = " .. (S.isInteger(ty) and "0" or "false") .. ";")
-        else
-            self:line(cType .. " " .. name .. ";")
-            self:line("memset(&" .. name .. ", 0, sizeof " .. name .. ");")
-        end
+        -- An uninitialised local is a join slot, and the checker proved every reachable continuation
+        -- assigns it before the read. Zeroing it would be storage the program does not need, so the
+        -- declaration stands alone.
+        self:line(cType .. " " .. name .. ";")
     end
 end
 
 function Emitter:statements(list)
-    for index, stmt in ipairs(list) do
+    local index = 1
+    while index <= #list do
+        local stmt = list[index]
         -- Shared expressions are declared at the innermost list that contains all their uses,
         -- immediately before the first statement that needs them.
         local pending = self.decls and self.decls[list] and self.decls[list][index]
@@ -401,19 +449,28 @@ function Emitter:statements(list)
             for _, node in ipairs(pending) do self:declareShared(node) end
         end
         local kind = stmt.kind
+        local advance = 1
         if kind == "Let" then
-            self:declare(stmt.type, self:value(stmt.value.id), self:expr(stmt.expr))
+            if not (self.inline and self.inline[stmt.value.id]) then
+                self:declare(stmt.type, self:value(stmt.value.id), self:expr(stmt.expr))
+            end
         elseif kind == "Var" then
-            -- A loop-carried Var is declared before its Loop, but a specialization's base case may
-            -- never read or store it. An initializer is a pure Expr, so dropping an unreferenced
-            -- Var is safe and keeps the emitted C free of unused locals.
-            if self.usedStorages[stmt.storage.id] then
+            local initial = stmt.initial
+            if initial and initial.kind == "Ref" and self.paramValues[initial.value.id]
+                and not (self.mutatedStorages and self.mutatedStorages[stmt.storage.id]) then
+                -- A read-only by-value parameter already is the C local the place would name, so the
+                -- place aliases it instead of paying for a copy of the whole struct.
+                self.storageAlias[stmt.storage.id] = self:value(initial.value.id)
+            elseif self.usedStorages[stmt.storage.id] then
+                -- A loop-carried Var is declared before its Loop, but a specialization's base case
+                -- may never read or store it. An initializer is a pure Expr, so dropping an
+                -- unreferenced Var is safe and keeps the emitted C free of unused locals.
                 self:declare(stmt.type, self:storage(stmt.storage.id), stmt.initial and self:expr(stmt.initial))
             end
         elseif kind == "Read" then
             -- A read is pure, so one whose result no `Ref` ever names is dead, exactly as an
-            -- unreferenced `Var` is. Dropping it keeps the emitted C free of unused locals.
-            if self.usedValues[stmt.value.id] then
+            -- unreferenced `Var` is. A read lowered at its single use needs no local either.
+            if self.usedValues[stmt.value.id] and not (self.inline and self.inline[stmt.value.id]) then
                 self:declare(stmt.type, self:value(stmt.value.id), self:placeC(stmt.place))
             end
         elseif kind == "Store" then
@@ -441,20 +498,25 @@ function Emitter:statements(list)
         elseif kind == "Next" then
             self:line("continue;")
         elseif kind == "Trap" then
+            self.layouts.usesAbort = true
             self:line("if (" .. self:expr(stmt.failure) .. ") abort();")
         elseif kind == "ConstructVariant" then
-            self:construct(stmt)
+            if not (self.inline and self.inline[stmt.value.id]) then self:construct(stmt) end
         elseif kind == "VariantMatches" then
-            local tag = S.tagIndex(stmt.sum, stmt.tag)
-            self:declare(S.Bool, self:value(stmt.value.id),
-                "(" .. self:value(stmt.variant.id) .. ".wordlet_tag == " .. tag .. ")")
+            if not (self.inline and self.inline[stmt.value.id]) then
+                local tag = S.tagIndex(stmt.sum, stmt.tag)
+                self:declare(S.Bool, self:value(stmt.value.id),
+                    "(" .. self:valueOrInline(stmt.variant.id) .. ".wordlet_tag == " .. tag .. ")")
+            end
         elseif kind == "VariantPayload" then
-            local case = S.caseOf(stmt.sum, stmt.tag)
-            local cased = self.layouts.tagLayout(stmt.sum).cases[S.tagIndex(stmt.sum, stmt.tag) + 1]
-            self:declare(case, self:value(stmt.value.id),
-                "(" .. self:value(stmt.variant.id) .. ".payload." .. cased.name .. ")")
+            if not (self.inline and self.inline[stmt.value.id]) then
+                local case = S.caseOf(stmt.sum, stmt.tag)
+                local cased = self.layouts.tagLayout(stmt.sum).cases[S.tagIndex(stmt.sum, stmt.tag) + 1]
+                self:declare(case, self:value(stmt.value.id),
+                    "(" .. self:valueOrInline(stmt.variant.id) .. ".payload." .. cased.name .. ")")
+            end
         elseif kind == "Call" then
-            self:call(stmt)
+            advance = self:call(stmt, list, index)
         elseif kind == "Indirect" then
             self:indirect(stmt)
         elseif kind == "View" then
@@ -464,6 +526,7 @@ function Emitter:statements(list)
         else
             D.todo("c-stmt", "No C lowering for statement " .. tostring(kind))
         end
+        index = index + advance
     end
 end
 
@@ -471,7 +534,7 @@ end
 -- dense tag range lowers to one jump table instead of a chain of compares. Each case body is braced
 -- so a declaration right after the label is valid C and a case cannot fall into the next.
 function Emitter:switch(stmt)
-    self:line("switch (" .. self:value(stmt.variant.id) .. ".wordlet_tag) {")
+    self:line("switch (" .. self:valueOrInline(stmt.variant.id) .. ".wordlet_tag) {")
     for _, case in ipairs(stmt.cases) do
         if case.fallback then
             self:line("default: {")
@@ -489,16 +552,10 @@ end
 
 -- A variant is a compound literal with the tag and the one payload member set by name.
 function Emitter:construct(stmt)
-    local layout = self.layouts.tagLayout(stmt.type)
-    local cased = layout.cases[S.tagIndex(stmt.type, stmt.tag) + 1]
-    local text = "(" .. layout.name .. "){ .wordlet_tag = " .. cased.tag
-    if stmt.payload then
-        text = text .. ", .payload." .. cased.name .. " = " .. self:expr(stmt.payload)
-    end
-    self:declare(stmt.type, self:value(stmt.value.id), text .. " }")
+    self:declare(stmt.type, self:value(stmt.value.id), self:constructText(stmt))
 end
 
-function Emitter:call(stmt)
+function Emitter:call(stmt, list, index)
     local signature = self.layouts.signatures[stmt.target]
     if not signature then D.bug("c-target", "Call to unknown function " .. stmt.target) end
     local args = {}
@@ -514,24 +571,61 @@ function Emitter:call(stmt)
     local call = signature.name .. "(" .. table.concat(args, ", ") .. ")"
     -- Call results are Ir.Value ids; their types are the target's declared results, positionally.
     local types = signature.fn.results
-    if #stmt.results == 0 then
-        self:line(call .. ";")
-    elseif #stmt.results == 1 then
-        self:declare(types[1], self:value(stmt.results[1].id), call)
-        self:line("(void)" .. self:value(stmt.results[1].id) .. ";")
-    else
-        local layout = self.layouts.resultLayout(types)
-        if not layout.name then D.bug("c-results", "Multiple results need a tuple layout") end
-        -- The call produces one aggregate temporary; each logical result becomes its own value.
-        local packed = "t" .. stmt.results[1].id
-        self:line(layout.name .. " " .. packed .. " = " .. call .. ";")
-        for index = 1, #stmt.results do
-            self:declare(types[index], self:value(stmt.results[index].id), packed .. ".f_" .. index)
-        end
-        -- A discarded call still must not leave an unused local behind under -Werror.
-        self:line("(void)" .. packed .. ";")
-        for index = 1, #stmt.results do self:line("(void)" .. self:value(stmt.results[index].id) .. ";") end
+    local results = stmt.results
+    local function referenced(expr, id)
+        return expr and expr.kind == "Ref" and expr.value.id == id
     end
+    -- A single-result call whose only use is the very next Store or Return is emitted at that use,
+    -- so the result never lands in a temporary of its own.
+    if #results == 1 and self.useCount and self.useCount[results[1].id] == 1 and list then
+        local nextStatement = list[index + 1]
+        local fuse = nextStatement ~= nil
+            and ((nextStatement.kind == "Store" and referenced(nextStatement.value, results[1].id))
+                or (nextStatement.kind == "Return" and #nextStatement.values == 1
+                    and referenced(nextStatement.values[1], results[1].id)))
+        if fuse then
+            local pending = self.decls and self.decls[list] and self.decls[list][index + 1]
+            if pending then for _, node in ipairs(pending) do self:declareShared(node) end end
+            if nextStatement.kind == "Store" then
+                self:line(self:placeC(nextStatement.place) .. " = " .. call .. ";")
+            else
+                self:line("return " .. call .. ";")
+            end
+            return 2
+        end
+    end
+    if #results == 0 then
+        self:line(call .. ";")
+    elseif #results == 1 then
+        -- A discarded result needs no local: the call statement discards the value, and hiding it
+        -- behind an unused local would only need a `(void)` to stay warning-free.
+        if self.usedValues and self.usedValues[results[1].id] then
+            self:declare(types[1], self:value(results[1].id), call)
+        else
+            self:line(call .. ";")
+        end
+    else
+        local any = false
+        for resultIndex = 1, #results do
+            if self.usedValues and self.usedValues[results[resultIndex].id] then any = true end
+        end
+        if not any then
+            self:line(call .. ";")
+        else
+            local layout = self.layouts.resultLayout(types)
+            if not layout.name then D.bug("c-results", "Multiple results need a tuple layout") end
+            -- The call produces one aggregate temporary; each used result becomes its own value.
+            local packed = "t" .. results[1].id
+            self:line(layout.name .. " " .. packed .. " = " .. call .. ";")
+            for resultIndex = 1, #results do
+                if self.usedValues and self.usedValues[results[resultIndex].id] then
+                    self:declare(types[resultIndex], self:value(results[resultIndex].id),
+                        packed .. ".f_" .. resultIndex)
+                end
+            end
+        end
+    end
+    return 1
 end
 
 -- The adapter that lets a known callable be invoked through a view.
@@ -629,6 +723,7 @@ function Emitter:makeView(stmt)
     local adapter = self.layouts:viewAdapter(stmt.entry, bound)
     local value = self:value(stmt.value.id)
     if #args == 0 then
+        self.layouts.usesNull = true
         self:line(layout.name .. " " .. value .. " = { .invoke = " .. adapter.fn
             .. ", .environment = NULL };")
         return
@@ -719,8 +814,10 @@ function M.typeDeclarations(layouts)
             elseif not any then
                 body[#body + 1] = "    unsigned char wordlet_pad;"
             end
-            lines[#lines + 1] = "typedef struct " .. layout.name .. " {\n"
-                .. table.concat(body, "\n") .. "\n} " .. layout.name .. ";"
+            -- The forward pass already typedef'd the tag, so the body is a plain definition. Repeating
+            -- the typedef here would warn under a C99 compiler even though C11 permits it.
+            lines[#lines + 1] = "struct " .. layout.name .. " {\n"
+                .. table.concat(body, "\n") .. "\n};"
         end)
         -- Needs are recorded by name and resolved when emitting, because discovery order does not
         -- decide definition order.
@@ -741,18 +838,17 @@ function M.typeDeclarations(layouts)
         -- returned by value while a struct that contains one can. The element is embedded, so its
         -- layout is a completeness need.
         define(layout, { layouts:cType(layout.element) }, function()
-            lines[#lines + 1] = "typedef struct " .. layout.name .. " {\n    "
+            lines[#lines + 1] = "struct " .. layout.name .. " {\n    "
                 .. layouts:cType(layout.element) .. " f_data[" .. tostring(layout.length)
-                .. "];\n} " .. layout.name .. ";"
+                .. "];\n};"
         end)
     end
     for _, layout in ipairs(layouts.sliceOrder) do
         -- A slice is a pointer and a length. The element is named but not embedded, so the element
         -- type need not be complete yet, which is what keeps a recursive slice a finite layout.
         define(layout, {}, function()
-            lines[#lines + 1] = "typedef struct " .. layout.name .. " {\n    "
-                .. layouts:cType(layout.element) .. " *f_data;\n    uint32_t f_length;\n} "
-                .. layout.name .. ";"
+            lines[#lines + 1] = "struct " .. layout.name .. " {\n    "
+                .. layouts:cType(layout.element) .. " *f_data;\n    uint32_t f_length;\n};"
         end)
     end
     for _, layout in ipairs(layouts.sumOrder) do
@@ -766,9 +862,9 @@ function M.typeDeclarations(layouts)
     local function defineView(layout)
         local entry
         entry = define(layout, {}, function()
-            lines[#lines + 1] = "typedef struct " .. layout.name .. " {\n    "
+            lines[#lines + 1] = "struct " .. layout.name .. " {\n    "
                 .. layout.returns .. " (*invoke)" .. layout.invoke .. ";"
-                .. "\n    const void *environment;\n} " .. layout.name .. ";"
+                .. "\n    const void *environment;\n};"
         end)
         -- The recorded types are named so their layouts exist. A function-pointer declaration is
         -- allowed to mention an incomplete parameter type, so a parameter is not a completeness
@@ -797,8 +893,8 @@ function M.typeDeclarations(layouts)
                         .. (field.pointer and " *" or " ") .. field.name .. ";"
                 end
             end
-            lines[#lines + 1] = "typedef struct " .. adapter.name .. " {\n"
-                .. table.concat(fields, "\n") .. "\n} " .. adapter.name .. ";"
+            lines[#lines + 1] = "struct " .. adapter.name .. " {\n"
+                .. table.concat(fields, "\n") .. "\n};"
         end)
         for _, field in ipairs(adapter.bound) do
             if not field.pointer and field.type ~= S.Unit then
@@ -850,6 +946,42 @@ function M.typeDeclarations(layouts)
     return lines
 end
 
+-- A function that calls itself directly cannot be `always_inline`: GCC refuses to inline a
+-- non-tail self-recursion, which fails the whole translation unit under `-Werror`. A self-tail call
+-- becomes a `Loop`/`Next` back edge, so a remaining direct `Call` to the function's own target is a
+-- non-tail recursive call. Such a function keeps internal `static` linkage without forced inlining.
+local recursiveCache = setmetatable({}, { __mode = "k" })
+local function selfRecursive(fn)
+    if not fn or not fn.body then return false end
+    local cached = recursiveCache[fn]
+    if cached ~= nil then return cached end
+    local found = false
+    local function walk(list)
+        for _, stmt in ipairs(list) do
+            if stmt.kind == "Call" and stmt.target == fn.id then
+                found = true
+                return
+            end
+            if stmt.kind == "If" then
+                walk(stmt.yes)
+                if found then return end
+                walk(stmt.no)
+            elseif stmt.kind == "Loop" then
+                walk(stmt.body)
+            elseif stmt.kind == "Switch" then
+                for _, case in ipairs(stmt.cases) do
+                    walk(case.body)
+                    if found then return end
+                end
+            end
+            if found then return end
+        end
+    end
+    walk(fn.body)
+    recursiveCache[fn] = found
+    return found
+end
+
 function M.signatureText(layouts, signature)
     local parameters = {}
     if #signature.params == 0 then parameters[1] = "void" end
@@ -861,12 +993,17 @@ function M.signatureText(layouts, signature)
     if signature.results.kind == "scalar" then returns = layouts:cType(signature.results.type) end
     if signature.results.kind == "tuple" then returns = signature.results.name end
     -- A private residual function has internal linkage. `WORDLET_PRIVATE` asks GCC and clang to inline
-    -- it and falls back to plain `static` on a C11 compiler without the attribute; an export keeps
-    -- external linkage for the host.
+    -- it and falls back to plain `static` on a compiler without the attribute; a non-tail self-recursive
+    -- function uses plain `static` too, because GCC refuses to force-inline a recursive function. An
+    -- export keeps external linkage for the host.
     local linkage = ""
     -- A foreign prototype is a plain declaration: external linkage, and no body to emit.
     if not signature.exported and not signature.foreign then
-        linkage = layouts.privateInline == false and "static " or "WORDLET_PRIVATE "
+        if layouts.privateInline == false or selfRecursive(signature.fn) then
+            linkage = "static "
+        else
+            linkage = "WORDLET_PRIVATE "
+        end
     end
     return linkage .. returns .. " " .. signature.name .. "(" .. table.concat(parameters, ", ") .. ")"
 end
@@ -1055,11 +1192,215 @@ local function usedValues(fn)
     return used
 end
 
+-- The storages a function writes through, borrows, or takes the address of. A storage none of those
+-- touches is read-only, so a copy of a by-value parameter that only exists to give it a place can
+-- alias the parameter itself.
+local function mutatedStorages(fn)
+    local mutated = {}
+    local function root(place)
+        while place do
+            if place.kind == "Local" then return place.storage.id end
+            if place.kind == "Project" or place.kind == "Deref" or place.kind == "Index" then
+                place = place.base
+            else
+                return nil   -- a slice/pointer element names a view value, not a local root
+            end
+        end
+        return nil
+    end
+    local function mark(place)
+        local id = root(place)
+        if id then mutated[id] = true end
+    end
+    local function walkExpr(value)
+        if not value then return end
+        if value.kind == "Addr" then mark(value.place) end
+        local children = {}
+        collectExprs(value, children)
+        for _, child in ipairs(children) do walkExpr(child) end
+    end
+    local function walkPlace(place)
+        if not place then return end
+        if place.kind == "Index" then walkExpr(place.index) walkPlace(place.base)
+        elseif place.kind == "SliceIndex" or place.kind == "PtrIndex" then
+            walkExpr(place.view) walkExpr(place.index)
+        elseif place.kind == "Project" or place.kind == "Deref" then walkPlace(place.base) end
+    end
+    local function walkArgs(list)
+        for _, arg in ipairs(list) do
+            if arg.kind == "ValueArg" then walkExpr(arg.value)
+            elseif arg.kind == "BorrowArg" then mark(arg.place) walkPlace(arg.place) end
+        end
+    end
+    local function statements(list)
+        for _, stmt in ipairs(list) do
+            local kind = stmt.kind
+            if kind == "Let" then walkExpr(stmt.expr)
+            elseif kind == "Var" then walkExpr(stmt.initial)
+            elseif kind == "Read" then walkPlace(stmt.place)
+            elseif kind == "Store" then mark(stmt.place) walkPlace(stmt.place) walkExpr(stmt.value)
+            elseif kind == "BundleDef" or kind == "View" then walkArgs(stmt.slots)
+            elseif kind == "Call" then walkArgs(stmt.arguments)
+            elseif kind == "Indirect" then walkExpr(stmt.callable) walkArgs(stmt.arguments)
+            elseif kind == "If" then walkExpr(stmt.test) statements(stmt.yes) statements(stmt.no)
+            elseif kind == "Loop" then statements(stmt.body)
+            elseif kind == "Trap" then walkExpr(stmt.failure)
+            elseif kind == "ConstructVariant" then walkExpr(stmt.payload)
+            elseif kind == "Switch" then for _, case in ipairs(stmt.cases) do statements(case.body) end
+            elseif kind == "Return" then for _, value in ipairs(stmt.values) do walkExpr(value) end
+            end
+        end
+    end
+    statements(fn.body)
+    return mutated
+end
+
+-- A definition with one use is lowered where it is used instead of through a local. A pure
+-- definition may move to its use freely; a `Read` is a snapshot of storage, so it may only move to a
+-- use that no store or call can reach in between. This is how the evaluator's explicit definitions
+-- become expressions at emission, not a general optimizer.
+local function analyzeInlining(fn)
+    local useCount = {}
+    local function bump(id) useCount[id] = (useCount[id] or 0) + 1 end
+    local function countExpr(value)
+        if not value then return end
+        if value.kind == "Ref" then bump(value.value.id) end
+        local children = {}
+        collectExprs(value, children)
+        for _, child in ipairs(children) do countExpr(child) end
+    end
+    local function countPlace(place)
+        if not place then return end
+        local exprs = {}
+        collectPlaceExprs(place, exprs)
+        for _, expr in ipairs(exprs) do countExpr(expr) end
+    end
+    local function countArgs(list)
+        for _, arg in ipairs(list) do
+            if arg.kind == "ValueArg" then countExpr(arg.value)
+            elseif arg.kind == "BorrowArg" then countPlace(arg.place) end
+        end
+    end
+    local defs = {}
+    local function walk(list)
+        for _, stmt in ipairs(list) do
+            local kind = stmt.kind
+            if kind == "Let" then defs[stmt.value.id] = stmt countExpr(stmt.expr)
+            elseif kind == "Var" then countExpr(stmt.initial)
+            elseif kind == "Read" then defs[stmt.value.id] = stmt countPlace(stmt.place)
+            elseif kind == "Store" then countPlace(stmt.place) countExpr(stmt.value)
+            elseif kind == "BundleDef" or kind == "View" then countArgs(stmt.slots)
+            elseif kind == "Call" then countArgs(stmt.arguments)
+            elseif kind == "Indirect" then countExpr(stmt.callable) countArgs(stmt.arguments)
+            elseif kind == "If" then countExpr(stmt.test) walk(stmt.yes) walk(stmt.no)
+            elseif kind == "Loop" then walk(stmt.body)
+            elseif kind == "Trap" then countExpr(stmt.failure)
+            elseif kind == "ConstructVariant" then
+                defs[stmt.value.id] = stmt
+                countExpr(stmt.payload)
+            elseif kind == "VariantMatches" or kind == "VariantPayload" then
+                defs[stmt.value.id] = stmt
+                bump(stmt.variant.id)
+            elseif kind == "Switch" then
+                bump(stmt.variant.id)
+                for _, case in ipairs(stmt.cases) do walk(case.body) end
+            elseif kind == "Return" then
+                for _, value in ipairs(stmt.values) do countExpr(value) end
+            end
+        end
+    end
+    walk(fn.body)
+
+    -- A pure definition with one use moves to that use wherever it is.
+    local inline = {}
+    for id, stmt in pairs(defs) do
+        if useCount[id] == 1 and (stmt.kind == "Let" or stmt.kind == "ConstructVariant"
+            or stmt.kind == "VariantMatches" or stmt.kind == "VariantPayload") then
+            inline[id] = { stmt = stmt }
+        end
+    end
+
+    -- The value IDs one statement reads. Used to find the single use of a pending `Read`.
+    local function usedIds(stmt, out)
+        local function markExpr(value)
+            if not value then return end
+            if value.kind == "Ref" then out[value.value.id] = true end
+            local children = {}
+            collectExprs(value, children)
+            for _, child in ipairs(children) do markExpr(child) end
+        end
+        local function markPlace(place)
+            if not place then return end
+            local exprs = {}
+            collectPlaceExprs(place, exprs)
+            for _, expr in ipairs(exprs) do markExpr(expr) end
+        end
+        local function markArgs(list)
+            for _, arg in ipairs(list) do
+                if arg.kind == "ValueArg" then markExpr(arg.value)
+                elseif arg.kind == "BorrowArg" then markPlace(arg.place) end
+            end
+        end
+        local kind = stmt.kind
+        if kind == "Let" then markExpr(stmt.expr)
+        elseif kind == "Var" then markExpr(stmt.initial)
+        elseif kind == "Read" then markPlace(stmt.place)
+        elseif kind == "Store" then markPlace(stmt.place) markExpr(stmt.value)
+        elseif kind == "BundleDef" or kind == "View" then markArgs(stmt.slots)
+        elseif kind == "Call" then markArgs(stmt.arguments)
+        elseif kind == "Indirect" then markExpr(stmt.callable) markArgs(stmt.arguments)
+        elseif kind == "Trap" then markExpr(stmt.failure)
+        elseif kind == "ConstructVariant" then markExpr(stmt.payload)
+        elseif kind == "VariantMatches" or kind == "VariantPayload" then out[stmt.variant.id] = true
+        elseif kind == "Switch" then out[stmt.variant.id] = true
+        elseif kind == "Return" then for _, value in ipairs(stmt.values) do markExpr(value) end
+        end
+    end
+    local function effectful(stmt)
+        local kind = stmt.kind
+        return kind == "Store" or kind == "Call" or kind == "Indirect"
+            or kind == "If" or kind == "Loop" or kind == "Switch"
+    end
+    -- A `Read` may move to its single use only within its own list and only past pure statements.
+    local function scan(list)
+        local pending = {}
+        for _, stmt in ipairs(list) do
+            local used = {}
+            usedIds(stmt, used)
+            for id in pairs(used) do
+                if pending[id] and useCount[id] == 1 then
+                    inline[id] = { place = pending[id] }
+                    pending[id] = nil
+                end
+            end
+            if stmt.kind == "Read" then pending[stmt.value.id] = stmt.place end
+            if effectful(stmt) then
+                for id in pairs(pending) do pending[id] = nil end
+            end
+            if stmt.kind == "If" then scan(stmt.yes) scan(stmt.no)
+            elseif stmt.kind == "Loop" then scan(stmt.body)
+            elseif stmt.kind == "Switch" then
+                for _, case in ipairs(stmt.cases) do scan(case.body) end
+            end
+        end
+    end
+    scan(fn.body)
+    return { inline = inline, useCount = useCount }
+end
+
 -- The IR is a DAG: `Builder:intern` unifies structurally equal expressions, so one node can be
 -- referenced many times, and `Emitter:render` is a tree walk that would print every reference. This
 -- finds the nodes used more than once and the innermost statement list containing all of their
 -- uses, so the emitter can bind each to one local and print names instead.
-local function analyzeSharing(fn)
+local function analyzeSharing(fn, usedStorages, usedValues)
+    -- A `Var` or `Read` the emitter drops contributes no emitted expression, so it must not make a
+    -- construction expression look shared. Counting it would name a copy of an expression that the
+    -- dead declaration never prints.
+    local function dropped(stmt)
+        if stmt.kind == "Var" then return not usedStorages[stmt.storage.id] end
+        if stmt.kind == "Read" then return not usedValues[stmt.value.id] end
+        return false
+    end
     local seen, nodes, edges, roots = {}, {}, {}, {}
     local paths, pathList, chains = {}, {}, {}
 
@@ -1120,12 +1461,14 @@ local function analyzeSharing(fn)
         for index, stmt in ipairs(list) do
             local path = { list = list, index = index, parent = stack[#stack] }
             stack[#stack + 1] = path
-            local exprs = {}
-            statementExprs(stmt, exprs)
-            for _, expr in ipairs(exprs) do
-                if expr then
-                    collect(expr)
-                    roots[#roots + 1] = { node = expr, path = path }
+            if not dropped(stmt) then
+                local exprs = {}
+                statementExprs(stmt, exprs)
+                for _, expr in ipairs(exprs) do
+                    if expr then
+                        collect(expr)
+                        roots[#roots + 1] = { node = expr, path = path }
+                    end
                 end
             end
             if stmt.kind == "If" then walkList(stmt.yes); walkList(stmt.no)
@@ -1215,8 +1558,14 @@ function M.bodies(layouts)
     local lines = {}
     for _, instance in ipairs(layouts.order) do
         local signature = layouts.signatures[instance.target]
-        local emitter = newEmitter(layouts, signature, usedStorages(instance.fn),
-            usedValues(instance.fn), analyzeSharing(instance.fn))
+        local storages = usedStorages(instance.fn)
+        local values = usedValues(instance.fn)
+        local sharing = analyzeSharing(instance.fn, storages, values)
+        local inlining = analyzeInlining(instance.fn)
+        local emitter = newEmitter(layouts, signature, storages, values,
+            { shared = sharing.shared, decls = sharing.decls,
+                inline = inlining.inline, useCount = inlining.useCount,
+                mutatedStorages = mutatedStorages(instance.fn) })
         emitter:raw(M.signatureText(layouts, signature) .. " {")
         emitter:statements(instance.fn.body)
         -- A residual base case keeps the full ABI, so a parameter it never reads still appears in
@@ -1241,7 +1590,20 @@ function M.bodies(layouts)
     return lines
 end
 
-local INCLUDES = { "#include <stdint.h>", "#include <stdbool.h>", "#include <stdlib.h>", "#include <string.h>" }
+-- Only the headers the emitted program actually uses. The bodies and declarations are built first,
+-- which is what sets these flags, so the list is decided once every type and helper is known.
+local function includes(layouts)
+    local lines = { "#include <stdint.h>" }
+    if layouts.usesBool then lines[#lines + 1] = "#include <stdbool.h>" end
+    if layouts.usesNull then lines[#lines + 1] = "#include <stddef.h>" end
+    if layouts.usesAbort then lines[#lines + 1] = "#include <stdlib.h>" end
+    if layouts.usesSigned or layouts.usesWide or layouts.usesi64 or layouts.usesu64
+        or layouts.usesdiv or layouts.usesrem or layouts.usesshr or layouts.usespow
+        or layouts.usesstreq then
+        lines[#lines + 1] = "#include <string.h>"
+    end
+    return lines
+end
 
 
 -- A 64-bit value is a C integer of its own width, but the signed operations still go through helpers
@@ -1363,8 +1725,6 @@ function M.privateLinkage(layouts)
 end
 
 -- A `cdef` view: every type declaration and the exported prototypes, with no bodies and no private
--- symbols. A host feeds this to `ffi.cdef` and then `ffi.load`s the shared object it builds.
--- A `cdef` view: every type declaration and the exported prototypes, with no bodies and no private
 -- symbols. A host feeds this to `ffi.cdef` and then `ffi.load`s the shared object it builds. Because
 -- `ffi.cdef` is process-global, an optional namespace prefixes every generated type name so several
 -- artifacts can be loaded side by side; the C names in the object are unaffected, since C struct
@@ -1404,7 +1764,7 @@ function M.unit(layouts)
     local adapters = M.adapterBodies(layouts)
     local declarations = M.typeDeclarations(layouts)
     local lines = {}
-    for _, line in ipairs(INCLUDES) do lines[#lines + 1] = line end
+    for _, line in ipairs(includes(layouts)) do lines[#lines + 1] = line end
     if layouts.usesFloatSpecials then lines[#lines + 1] = "#include <math.h>" end
     for _, line in ipairs(M.privateLinkage(layouts)) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""
@@ -1442,7 +1802,7 @@ function M.source(layouts, headerName)
     local declarations = M.typeDeclarations(layouts)
     local lines = {}
     if headerName then lines[#lines + 1] = '#include "' .. headerName .. '"' end
-    for _, line in ipairs(INCLUDES) do lines[#lines + 1] = line end
+    for _, line in ipairs(includes(layouts)) do lines[#lines + 1] = line end
     if layouts.usesFloatSpecials then lines[#lines + 1] = "#include <math.h>" end
     for _, line in ipairs(M.privateLinkage(layouts)) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""

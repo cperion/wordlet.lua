@@ -266,7 +266,10 @@ function M.close(compilation)
             layouts.usesSigned = true
             return "int32_t"
         end
-        if ty == S.Bool then return "bool" end
+        if ty == S.Bool then
+            layouts.usesBool = true
+            return "bool"
+        end
         if ty == S.Unit then return "void" end
         if S.isView(ty) then return viewLayout(ty).name end
         if S.isOwned(ty) and S.environmentOf(ty) ~= S.Unit then return layouts:cType(ty.environment) end
