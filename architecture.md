@@ -307,7 +307,9 @@ in section 5.4. Signatures constrain every return, not merely the first branch v
 
 ### 6.3 Tail self-calls
 
-Syntactic tail position identifies candidates. A rewrite additionally requires the same instance
+Syntactic tail position identifies candidates. A saturated keyed self-call (`f { k = v, ... }`) is a
+candidate exactly as an ordered call is; a partial keyed supply only returns a specialized word, so
+it is not a call and not a tail position. A rewrite additionally requires the same instance
 key, matching result/interface projection and safe storage lifetimes. It must not invalidate a
 borrowed local receiver or callable environment.
 

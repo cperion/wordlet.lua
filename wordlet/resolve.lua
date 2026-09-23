@@ -82,31 +82,47 @@ end
 -- Syntactic test for a tail self-call. In this language `return` is explicit, so every ReturnStmt
 -- value is a tail position, and an expression body's root is one too. Nested words are separate
 -- functions and are not entered. A false positive only costs the loop-capable parameter layout.
-local function tailValue(node, name)
+local function tailValue(node, name, keyed)
     if node == nil then return false end
     local kind = node.kind
     if kind == "Apply" then
         return node.callee.kind == "Reference" and node.callee.name.text == name
+    elseif kind == "RecordSupply" then
+        -- A keyed self-call that supplies every key is the same back edge as `f(...)`. A partial
+        -- supply only returns a specialized word, so it is not a call and not a tail position.
+        if keyed == nil or node.schema.kind ~= "Reference" or node.schema.name.text ~= name then
+            return false
+        end
+        local supplied, fields = {}, 0
+        for _, field in ipairs(node.fields) do
+            if not supplied[field.name.text] then supplied[field.name.text] = true; fields = fields + 1 end
+        end
+        local wanted = 0
+        for key in pairs(keyed) do
+            if not supplied[key] then return false end
+            wanted = wanted + 1
+        end
+        return fields == wanted
     elseif kind == "Condition" then
-        return tailValue(node.yes, name) or tailValue(node.no, name)
+        return tailValue(node.yes, name, keyed) or tailValue(node.no, name, keyed)
     end
     return false
 end
 
-local function hasTailCall(node, name)
+local function hasTailCall(node, name, keyed)
     if node == nil then return false end
     local kind = node.kind
     if kind == "ReturnStmt" then
-        for _, value in ipairs(node.values) do if tailValue(value, name) then return true end end
+        for _, value in ipairs(node.values) do if tailValue(value, name, keyed) then return true end end
         return false
     elseif kind == "Expression" then
-        return tailValue(node.value, name)
+        return tailValue(node.value, name, keyed)
     elseif kind == "Block" then
-        for _, stmt in ipairs(node.statements) do if hasTailCall(stmt, name) then return true end end
+        for _, stmt in ipairs(node.statements) do if hasTailCall(stmt, name, keyed) then return true end end
         return false
     elseif kind == "IfStmt" then
         for _, arm in ipairs({ node.yes, node.no }) do
-            for _, stmt in ipairs(arm) do if hasTailCall(stmt, name) then return true end end
+            for _, stmt in ipairs(arm) do if hasTailCall(stmt, name, keyed) then return true end end
         end
         return false
     end
@@ -126,8 +142,9 @@ function M.captures(node)
 end
 
 -- Whether a definition body calls `name` in tail position, which is what a self-tail loop needs.
-function M.tailCalls(body, name)
-    return hasTailCall(body, name)
+-- `keyed` is the word's own keyed requirement set, or nil for an ordered word.
+function M.tailCalls(body, name, keyed)
+    return hasTailCall(body, name, keyed)
 end
 
 return M

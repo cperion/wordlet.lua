@@ -405,6 +405,21 @@ check(loopIR:find("Loop", 1, true) ~= nil and loopIR:find("Next", 1, true) ~= ni
     "the body carries a Loop with a back edge")
 check(loopIR:find("Call", 1, true) == nil, "the tail call emits no call at all")
 
+-- A saturated keyed self-call is a tail call too, so it reuses the instance and emits a Loop.
+local keyedLoop = Eval.session()
+keyedLoop:compile(Parse.source("let sum { n: U32, acc: U32 } : U32 = if n == 0 then acc else sum { n = n - 1, acc = acc + n }\n"
+    .. "let run(n: U32, start: U32) : U32 = sum { n = n, acc = start }\n"
+    .. "return { functions = { run } }", "kl.let"))
+local keyedSum = nil
+for _, instance in ipairs(keyedLoop.order) do
+    if instance.def and instance.def.name == "sum" then keyedSum = instance.fn end
+end
+check(keyedSum ~= nil, "a keyed word has an instance")
+local keyedIR = A.dump(keyedSum)
+check(keyedIR:find("Loop", 1, true) ~= nil and keyedIR:find("Next", 1, true) ~= nil,
+    "a keyed tail self-call carries a Loop with a back edge")
+check(keyedIR:find("Call", 1, true) == nil, "the keyed tail call emits no call")
+
 local recSession = Eval.session()
 recSession:compile(Parse.source("let f(a: U32) : U32 = if a == 0 then 1 else a * f(a - 1)\n"
     .. "return { functions = { f } }", "r.let"))

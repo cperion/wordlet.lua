@@ -502,7 +502,13 @@ function Eval:define(node, lexical, fields, label)
     self.nextDef = self.nextDef + 1
     local name = label or (node.name and node.name.text) or ("lambda#" .. self.nextDef)
     local keyed = node.keyed
-    if keyed ~= nil and #keyed == 0 then keyed = nil end
+    local keyedSet = nil
+    if keyed ~= nil and #keyed > 0 then
+        keyedSet = {}
+        for _, param in ipairs(keyed) do keyedSet[param.name.text] = true end
+    else
+        keyed = nil
+    end
     return {
         id = self.nextDef, name = name,
         node = node, span = (node.name and node.name.span) or node.span,
@@ -511,7 +517,7 @@ function Eval:define(node, lexical, fields, label)
         params = keyed or node.params, keyed = keyed, statics = {},
         result = node.result, body = node.body,
         lexical = lexical, fields = fields,
-        tailSelf = node.body ~= nil and Resolve.tailCalls(node.body, name),
+        tailSelf = node.body ~= nil and Resolve.tailCalls(node.body, name, keyedSet),
     }
 end
 
@@ -1985,7 +1991,7 @@ function Eval:evalExpr(ctx, expr)
     elseif kind == "FloatLiteral" then return V.f64(expr.value)
     elseif kind == "ArrayExpr" then return self:evalArray(ctx, expr, nil)
     elseif kind == "IndexExpr" then return self:evalIndex(ctx, expr)
-    elseif kind == "RecordSupply" then return self:evalSupply(ctx, expr)
+    elseif kind == "RecordSupply" then ctx.tail = tail; return self:evalSupply(ctx, expr)
     elseif kind == "FieldSelect" then return self:evalFieldSelect(ctx, expr)
     elseif kind == "Lambda" then return self:evalLambda(ctx, expr, nil)
     elseif kind == "SignatureExpr" then return self:evalSignature(ctx, expr)
@@ -2459,6 +2465,9 @@ end
 
 -- `Schema { field = value }`: either a partial (static) supply or a construction.
 function Eval:evalSupply(ctx, expr)
+    -- The tail position belongs to a keyed invocation, not to the base or the supplied values.
+    local tail = ctx.tail
+    ctx.tail = false
     local base = self:evalExpr(ctx, expr.schema)
     if V.tag(base) == "ctor" then
         -- A sum alternative with a record payload is built like a record, then tagged.
@@ -2494,7 +2503,7 @@ function Eval:evalSupply(ctx, expr)
         return self:evalMatch(ctx, base, expr, nil)
     end
     if V.tag(base) == "word" and base.def.keyed then
-        return self:applyKeyed(ctx, base, expr.fields, expr.span)
+        return self:applyKeyed(ctx, base, expr.fields, expr.span, tail)
     end
     if V.tag(base) ~= "schema" then
         D.reject("schema-required", "Keyed supply needs a schema on the left", expr.schema.span)
@@ -3988,7 +3997,7 @@ end
 -- order; a name that is not a requirement, or one supplied twice, rejects. Supplying every key
 -- invokes the body; otherwise the supplied values, which must be static, become part of a
 -- specialized word that still awaits the rest.
-function Eval:applyKeyed(ctx, word, fields, span)
+function Eval:applyKeyed(ctx, word, fields, span, tail)
     local def = word.def
     local params = def.params
     local known = {}
@@ -4013,6 +4022,7 @@ function Eval:applyKeyed(ctx, word, fields, span)
     if #remaining == 0 then
         local values = {}
         for index, param in ipairs(params) do values[index] = bound[param.name.text] end
+        ctx.tail = tail and true or false
         return self:apply(ctx, V.word(def, values, span), {}, span)
     end
     for _, value in pairs(bound) do
@@ -4027,6 +4037,7 @@ function Eval:applyKeyed(ctx, word, fields, span)
         result = def.result, body = def.body, lexical = def.lexical, fields = def.fields,
         tailSelf = def.tailSelf,
     }
+    ctx.tail = false
     return V.word(specialized, {}, span)
 end
 

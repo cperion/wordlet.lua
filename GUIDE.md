@@ -1013,7 +1013,10 @@ over recursion where every frame must resume afterward.
 
 But be precise about the current guarantee: the implementation optimizes
 same-instance tail self-calls. Do not assume this automatically means unrestricted
-proper-tail-call optimization across all mutually recursive continuations.
+proper-tail-call optimization across all mutually recursive continuations. A keyed
+self-call counts too: `f { k = v, ... }` that supplies every key is a tail call
+exactly as `f(v, ...)` is, so a keyed word loops the same way; a partial keyed
+supply only returns a specialized word and is not a call.
 
 Also remember that `defer` can intentionally prevent tail-loop conversion because
 deferred work must happen after the call returns (`syntax.md` §8.8).
