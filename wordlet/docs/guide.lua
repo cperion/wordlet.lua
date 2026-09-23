@@ -22,7 +22,7 @@ change how something should be designed.
 2. [Start software design by finding the words](#2-start-software-design-by-finding-the-words)
 3. [Naming is architecture](#3-naming-is-architecture)
 4. [Think in requirements and supply](#4-think-in-requirements-and-supply)
-5. [Ordered and keyed requirements are different kinds of meaning](#5-ordered-and-keyed-requirements-are-different-kinds-of-meaning)
+5. [Ordered and keyed requirements are equal design choices](#5-ordered-and-keyed-requirements-are-equal-design-choices)
 6. [Prefer keyed aggregates when positional application becomes ambiguous](#6-prefer-keyed-aggregates-when-positional-application-becomes-ambiguous)
 7. [Arrange ordered requirements by binding-time structure](#7-arrange-ordered-requirements-by-binding-time-structure)
 8. [Specialization is not a separate programming mode](#8-specialization-is-not-a-separate-programming-mode)
@@ -456,13 +456,17 @@ its remaining requirements, not a different syntactic category.
 
 ---
 
-## 5. Ordered and keyed requirements are different kinds of meaning
+## 5. Ordered and keyed requirements are equal design choices
 
-Wordlet has two especially important forms of requirement identity.
+A word's requirements carry either **ordered** or **keyed** identity, and the
+definition chooses which. Neither is the general case: an ordered word and a keyed
+word are both ordinary words, with the same supply model, the same specialization and
+the same call, and a schema is simply the keyed word whose terminal constructs an
+instance (`syntax.md` §2, §8).
 
 ### Ordered requirements
 
-Use ordered requirements when position itself naturally carries meaning:
+Use ordered requirements when position itself carries meaning:
 
 ```text
 add(a, b)
@@ -470,15 +474,39 @@ resize(width, height, image)
 distance(a, b)
 ```
 
-Ordered application is compact and compositional:
-
 ```text
-let thumbnail = resize(128, 128)
+let affine(a, b, x: U32): U32 = a * x + b
+let transform = affine(4, 3)     -- supplies two of three; a specialized word
 ```
+
+Application is compact. Supplying fewer requirements than remain returns a
+specialized word; supplying all of them invokes the body. Requirement order also
+carries dependency, because an earlier parameter may determine a later one, as `T`
+does in `let identity(T: Type, x: T) = x`.
 
 ### Keyed requirements
 
-Use keyed requirements when the requirements have independent semantic identities:
+Use keyed requirements when the names carry meaning:
+
+```text
+let distance { x: U32, y: U32 }: U32 = x * x + y * y
+let d = distance { x = 3, y = 4 }
+```
+
+Same model, different identity: supplying fewer keys returns a specialized word,
+supplying every key invokes the body, and a partial supply needs static values. Keys
+have no order, so supplies may be written in any order:
+
+```text
+let near = distance { y = 4 }     -- a specialized word awaiting x
+let d = near { x = 3 }            -- 25
+let same = distance { y = 4, x = 3 }
+```
+
+Every key is annotated, because a key has no position to infer a type from.
+
+A schema is the same mechanism with a construction terminal, so `distance { ... }`
+and `Server { ... }` are one thing:
 
 ```text
 let Server = {
@@ -488,38 +516,31 @@ let Server = {
     clock: Clock,
     retry: RetryPolicy,
 }
-```
 
-Then supply by name:
-
-```text
 let ProductionServer = Server {
     logger = ProductionLogger,
     retry = ProductionRetry,
 }
 ```
 
-Incomplete keyed supply creates a specialized schema whose supplied fields are
-static and readonly; saturation constructs the actual record (`syntax.md` §8). This
-is much more than named-argument convenience.
+### The choice is the design
 
-A key gives a requirement semantic identity.
+Ordered and keyed requirements are not two features. They are two identities for the
+same requirement, and both specialize and lower the same way: a keyed supply is
+reordered into the word's declaration order and invoked as an ordinary call, so
+nothing about it survives to runtime that an ordered call would not.
 
-A word's requirements may be keyed directly, not only a schema's:
+That makes the choice a **design** decision, not a mechanism decision:
 
 ```text
-let distance { x: U32, y: U32 }: U32 = x * x + y * y
-let d = distance { x = 3, y = 4 }
+Use () when position communicates enough.
+Use {} when names communicate essential structure.
 ```
 
-The keys are the word's own requirements, supplied by name in any order; supplying
-fewer returns a specialized word; a schema is just the keyed word whose terminal
-constructs an instance. So `()` and `{}` are two spellings of one word's
-requirements, and the definition chooses which identity they carry.
-
-Use `()` when position communicates enough.
-
-Use `{}` when names communicate essential structure.
+Prefer ordered for a small, fixed set whose order is memorable (`add(a, b)`), and
+keyed once a reader would have to ask what argument four means (section 6). Both are
+first class; neither is a fallback for the other, and a schema is just the keyed word
+that constructs.
 
 ---
 
