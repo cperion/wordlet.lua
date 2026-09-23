@@ -66,8 +66,9 @@ module Ir {
         # `base[index]` through a slice: base names the slice place, and the element is at data[index]
         # after a runtime bounds check against length.
         # `view[index]`: the element a slice value views, checked against its length before use. The
-        # slice is a value rather than a place because a view needs no storage of its own, and the
-        # place it names is still writable when the storage it views is.
+        # slice is a value rather than a place because a view needs no storage of its own; and it is
+        # read-only, because a view does not own the storage it names, so a `SliceIndex` is reached by
+        # `Read` and never by `Store` (`view[i] = v` rejects, syntax.md §8.4).
         | SliceIndex(Expr view, Expr index, Ty.V type)
         # `view[index]`: the element an unchecked pointer addresses. No length, so no bounds check,
         # which is the whole difference between this and a slice.

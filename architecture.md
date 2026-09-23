@@ -349,34 +349,33 @@ The concrete schemas are `ast.asdl` and `ir.asdl`, both parsed by the vendored A
 invariants. This section states the intent behind those schemas.
 
 Names distinguish immutable value IDs (`Ir.Value`) from mutable storage IDs (`Ir.Storage`).
-`Ir.Expr` is pure: no Read, call, trap or effect. `Addr(Place)` computes the address of a place
-root plus field selections and reads nothing, which is what lets a record field hold a reference; it
-is the one addition to the original "no address acquisition" wording, and it stays pure because a
-place is a root plus names. `Ir.Place.Deref` is the route through a reference. `Ir.Stmt` is ordered
-by list position.
+`Ir.Expr` is pure: no Read, call, trap or effect. `Addr(Place)` computes the address of a place and
+reads nothing, which is what lets a record field hold a reference; it is the one addition to the
+original "no address acquisition" wording, and it stays pure because computing a place reads
+nothing: storage, field names, and whatever index expression an indexed place carries.
+`Ir.Place.Deref` is the route through a reference or a `Ptr`. `Ir.Stmt` is ordered by list position.
 `Ir.Expr` is deliberately not interned by ASDL, since `Ir.Value` IDs are function-local; the builder
 interns expressions per function (`interfaces.md` §4).
 
 Key shapes (see `ir.asdl` for the exact fields):
 
 ```
-Ir.Expr  = Const | Ref | Un | Bin | Get | Make | Owned | Addr(Place) | Convert(Expr, Ty.V)
-         | SliceLength(Expr, Ty.V)
-Ir.Place = Local | Captured | Project | Deref | Index | SliceIndex(Expr view, Expr index, Ty.V)
+Ir.Expr  = Const | Ref | Un | Bin | Get | Make | Convert | Addr | SliceLength | Null
+Ir.Place = Local | Project | Deref | Index | SliceIndex | PtrIndex
+Ir.Arg   = ValueArg | BorrowArg
+Ir.Stmt  = Let | Var | Read | Store | View | Call | Indirect
+         | If | Switch | Loop | Next | Trap | Return
+         | ConstructVariant | VariantMatches | VariantPayload
+Ir.Param = ValueParam | PlaceParam
+Ir.Fn    = (id, role, hidden, Ty.Input* inputs, Ty.V* results, Param* params, Stmt* body)
+```
+
 `Ty.Slice(V)` is a runtime-length view: a pointer to the element and a `U32` length. `Make(Slice(T),
 {data, length})` builds one from a reference and a length, `Literal.Str` is its one literal spelling,
 `SliceLength` projects the length (pure, like a record field), and `SliceIndex` names an element place.
 The view is an expression operand rather than a place base because a view needs no storage of its own.
-It is read-only, so `SliceIndex` is reached by `Read` and never by `Store`.
-Ir.Place = Local(Storage) | Captured(Bundle, slot) | Project(Place, Field) | Deref(Place)
-         | Index(Place, Expr, Ty.V)
-Ir.Arg   = ValueArg | BorrowArg | BundleArg
-Ir.Stmt  = Let | Var | Read | Store | BundleDef | View | Call | Indirect
-         | If | Loop | Next | Trap | Return
-         | ConstructVariant | VariantMatches | VariantPayload
-Ir.Param = ValueParam | PlaceParam | BundleParam
-Ir.Fn    = (id, role, hidden, Ty.Input* inputs, Ty.V* results, Param* params, Stmt* body)
-```
+It is read-only, so `SliceIndex` is reached by `Read` and never by `Store`: `view[i] = v` rejects as
+`not-a-place` (`syntax.md` §8.4).
 
 A reference is a type whose representation is a pointer but whose meaning is a checked borrow: the
 target must provably outlive every use (section 8.2). Its implementation follows the same order as every other

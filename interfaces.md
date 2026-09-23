@@ -224,12 +224,17 @@ These are the obligations `check.lua` verifies; the builder should not rely on t
    storage; `If` produces the *intersection* of its arms' outputs (a missing arm passes the input
    set through); `Loop` adds nothing and does not fall through. A `Read` of a storage not in the set
    is a `bug`.
-4. **Places.** `Place.Local(storage)` requires storage declared by `Var` or by a `PlaceParam`.
-   `Place.Captured(bundle, slot)` requires that bundle's `Ty.Env` slot to be a `Reference`.
-   `Place.Project` requires a record-typed base and an existing field.
+4. **Places.** `Place.Local(storage)` requires storage declared by `Var`, by a `PlaceParam`, or by a
+   module-level `Var` outside every function. `Place.Project(base, field)` requires a record-typed
+   base and an existing field. `Place.Deref` requires a base holding a `Ref` or a `Ptr`, and records
+   the pointee type on the node. `Place.Index` requires an array base with a matching element type
+   and a `U32` index; `Place.SliceIndex` requires a slice-typed view value and `Place.PtrIndex` a
+   `Ptr`-typed one, each with a `U32` index.
 5. **Args and slots.** `Ir.Call` arguments match the target `Ir.Fn.inputs` positionally: `InValue` →
-   `ValueArg`, `InPlace` → `BorrowArg`, `InBundle` → `BundleArg`. `Ir.View`/`BundleDef` slots match
-   the `Ty.Env` slot kinds in order. `Ir.Indirect` matches the `Ty.View`'s *visible* signature.
+   `ValueArg`, `InPlace` → `BorrowArg`. `Ir.View` names a callable's code and binds the hidden prefix
+   of its inputs in order, never more slots than that code declares; the remaining inputs must match
+   the view's own visible signature, and the bound type is a `Ty.View`, or a `Ty.Owned` whose
+   environment is `Unit` for pure code. `Ir.Indirect` matches the `Ty.View`'s *visible* signature.
    A `Unit`-typed parameter is erased when the input plan is built, so it contributes no `Ty.Input`
    and no `Ir.Param` and appears in no argument list. The parameter's name is bound to the `Unit`
    value directly, and because there is no `Ir.Literal` for `Unit`, a `Unit` value can never be
