@@ -35,6 +35,8 @@ function M.compile(options)
     Check.program(functions, (compilation.modules and #compilation.modules > 0)
         and compilation.modules or nil, compilation.foreigns)
     local layouts = C.close(compilation)
+    -- Emission is computed once here, so the artifact views below only read (lower.close).
+    Lower.close(layouts)
     return M.artifact(layouts, compilation)
 end
 
@@ -122,6 +124,7 @@ function M.compile_file(path, options)
     Check.program(functions, (compilation.modules and #compilation.modules > 0)
         and compilation.modules or nil, compilation.foreigns)
     local layouts = C.close(compilation)
+    Lower.close(layouts)
     return M.artifact(layouts, compilation)
 end
 

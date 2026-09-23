@@ -372,7 +372,7 @@ end
 
 function Emitter:placeC(place)
     if place.kind == "Local" then
-        local module = self.layouts.modules and self.layouts.modules[place.storage]
+        local module = self.layouts.modules and self.layouts.modules.index[place.storage]
         if module then return module.name end
         local alias = self.storageAlias and self.storageAlias[place.storage.id]
         if alias then return alias end
@@ -610,7 +610,7 @@ end
 -- The adapter that lets a known callable be invoked through a view.
 function M.adapterBodies(layouts)
     local lines = {}
-    for _, adapter in ipairs(layouts.adapterOrder or {}) do
+    for _, adapter in ipairs(layouts.adapters.order) do
         local signature = layouts.signatures[adapter.entry]
         if not signature then D.bug("c-adapter", "Adapter target " .. adapter.entry .. " has no signature") end
         local returns = signature.results.kind == "void" and "void"
@@ -739,14 +739,14 @@ function M.typeDeclarations(layouts)
     -- no fixed order is correct. A genuine by-value cycle is reported rather than emitted.
     local definitions, order = {}, {}
     local function forward(name) lines[#lines + 1] = "typedef struct " .. name .. " " .. name .. ";" end
-    for _, layout in ipairs(layouts.tupleOrder) do forward(layout.name) end
-    for _, layout in ipairs(layouts.recordOrder) do forward(layout.name) end
-    for _, layout in ipairs(layouts.arrayOrder) do forward(layout.name) end
-    for _, layout in ipairs(layouts.sliceOrder) do forward(layout.name) end
-    for _, layout in ipairs(layouts.sumOrder) do forward(layout.name) end
-    for _, layout in ipairs(layouts.taggedOrder) do forward(layout.name) end
-    for _, layout in ipairs(layouts.viewOrder) do forward(layout.name) end
-    for _, layout in ipairs(layouts.adapterOrder or {}) do forward(layout.name) end
+    for _, layout in ipairs(layouts.tuples.order) do forward(layout.name) end
+    for _, layout in ipairs(layouts.records.order) do forward(layout.name) end
+    for _, layout in ipairs(layouts.arrays.order) do forward(layout.name) end
+    for _, layout in ipairs(layouts.slices.order) do forward(layout.name) end
+    for _, layout in ipairs(layouts.sums.order) do forward(layout.name) end
+    for _, layout in ipairs(layouts.tagged.order) do forward(layout.name) end
+    for _, layout in ipairs(layouts.views.order) do forward(layout.name) end
+    for _, layout in ipairs(layouts.adapters.order) do forward(layout.name) end
 
     -- Registering a definition walks its field types, which may register further layouts, so
     -- discovery and emission share one growing list.
@@ -804,13 +804,13 @@ function M.typeDeclarations(layouts)
         return entry
     end
 
-    for _, layout in ipairs(layouts.tupleOrder) do
+    for _, layout in ipairs(layouts.tuples.order) do
         defineAggregate(layout, layout.fields, false)
     end
-    for _, layout in ipairs(layouts.recordOrder) do
+    for _, layout in ipairs(layouts.records.order) do
         defineAggregate(layout, layout.fields, false)
     end
-    for _, layout in ipairs(layouts.arrayOrder) do
+    for _, layout in ipairs(layouts.arrays.order) do
         -- An array is a struct holding one C array, because a bare C array cannot be assigned or
         -- returned by value while a struct that contains one can. The element is embedded, so its
         -- layout is a completeness need.
@@ -820,7 +820,7 @@ function M.typeDeclarations(layouts)
                 .. "];\n};"
         end)
     end
-    for _, layout in ipairs(layouts.sliceOrder) do
+    for _, layout in ipairs(layouts.slices.order) do
         -- A slice is a pointer and a length. The element is named but not embedded, so the element
         -- type need not be complete yet, which is what keeps a recursive slice a finite layout.
         define(layout, {}, function()
@@ -828,10 +828,10 @@ function M.typeDeclarations(layouts)
                 .. layouts:cType(layout.element) .. " *f_data;\n    uint32_t f_length;\n};"
         end)
     end
-    for _, layout in ipairs(layouts.sumOrder) do
+    for _, layout in ipairs(layouts.sums.order) do
         defineAggregate(layout, layout.cases, true)
     end
-    for _, layout in ipairs(layouts.taggedOrder) do
+    for _, layout in ipairs(layouts.tagged.order) do
         defineAggregate(layout, layout.cases, true)
     end
     -- A view mentions its visible parameter and result types in its function pointer, so those must
@@ -857,8 +857,8 @@ function M.typeDeclarations(layouts)
         end
         return entry
     end
-    for _, layout in ipairs(layouts.viewOrder) do defineView(layout) end
-    for _, adapter in ipairs(layouts.adapterOrder or {}) do
+    for _, layout in ipairs(layouts.views.order) do defineView(layout) end
+    for _, adapter in ipairs(layouts.adapters.order) do
         local entry
         entry = define(adapter, {}, function()
             local fields = {}
@@ -890,34 +890,38 @@ function M.typeDeclarations(layouts)
         end
     end
 
-    local emitted = {}
-    local remaining = #order
-    while remaining > 0 do
-        local progressed = false
-        for _, entry in ipairs(order) do
-            if not emitted[entry.name] then
-                local ready = true
-                for _, need in ipairs(entry.needs) do
-                    -- A name that defines no aggregate is a scalar type spelled directly in C.
-                    if definitions[need] and not emitted[need] then ready = false break end
-                end
-                if ready then
-                    entry.emit()
-                    emitted[entry.name] = true
-                    remaining = remaining - 1
-                    progressed = true
-                end
+    -- Emitting a definition needs the definitions it embeds by value to be complete first, and the
+    -- discovery order above is not a dependency order: a record is registered before the field types
+    -- it names. A depth-first walk from each definition emits it after the ones it needs, so one pass
+    -- over the graph replaces the readiness fixpoint, and a back edge names the cycle rather than
+    -- leaving the caller to find it.
+    local emitted, active, stack = {}, {}, {}
+    local function emit(entry)
+        if emitted[entry.name] then return end
+        if active[entry.name] then
+            local first = 1
+            for index, name in ipairs(stack) do
+                if name == entry.name then first = index; break end
             end
+            local cycle = {}
+            for index = first, #stack do cycle[#cycle + 1] = stack[index] end
+            cycle[#cycle + 1] = entry.name
+            D.todo("c-order", "These types contain each other by value: " .. table.concat(cycle, ", "))
         end
-        if not progressed then
-            local stuck = {}
-            for _, entry in ipairs(order) do
-                if not emitted[entry.name] then stuck[#stuck + 1] = entry.name end
-            end
-            D.todo("c-order", "These types contain each other by value: " .. table.concat(stuck, ", "))
+        active[entry.name] = true
+        stack[#stack + 1] = entry.name
+        for _, need in ipairs(entry.needs) do
+            -- A name that defines no aggregate is a scalar type spelled directly in C.
+            local dependency = definitions[need]
+            if dependency then emit(dependency) end
         end
+        stack[#stack] = nil
+        active[entry.name] = nil
+        entry.emit()
+        emitted[entry.name] = true
     end
-    for _, exported in ipairs(layouts.typeExports or {}) do
+    for _, entry in ipairs(order) do emit(entry) end
+    for _, exported in ipairs(layouts.typeExports) do
         lines[#lines + 1] = "typedef " .. exported.layout.name .. " " .. exported.name .. ";"
     end
     return lines
@@ -995,7 +999,7 @@ end
 function M.prototypes(layouts)
     local lines = M.moduleDeclarations(layouts)
     -- A foreign word is declared, never defined: the host has the body.
-    for _, signature in ipairs(layouts.foreignOrder or {}) do
+    for _, signature in ipairs(layouts.foreignOrder) do
         lines[#lines + 1] = M.signatureText(layouts, signature) .. ";"
     end
     for _, instance in ipairs(layouts.order) do
@@ -1677,7 +1681,7 @@ local SIGNED_HELPERS = {
 -- File-scope objects for module-level mutable state, plus the entry point that initialises them.
 function M.moduleDeclarations(layouts)
     local lines = {}
-    for _, module in ipairs(layouts.moduleOrder or {}) do
+    for _, module in ipairs(layouts.modules.order) do
         lines[#lines + 1] = "static " .. layouts:cType(module.type) .. " " .. module.name .. ";"
     end
     return lines
@@ -1699,16 +1703,37 @@ function M.privateLinkage(layouts)
     }
 end
 
+-- A view of a closed artifact. `close` computed the emission, so every function below only reads:
+-- a view called before that would walk a half-named layout set and could print different C twice.
+local function closed(layouts)
+    if not layouts.closed then
+        D.bug("c-closed", "The layouts are not closed: call lower.close after cabi.close")
+    end
+    return layouts
+end
+
+-- Close the artifact: emit the bodies, the adapters and the declarations once, in dependency
+-- order, and freeze them on the layouts. Naming a type is what decides which helpers the unit
+-- needs, so this is the step that finishes the layout set; after it, `unit`, `source`, `header`
+-- and `cdef` are consistent views of one artifact, and calling them in any order gives one answer.
+function M.close(layouts)
+    if layouts.closed then return layouts end
+    layouts.bodies = M.bodies(layouts)
+    layouts.adapterBodies = M.adapterBodies(layouts)
+    layouts.declarations = M.typeDeclarations(layouts)
+    layouts.closed = true
+    return layouts
+end
+
 -- A `cdef` view: every type declaration and the exported prototypes, with no bodies and no private
 -- symbols. A host feeds this to `ffi.cdef` and then `ffi.load`s the shared object it builds. Because
 -- `ffi.cdef` is process-global, an optional namespace prefixes every generated type name so several
 -- artifacts can be loaded side by side; the C names in the object are unaffected, since C struct
 -- identity is layout, not spelling.
 function M.cdef(layouts, namespace)
-    -- Naming a type is what registers its layout, so the bodies must be walked first.
-    M.bodies(layouts)
+    closed(layouts)
     local lines = {}
-    for _, line in ipairs(M.typeDeclarations(layouts)) do lines[#lines + 1] = line end
+    for _, line in ipairs(layouts.declarations) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""
     for _, instance in ipairs(layouts.order) do
         local signature = layouts.signatures[instance.target]
@@ -1719,12 +1744,12 @@ function M.cdef(layouts, namespace)
     local text = table.concat(lines, "\n")
     if namespace and namespace ~= "" then
         local names = {}
-        for _, group in ipairs({ layouts.tupleOrder, layouts.recordOrder, layouts.arrayOrder,
-            layouts.sumOrder, layouts.taggedOrder, layouts.viewOrder, layouts.adapterOrder or {},
-            layouts.sliceOrder }) do
+        for _, group in ipairs({ layouts.tuples.order, layouts.records.order, layouts.arrays.order,
+            layouts.sums.order, layouts.tagged.order, layouts.views.order, layouts.adapters.order,
+            layouts.slices.order }) do
             for _, layout in ipairs(group) do names[#names + 1] = layout.name end
         end
-        for _, exported in ipairs(layouts.typeExports or {}) do names[#names + 1] = exported.name end
+        for _, exported in ipairs(layouts.typeExports) do names[#names + 1] = exported.name end
         for _, name in ipairs(names) do
             text = text:gsub("%f[%w_]" .. name .. "%f[^%w_]", namespace .. name)
         end
@@ -1732,49 +1757,13 @@ function M.cdef(layouts, namespace)
     return text
 end
 
+-- The whole translation unit: one file, so it is `source` with no header to include.
 function M.unit(layouts)
-    -- Bodies and declarations are built first: naming a type is what decides whether the signed
-    -- helpers are needed, and they have to be printed before anything that uses them.
-    local bodies = M.bodies(layouts)
-    local adapters = M.adapterBodies(layouts)
-    local declarations = M.typeDeclarations(layouts)
-    local lines = {}
-    for _, line in ipairs(includes(layouts)) do lines[#lines + 1] = line end
-    if layouts.usesFloatSpecials then lines[#lines + 1] = "#include <math.h>" end
-    for _, line in ipairs(M.privateLinkage(layouts)) do lines[#lines + 1] = line end
-    lines[#lines + 1] = ""
-    if layouts.usesSigned then
-        for _, line in ipairs(SIGNED_HELPERS) do lines[#lines + 1] = line end
-        lines[#lines + 1] = ""
-    end
-    local wide = M.wideHelpers(layouts)
-    if #wide > 0 then
-        for _, line in ipairs(wide) do lines[#lines + 1] = line end
-        lines[#lines + 1] = ""
-    end
-    for _, line in ipairs(declarations) do lines[#lines + 1] = line end
-    for _, line in ipairs(M.stringDeclarations(layouts)) do lines[#lines + 1] = line end
-    lines[#lines + 1] = ""
-    for _, line in ipairs(M.prototypes(layouts)) do lines[#lines + 1] = line end
-    lines[#lines + 1] = ""
-    for _, line in ipairs(M.prelude(layouts)) do lines[#lines + 1] = line end
-    lines[#lines + 1] = ""
-    for _, line in ipairs(adapters) do
-        lines[#lines + 1] = line
-        lines[#lines + 1] = ""
-    end
-    for _, body in ipairs(bodies) do
-        lines[#lines + 1] = body
-        lines[#lines + 1] = ""
-    end
-    return table.concat(lines, "\n")
+    return M.source(layouts, nil)
 end
 
 function M.source(layouts, headerName)
-    -- The signed helpers are decided by naming types, so build the bodies and declarations first.
-    local bodies = M.bodies(layouts)
-    local adapters = M.adapterBodies(layouts)
-    local declarations = M.typeDeclarations(layouts)
+    closed(layouts)
     local lines = {}
     if headerName then lines[#lines + 1] = '#include "' .. headerName .. '"' end
     for _, line in ipairs(includes(layouts)) do lines[#lines + 1] = line end
@@ -1790,18 +1779,18 @@ function M.source(layouts, headerName)
         for _, line in ipairs(wide) do lines[#lines + 1] = line end
         lines[#lines + 1] = ""
     end
-    for _, line in ipairs(declarations) do lines[#lines + 1] = line end
+    for _, line in ipairs(layouts.declarations) do lines[#lines + 1] = line end
     for _, line in ipairs(M.stringDeclarations(layouts)) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""
     for _, line in ipairs(M.prototypes(layouts)) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""
     for _, line in ipairs(M.prelude(layouts)) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""
-    for _, line in ipairs(adapters) do
+    for _, line in ipairs(layouts.adapterBodies) do
         lines[#lines + 1] = line
         lines[#lines + 1] = ""
     end
-    for _, body in ipairs(bodies) do
+    for _, body in ipairs(layouts.bodies) do
         lines[#lines + 1] = body
         lines[#lines + 1] = ""
     end
@@ -1809,12 +1798,10 @@ function M.source(layouts, headerName)
 end
 
 function M.header(layouts, name)
-    -- The header is a view of the same closed artifact, so bodies must have been emitted for the
-    -- type closure to be complete.
-    M.bodies(layouts)
+    closed(layouts)
     local guard = "WORDLET_" .. M.escape(name or "unit"):upper() .. "_H"
     local lines = { "#ifndef " .. guard, "#define " .. guard, "", "#include <stdint.h>", "#include <stdbool.h>", "" }
-    for _, line in ipairs(M.typeDeclarations(layouts)) do lines[#lines + 1] = line end
+    for _, line in ipairs(layouts.declarations) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""
     lines[#lines + 1] = "#ifdef __cplusplus"
     lines[#lines + 1] = 'extern "C" {'

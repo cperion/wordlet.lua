@@ -10,6 +10,14 @@ end
 
 function M.functionName(name) return "wordlet_" .. M.escape(name) end
 
+-- One registry per layout family: the layouts of one kind, in the order they were created, keyed by
+-- the type that asked for them. A registry owns both, so a layout and its place in the emitted
+-- declarations cannot drift.
+local function registry(prefix) return { prefix = prefix, index = {}, order = {} } end
+
+-- The C name of the `index`th layout of a family.
+local function layoutName(prefix, index) return prefix .. index end
+
 -- A residual instance that no call, view or adapter names is dead. Dropping it before ownership is
 -- computed keeps the emitted C free of unreferenced functions, so a private function needs no
 -- `inline` keyword to satisfy `-Wunused-function`.
@@ -58,33 +66,29 @@ function M.close(compilation)
         -- Named cells are the identity of a recursive type definition; a reference to one resolves
         -- to the definition's layout, which must be named so its forward declaration is emitted.
         typeCells = (compilation.session and compilation.session.types.cells) or {},
-        tuples = {},        -- result vector -> { name, fields }
-        tupleOrder = {},
-        views = {},         -- Ty.View -> invocation-pointer layout
-        viewOrder = {},
-        records = {},       -- Ty.Record -> { name, fields }
-        recordOrder = {},
-        arrays = {},        -- Ty.Array -> { name, element, length }
-        arrayOrder = {},
-        slices = {},        -- Ty.Slice -> { name, element }
-        sliceOrder = {},
+        records = registry("wordletrecord_"),
+        arrays = registry("wordletarray_"),
+        slices = registry("wordletslice_"),
+        sums = registry("wordletsum_"),
+        tagged = registry("wordlettag_"),
+        tuples = registry("wordlettuple_"),
+        views = registry("wordletview_"),
+        adapters = registry("wordletadapterstruct_"),
+        modules = registry("wordletmodule_"),
         strings = {},      -- distinct string literals, in first-use order
         stringIndex = {},
         stringCount = 0,
-        sums = {},          -- Ty.Sum -> { name, cases }
-        sumOrder = {},
-        tagged = {},        -- Ty.Tagged -> { name, cases }
-        taggedOrder = {},
         signatures = {},
     }
 
     local function recordLayout(ty0)
         local ty = S.environmentOf(ty0)
-        local existing = layouts.records[ty]
+        local existing = layouts.records.index[ty]
         if existing then return existing end
-        local layout = { name = "wordletrecord_" .. (#layouts.recordOrder + 1), type = ty, fields = {} }
-        layouts.records[ty] = layout
-        layouts.recordOrder[#layouts.recordOrder + 1] = layout
+        local layout = { name = layoutName(layouts.records.prefix, #layouts.records.order + 1),
+            type = ty, fields = {} }
+        layouts.records.index[ty] = layout
+        layouts.records.order[#layouts.records.order + 1] = layout
         for _, field in ipairs(ty.fields) do
             layout.fields[#layout.fields + 1] = { name = "f_" .. M.escape(field.name), type = field.type }
             -- Name nested field types too, so their declarations precede this struct.
@@ -99,12 +103,12 @@ function M.close(compilation)
     -- An array is a struct holding one C array, because a bare C array cannot be copied or
     -- returned by value while a struct that contains one can.
     local function arrayLayout(ty)
-        local existing = layouts.arrays[ty]
+        local existing = layouts.arrays.index[ty]
         if existing then return existing end
-        local layout = { name = "wordletarray_" .. (#layouts.arrayOrder + 1), type = ty,
+        local layout = { name = layoutName(layouts.arrays.prefix, #layouts.arrays.order + 1), type = ty,
             element = ty.element, length = ty.length }
-        layouts.arrays[ty] = layout
-        layouts.arrayOrder[#layouts.arrayOrder + 1] = layout
+        layouts.arrays.index[ty] = layout
+        layouts.arrays.order[#layouts.arrays.order + 1] = layout
         -- The element is embedded by value, so its layout must exist and be complete.
         layouts:cType(ty.element)
         return layout
@@ -114,12 +118,12 @@ function M.close(compilation)
     -- its element type is recursive: the element's layout is named, but a pointer to an incomplete
     -- type is a complete type, so `Slice(Node)` inside `Node` is a legal layout.
     local function sliceLayout(ty)
-        local existing = layouts.slices[ty]
+        local existing = layouts.slices.index[ty]
         if existing then return existing end
-        local layout = { name = "wordletslice_" .. (#layouts.sliceOrder + 1), type = ty,
+        local layout = { name = layoutName(layouts.slices.prefix, #layouts.slices.order + 1), type = ty,
             element = ty.element }
-        layouts.slices[ty] = layout
-        layouts.sliceOrder[#layouts.sliceOrder + 1] = layout
+        layouts.slices.index[ty] = layout
+        layouts.slices.order[#layouts.slices.order + 1] = layout
         layouts:cType(ty.element)
         return layout
     end
@@ -128,12 +132,12 @@ function M.close(compilation)
     -- A sum and a tagged callable are both a tag plus a union of alternative payloads, so they share
     -- one layout: only the struct name and the table that owns it differ. Payloads are held by value
     -- so construction and projection are plain assignments.
-    local function tagLayout(prefix, table_, order, ty)
-        local existing = table_[ty]
+    local function tagLayout(family, ty)
+        local existing = family.index[ty]
         if existing then return existing end
-        local layout = { name = prefix .. (#order + 1), type = ty, cases = {} }
-        table_[ty] = layout
-        order[#order + 1] = layout
+        local layout = { name = layoutName(family.prefix, #family.order + 1), type = ty, cases = {} }
+        family.index[ty] = layout
+        family.order[#family.order + 1] = layout
         for index, field in ipairs(S.alternatives(ty)) do
             layout.cases[#layout.cases + 1] = { name = "f_" .. M.escape(field.name), type = field.type,
                 tag = index - 1 }
@@ -142,10 +146,8 @@ function M.close(compilation)
         return layout
     end
 
-    local function sumLayout(ty) return tagLayout("wordletsum_", layouts.sums, layouts.sumOrder, ty) end
-    local function taggedLayout(ty)
-        return tagLayout("wordlettag_", layouts.tagged, layouts.taggedOrder, ty)
-    end
+    local function sumLayout(ty) return tagLayout(layouts.sums, ty) end
+    local function taggedLayout(ty) return tagLayout(layouts.tagged, ty) end
 
     local function resultLayout(results)
         if #results == 0 then return { kind = "void" } end
@@ -154,11 +156,12 @@ function M.close(compilation)
             return { kind = "scalar", type = results[1] }
         end
         local key = S.encode(S.list(results))
-        local existing = layouts.tuples[key]
+        local existing = layouts.tuples.index[key]
         if existing then return existing end
-        local layout = { kind = "tuple", name = "wordlettuple_" .. (#layouts.tupleOrder + 1), fields = {} }
-        layouts.tuples[key] = layout
-        layouts.tupleOrder[#layouts.tupleOrder + 1] = layout
+        local layout = { kind = "tuple", name = layoutName(layouts.tuples.prefix, #layouts.tuples.order + 1),
+            fields = {} }
+        layouts.tuples.index[key] = layout
+        layouts.tuples.order[#layouts.tuples.order + 1] = layout
         for index, ty in ipairs(results) do
             layout.fields[#layout.fields + 1] = { name = "f_" .. index, type = ty }
         end
@@ -171,7 +174,7 @@ function M.close(compilation)
     local function viewLayout(ty0)
         -- A view and an owned callable both carry the signature a view is built from.
         local ty = S.view(ty0.visible)
-        local existing = layouts.views[ty]
+        local existing = layouts.views.index[ty]
         if existing then return existing end
         local sig = ty.visible
         local parameters = { "const void *environment" }
@@ -187,33 +190,34 @@ function M.close(compilation)
         local types = { "const void *" }
         for _, input in ipairs(sig.inputs) do types[#types + 1] = layouts:cType(input.type) end
         local layout = {
-            name = "wordletview_" .. (#layouts.viewOrder + 1),
+            name = layoutName(layouts.views.prefix, #layouts.views.order + 1),
             type = ty, parameters = parameters, results = results, returns = returns,
             arguments = #sig.inputs,
             invoke = "(" .. table.concat(types, ", ") .. ")",
         }
-        layouts.views[ty] = layout
-        layouts.viewOrder[#layouts.viewOrder + 1] = layout
+        layouts.views.index[ty] = layout
+        layouts.views.order[#layouts.views.order + 1] = layout
         return layout
     end
 
     -- An adapter binds a callable's hidden inputs so it can be invoked through a view. Its struct
     -- holds the bound values (or borrowed pointers) and its function forwards the visible inputs.
-    layouts.adapterIndex, layouts.adapterOrder = {}, {}
+    -- The adapter family is a registry like the others, so its key list and its order list live in one
     function layouts:viewAdapter(entry, bound)
         local key = entry .. "|" .. #bound
         for _, slot in ipairs(bound) do key = key .. "|" .. S.encode(slot.type) .. (slot.pointer and "*" or "") end
-        local existing = self.adapterIndex[key]
+        local existing = self.adapters.index[key]
         if existing then return existing end
-        local index = #self.adapterOrder + 1
+        local index = #self.adapters.order + 1
         local fields = {}
         for position, slot in ipairs(bound) do
             fields[position] = { name = "f_" .. position, type = slot.type, pointer = slot.pointer }
         end
-        local adapter = { name = "wordletadapterstruct_" .. index, fn = "wordletadapterfn_" .. index,
-            entry = entry, bound = fields, struct = "wordletadapterstruct_" .. index }
-        self.adapterIndex[key] = adapter
-        self.adapterOrder[#self.adapterOrder + 1] = adapter
+        local adapter = { name = layoutName(layouts.adapters.prefix, index),
+            fn = layoutName("wordletadapterfn_", index),
+            entry = entry, bound = fields, struct = layoutName(layouts.adapters.prefix, index) }
+        self.adapters.index[key] = adapter
+        self.adapters.order[#self.adapters.order + 1] = adapter
         return adapter
     end
 
@@ -372,13 +376,11 @@ function M.close(compilation)
     -- Sum layouts are reached through cType, which may run while the statements are emitted.
     layouts.signatures = signatures
     -- Module-level storages are file-scope objects; the emitter names them here.
-    layouts.modules = {}
-    layouts.moduleOrder = {}
     for index, module in ipairs(compilation.modules or {}) do
-        local entry = { name = "wordletmodule_" .. index, storage = module.storage,
+        local entry = { name = layoutName(layouts.modules.prefix, index), storage = module.storage,
             type = module.type, source = module.name }
-        layouts.modules[module.storage] = entry
-        layouts.moduleOrder[#layouts.moduleOrder + 1] = entry
+        layouts.modules.index[module.storage] = entry
+        layouts.modules.order[#layouts.modules.order + 1] = entry
     end
     layouts.order = order
     layouts.symbolPrefix = prefix

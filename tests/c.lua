@@ -1457,7 +1457,7 @@ return { types = { Counter, Node, Link }, functions = { read_shared, peek, via, 
     local generated = artifact:unit()
     -- Module storages are numbered in first-demand order, so find `shared` by its source name.
     local sharedPointer
-    for _, entry in ipairs(artifact.layouts.moduleOrder) do
+    for _, entry in ipairs(artifact.layouts.modules.order) do
         if entry.source == "shared" then sharedPointer = "&" .. entry.name end
     end
     check(sharedPointer ~= nil, "the shared module storage was not emitted")
