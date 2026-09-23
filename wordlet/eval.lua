@@ -395,7 +395,6 @@ end
 -- One entry point that assigns every module-level object its starting value. The host calls it
 -- before any exported function; it is never called implicitly.
 function Eval:moduleInitialiser(modules, span)
-    self.nextFn = self.nextFn + 1
     local target = "wordletinit"
     local builder = IR.builder({ id = target })
     local body = {}
@@ -1189,7 +1188,7 @@ function Eval:evalSlice(ctx, expr)
     local tied = not (container.container and container.container.module)
     if ctx.mode ~= "residual" then
         local held = container.value
-        if not (type(held) == "table" and V.tag(held) == "array" and held.items) then
+        if not (V.tag(held) == "array" and held.items) then
             D.reject("runtime-in-normalization", "A runtime slice must be built in runtime code", expr.span)
         end
         -- A view names storage rather than being storage, so a view of module storage is not a
@@ -2844,12 +2843,10 @@ function Eval:applyClosure(ctx, plan, envExprs, args, span, bound)
         end
         return V.closure(plan, merged)
     end
-    args = (function()
-        local all = {}
-        for _, value in ipairs(bound) do all[#all + 1] = value end
-        for _, value in ipairs(args) do all[#all + 1] = value end
-        return all
-    end)()
+    local all = {}
+    for _, value in ipairs(bound) do all[#all + 1] = value end
+    for _, value in ipairs(args) do all[#all + 1] = value end
+    args = all
     if envExprs == nil and #plan.runtimeOrder == 0 then
         local allKnown = true
         for _, value in ipairs(args) do if not V.isKnown(value) then allKnown = false end end
@@ -4054,7 +4051,7 @@ function Eval:applyKeyed(ctx, word, fields, span, tail)
     if #remaining == 0 then
         local values = {}
         for index, param in ipairs(params) do values[index] = bound[param.name.text] end
-        ctx.tail = tail and true or false
+        ctx.tail = tail
         return self:apply(ctx, V.word(def, values, span), {}, span)
     end
     for _, value in pairs(bound) do

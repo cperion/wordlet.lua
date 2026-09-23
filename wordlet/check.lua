@@ -24,44 +24,6 @@ local function falls(list)
 end
 M.falls = falls
 
--- Definite initialisation: storage assigned on every reachable path to this point.
-local function initialized(list, input)
-    local set = {}
-    for key in pairs(input or {}) do set[key] = true end
-    for _, stmt in ipairs(list) do
-        local kind = stmt.kind
-        if kind == "Var" then
-            set[stmt.storage.id] = true
-        elseif kind == "If" then
-            local yes = initialized(stmt.yes, set)
-            local no = initialized(stmt.no, set)
-            local both = {}
-            for key in pairs(yes) do if no[key] then both[key] = true end end
-            set = both
-        elseif kind == "Switch" then
-            -- Storage is definitely assigned after a switch only if every case assigns it.
-            local joined = nil
-            for _, case in ipairs(stmt.cases) do
-                local arm = initialized(case.body, set)
-                if joined == nil then
-                    joined = arm
-                else
-                    local both = {}
-                    for key in pairs(joined) do if arm[key] then both[key] = true end end
-                    joined = both
-                end
-            end
-            if joined ~= nil then set = joined end
-        elseif kind == "Loop" then
-            -- Loop does not fall through, so it contributes nothing to the continuation.
-        elseif kind == "Store" then
-            -- A store to uninitialised storage is still a store; the storage itself is declared
-            -- by Var or is an input, both of which are checked separately.
-        end
-    end
-    return set
-end
-
 function M.function_(fn, definitions, seeded)
     -- `visible` is the set of values in scope at this point. Arm bodies get a copy so an
     -- arm-local definition cannot be referenced from the continuation.
@@ -77,8 +39,7 @@ function M.function_(fn, definitions, seeded)
         for key, value in pairs(set) do out[key] = value end
         return out
     end
-    local function checkList(list, inputs, visible, storages, inLoop)
-        local set = initialized(list, inputs)
+    local function checkList(list, visible, storages, inLoop)
         for _, stmt in ipairs(list) do
             local kind = stmt.kind
             if kind == "Let" then
@@ -109,8 +70,8 @@ function M.function_(fn, definitions, seeded)
                 end
             elseif kind == "If" then
                 M.expr(stmt.test, visible, storages)
-                checkList(stmt.yes, set, copy(visible), storages, inLoop)
-                checkList(stmt.no, set, copy(visible), storages, inLoop)
+                checkList(stmt.yes, copy(visible), storages, inLoop)
+                checkList(stmt.no, copy(visible), storages, inLoop)
             elseif kind == "Switch" then
                 if not S.isTaggedType(stmt.sum) then D.bug("ir-type", "Switch needs a sum type") end
                 if visible[stmt.variant.id] ~= stmt.sum then
@@ -120,12 +81,12 @@ function M.function_(fn, definitions, seeded)
                     if not S.caseOf(stmt.sum, case.tag) then
                         D.bug("ir-type", "Switch has no alternative " .. case.tag)
                     end
-                    checkList(case.body, set, copy(visible), storages, inLoop)
+                    checkList(case.body, copy(visible), storages, inLoop)
                 end
             elseif kind == "Loop" then
                 -- A loop body may fall through only if it never falls out; the builder always ends
                 -- it with a Return or a Next, so an empty body is the only rejected shape.
-                checkList(stmt.body, set, copy(visible), storages, true)
+                checkList(stmt.body, copy(visible), storages, true)
             elseif kind == "Call" or kind == "Indirect" then
                 local target = definitions[stmt.target]
                 if kind == "Call" and not target then
@@ -214,7 +175,6 @@ function M.function_(fn, definitions, seeded)
                     if slot.kind == "BorrowArg" and M.place(slot.place, storages, visible) ~= input.type then
                         D.bug("ir-type", "View slot place does not match the hidden input")
                     end
-                    if #stmt.slots ~= 0 then end
                 end
                 -- The visible remainder must match the view's signature.
                 for index, input in ipairs(stmt.type.visible.inputs) do
@@ -295,7 +255,7 @@ function M.function_(fn, definitions, seeded)
     for _, param in ipairs(fn.params) do
         if param.kind == "PlaceParam" then storages[param.binding.id] = param.type end
     end
-    checkList(fn.body, {}, visible, storages)
+    checkList(fn.body, visible, storages)
     if falls(fn.body) then
         D.bug("ir-fallthrough", "Function " .. fn.id .. " can fall through without returning")
     end
@@ -381,11 +341,9 @@ function M.expr(expr, locals, storages)
         end
         return expr.type
     elseif kind == "Addr" then
-        -- An address is pure: it computes the address of a place and reads nothing. The pointee
-        -- identity is a type-cell fact the verifier does not re-derive, so this checks the recorded
-        -- type is a reference and that the place is well formed.
-        -- An address is the same node for a reference and for a raw pointer: they share a
-        -- representation, and the only difference is a lifetime rule the checker does not decide.
+        -- An address is a pure computation over a place: it reads nothing. The same node serves a
+        -- reference and a raw pointer, because they share a representation and differ only in a
+        -- lifetime rule the checker does not decide, so only the recorded type is verified here.
         if not S.isRef(expr.type) and not S.isPtr(expr.type) then
             D.bug("ir-type", "Addr needs a reference or a pointer type")
         end
@@ -403,7 +361,6 @@ function M.expr(expr, locals, storages)
         if field ~= expr.type then D.bug("ir-type", "Get type does not match the field type") end
         return expr.type
     elseif kind == "Convert" then
-        -- A conversion is between integer widths, and its type is the width it converts to.
         -- A conversion is between integer widths, or between an integer and F64, and its type is what
         -- it converts to.
         local operand = M.expr(expr.operand, locals, storages)

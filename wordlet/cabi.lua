@@ -3,8 +3,6 @@ local S = require("wordlet.schema")
 local D = require("wordlet.diag")
 local M = {}
 
-local Ir = S.Ir
-
 -- Encode every non-alphanumeric byte, including underscore, so the mapping is injective.
 function M.escape(name)
     return (name:gsub("[^%w]", function(c) return string.format("_%02X", c:byte()) end))
@@ -171,7 +169,8 @@ function M.close(compilation)
     -- An owned callable with an empty environment is pure code, and its C representation is the
     -- same invocation pointer plus a null environment as any other view.
     local function viewLayout(ty0)
-        local ty = S.view(S.isOwned(ty0) and ty0.visible or ty0.visible)
+        -- A view and an owned callable both carry the signature a view is built from.
+        local ty = S.view(ty0.visible)
         local existing = layouts.views[ty]
         if existing then return existing end
         local sig = ty.visible

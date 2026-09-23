@@ -637,14 +637,12 @@ function M.adapterBodies(layouts)
         local returns = signature.results.kind == "void" and "void"
             or (signature.results.kind == "scalar" and layouts:cType(signature.results.type)
                 or signature.results.name)
-        local visible, calls = {}, {}
+        local visible = {}
         for index = #adapter.bound + 1, #signature.params do
             local param = signature.params[index]
             local name = "a" .. (index - #adapter.bound)
             visible[#visible + 1] = layouts:cType(param.type) .. (param.pointer and " *" or " ") .. name
-            calls[#calls + 1] = name
         end
-        for _, field in ipairs(adapter.bound) do calls[#calls + 1] = "env->" .. field.name end
         -- The bound inputs come first, matching the callee's hidden prefix.
         local ordered = {}
         for _, field in ipairs(adapter.bound) do ordered[#ordered + 1] = "env->" .. field.name end

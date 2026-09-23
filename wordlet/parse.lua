@@ -298,22 +298,24 @@ function Parser:schema()
     local open = self:expect("{")
     local members = {}
     if not self:at("}") then
-      self:inBrackets(function()
-        repeat
-            local key = self:expectName("a schema member name")
-            if self:at(":") then
-                self:next()
-                local annotation = self:expression()
-                members[#members + 1] = A.c.FieldMember(A.name(key), annotation, mergeSpan(key.span, annotation.span))
-            else
-                self:expect("(", "'(' after a method name")
-                local params = self:parameters(")", true)
-                self:expect(")")
-                local def = self:methodSuffix(A.name(key), params)
-                members[#members + 1] = A.c.MethodMember(def, mergeSpan(key.span, spanOf(def) or key.span))
-            end
-        until not self:more("}")
-      end)
+        self:inBrackets(function()
+            repeat
+                local key = self:expectName("a schema member name")
+                if self:at(":") then
+                    self:next()
+                    local annotation = self:expression()
+                    members[#members + 1] = A.c.FieldMember(A.name(key), annotation,
+                        mergeSpan(key.span, annotation.span))
+                else
+                    self:expect("(", "'(' after a method name")
+                    local params = self:parameters(")", true)
+                    self:expect(")")
+                    local def = self:methodSuffix(A.name(key), params)
+                    members[#members + 1] = A.c.MethodMember(def,
+                        mergeSpan(key.span, spanOf(def) or key.span))
+                end
+            until not self:more("}")
+        end)
     end
     local close = self:expect("}")
     return A.c.SchemaExpr(asList(members), mergeSpan(open.span, close.span))

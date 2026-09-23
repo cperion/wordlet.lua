@@ -92,8 +92,8 @@ end
 local Builder = {}
 Builder.__index = Builder
 
-function M.builder(fn)
-    return setmetatable({ fn = fn, memo = {}, values = 0, storage = 0, bundles = 0, expressions = 0 }, Builder)
+function M.builder()
+    return setmetatable({ memo = {}, values = 0, storage = 0, expressions = 0 }, Builder)
 end
 
 function Builder:valueId()
@@ -104,13 +104,7 @@ function Builder:storageId()
     self.storage = self.storage + 1
     return Ir.Storage(self.storage)
 end
-function Builder:bundleId()
-    self.bundles = self.bundles + 1
-    return Ir.Bundle(self.bundles)
-end
 
--- Interned pure expressions. The key is the canonical encoding, so structural equality of
--- descriptions wins; that is safe because these nodes cannot read memory or have effects.
 -- Interned pure expressions. The key names each operand by its own interned id, never by
 -- re-encoding the subtree, so a key costs the same however deep an operand is. Structural equality
 -- still wins, because equal operands are the same interned object and therefore the same id.
@@ -196,9 +190,8 @@ function Builder:sliceLength(view, ty)
     end)
 end
 
--- An element place of a slice value. Places are constructed, not interned, because a place names
--- storage instead of being a value; it can be read and, when the viewed storage is mutable, written.
 -- The null pointer of a Ptr type. Pure, and interned by its type, so every null of one type is one
+-- node, and two nulls of that type are the same object.
 function Builder:nullPtr(ty)
     return self:intern("null|" .. S.encode(ty), function() return Ir.Null(ty) end)
 end
@@ -229,7 +222,6 @@ end
 function Builder:let(list, ty, expr)
     local value = self:valueId()
     self:emit(list, Ir.Let(value, ty, expr))
-    -- A Let of a Let-free expression can be referenced directly; keep the value for clarity.
     return value, expr
 end
 function Builder:var(list, ty, initial)
