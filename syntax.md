@@ -486,8 +486,9 @@ must already be defined, so a sum cannot mention itself by value. Section 8.2 su
 
 ### 8.2 References and recursive types
 
-A reference names a place instead of copying it. It is the only indirection boundary that makes a
-recursive type finite, and it is what lets a sum mention itself:
+A reference names a place instead of copying it. It is one of the two indirection boundaries that
+make a recursive type finite -- `Ptr` (section 8.5) is the other -- and it is what lets a sum mention
+itself:
 
 ```
 let Node = { value: U32, next: Link }
@@ -574,7 +575,8 @@ let Good = { child: Ref(Good) } -- accepted: the layout cycle crosses the refere
 ```
 
 A by-value cycle rejects (`type-cycle`) even when it passes through several definitions. A cycle
-that crosses a reference is finite: the reference has a representation whose size does not depend on
+that crosses an indirection, a reference or a raw pointer, is finite: either has a representation
+whose size does not depend on
 its target. Type equality is structural, except that a recursive definition compares by its reserved
 identity, so two spellings of one recursive knot are one type and one layout.
 
@@ -740,6 +742,11 @@ let missing = bytes(4) == empty
 ```
 
 Ordering, pointer arithmetic and any conversion between a pointer and an integer are not offered.
+A pointer is an indirection boundary, so it is the second way a recursive type can be finite: `let
+Node = { value: U32, next: Ptr(Node) }` has the layout of a struct that holds a pointer to itself, and
+a cycle that crosses only a `Ptr` is accepted for the same reason one that crosses a `Ref` is. A
+by-value cycle that crosses neither still rejects (`type-cycle`).
+
 `p[i]` is the only arithmetic a pointer has, so one thing has one spelling. A pointer is not a
 `Slice`: a slice carries a length and a pointer does not.
 

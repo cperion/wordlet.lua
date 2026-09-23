@@ -183,6 +183,10 @@ Gates 1–5 and 9–11 have their first executable form in `tests/parse.lua`, `t
    direct, no invocation pointer anywhere in the artifact, and the acquire emitted before the body and
    the release after it. A run-time argument is now checked against its parameter's requirement in the
    residual path as well, where a wrong type used to reach the IR checker and be reported as a compiler
+   bug rather than a source error. A pointer is also an indirection boundary for a recursive type, so
+   `let Node = { value: U32, next: Ptr(Node) }` has a finite layout while a by-value cycle still rejects
+   (`type-cycle`), and field selection through a `Ptr(Record)` resolves the cell a recursive definition
+   reserved the way a reference does.
    bug rather than a source error.
 9. **IR/checking:** storage/value distinction, scope and definite assignment, target signature checks,
    module storage seeded outside every function,

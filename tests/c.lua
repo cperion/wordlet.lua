@@ -1509,6 +1509,23 @@ end)
 let missing() : Bool = host_null() == Null(U8)
 let present() : Bool = host_region(4) == Null(U8)
 
+-- A pointer to a record selects a field through it, and a pointer is an indirection boundary, so a
+-- type may mention itself through one and still have a finite layout.
+let Point = { x: U32, y: U32 }
+extern let host_point() : Ptr(Point)
+let total() : U32 = host_point().x + host_point().y
+let raised() : U32 = do
+  host_point().x += 10
+  return host_point().x
+end
+
+let Node = { value: U32, next: Ptr(Node) }
+extern let host_node() : Ptr(Node)
+let chain() : U32 = do
+  let head = host_node()
+  return head.value + head.next.value
+end
+
 -- `Ptr(place)` to storage the program already has. The array index is still checked; the pointer
 -- index that follows it is not, which is the whole difference between the two.
 let pool = [7, 8, 9]
@@ -1517,7 +1534,7 @@ let set(i: U32, v: U32) : U32 = do
   Ptr(pool[i])[0] = v
   return Ptr(pool[i])[0]
 end
-return { functions = { sum, missing, present, at, set } }
+return { functions = { sum, missing, present, at, set, total, raised, chain } }
 ]==]
     local generated = wordlet.compile{ source = source, name = "ptr.let" }:unit()
     check(generated:find("uint8_t * host_region(uint32_t", 1, true) ~= nil,
@@ -1536,11 +1553,17 @@ return { functions = { sum, missing, present, at, set } }
     check(acquire ~= nil and release ~= nil and acquire < release,
         "the region is acquired before the body and released after it")
     local path = directory .. "/ptr.c"
-    write(path, generated .. [[
+    -- The layouts are numbered by first use, so the host's own signatures are read from the artifact
+    -- rather than guessed: `Ptr(Point)` is a `Point *`, and a pointer to a record is that record's type.
+    local pointType = generated:match("(wordletrecord_%d+) %* host_point")
+    local nodeType = generated:match("(wordletrecord_%d+) %* host_node")
+    check(pointType ~= nil and nodeType ~= nil, "the pointer targets have named layouts")
+    write(path, generated .. ([[
 
 #include <assert.h>
 #include <string.h>
 static unsigned char arena[16];
+static unsigned char slot[64];
 static unsigned releases;
 uint8_t *host_region(uint32_t bytes) {
     releases = 0;
@@ -1550,6 +1573,8 @@ uint8_t *host_region(uint32_t bytes) {
 }
 void host_release(uint8_t *p) { releases += 1; (void)p; }
 uint8_t *host_null(void) { return NULL; }
+%s *host_point(void) { return (%s *)slot; }
+%s *host_node(void) { return (%s *)slot; }
 int main(void) {
     wordlet_init();
     assert(wordlet_sum() == UINT32_C(42));
@@ -1559,9 +1584,19 @@ int main(void) {
     assert(wordlet_present() == false);
     assert(wordlet_at(UINT32_C(0)) == UINT32_C(7));
     assert(wordlet_set(UINT32_C(2), UINT32_C(77)) == UINT32_C(77));
+    memset(slot, 0, sizeof slot);
+    { %s *p = (%s *)slot; p->f_x = 3; p->f_y = 4; }
+    assert(wordlet_total() == UINT32_C(7));
+    assert(wordlet_raised() == UINT32_C(13));
+    memset(slot, 0, sizeof slot);
+    { %s *n = (%s *)slot;
+      %s *next = (%s *)((unsigned char *)slot + 32);
+      n->f_value = 5; n->f_next = next; next->f_value = 6; }
+    assert(wordlet_chain() == UINT32_C(11));
     return 0;
 }
-]])
+]]):format(pointType, pointType, nodeType, nodeType, pointType, pointType,
+        nodeType, nodeType, nodeType, nodeType))
     check(shell("timeout --kill-after=2s 30s " .. CC .. " -std=c11 -Wall -Wextra -Werror -O2 -o '"
         .. directory .. "/ptr' '" .. path .. "' 2> " .. directory .. "/ptrerr.txt") == 0,
         "pointer C failed to compile:\n" .. read(directory .. "/ptrerr.txt"))

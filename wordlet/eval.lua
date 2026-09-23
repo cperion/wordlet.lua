@@ -578,9 +578,12 @@ function Eval:checkNoValueCycle(ty, slot, span, seen)
     seen = seen or {}
     if S.isNamed(ty) then
         D.reject("type-cycle", "Type " .. slot.name .. " contains itself by value; a recursive type "
-            .. "needs a reference boundary, as in Ref(" .. slot.name .. ")", span)
+            .. "needs an indirection boundary, as in Ref(" .. slot.name .. ") or Ptr(" .. slot.name
+            .. ")", span)
     end
-    if S.isRef(ty) or S.isSig(ty) or S.isView(ty) then return end
+    -- A reference and a raw pointer are both indirection boundaries; a signature and a view hold no
+    -- storage of their own. Everything else would embed the definition in itself.
+    if S.isRef(ty) or S.isPtr(ty) or S.isSig(ty) or S.isView(ty) then return end
     if seen[ty] then return end
     seen[ty] = true
     if S.isRecord(ty) then
@@ -824,6 +827,11 @@ end
 function Eval:canonicalize(ty)
     local named = self.namedByMeaning and self.namedByMeaning[S.encode(ty)]
     if named then return named end
+    if S.isPtr(ty) then
+        local target = self:canonicalize(ty.target)
+        if target ~= ty.target then return S.ptr(target) end
+        return ty
+    end
     if S.isRef(ty) then
         local target = self:canonicalize(ty.target)
         if target ~= ty.target then return S.ref(target) end
@@ -832,6 +840,16 @@ function Eval:canonicalize(ty)
 end
 
 -- The record type a reference points at, unwinding the cell a recursive definition reserved.
+-- The type an address points at, unwinding the cell a recursive definition reserved. A reference and a
+-- raw pointer name their target the same way, so one unwinding serves both.
+function Eval:pointeeType(ty)
+    local target = S.environmentOf(ty.target)
+    if S.isNamed(target) then target = self:resolveType(target) end
+    return target
+end
+
+Eval.refTargetType = Eval.pointeeType
+
 function Eval:refTargetType(ty)
     local target = S.environmentOf(ty.target)
     if S.isNamed(target) then target = self:resolveType(target) end
@@ -874,7 +892,7 @@ end
 -- The place a reference value names, spilling a reference that only exists as an SSA value into
 -- storage so it has an address to go through.
 function Eval:derefPlace(ctx, value, span)
-    -- A runtime reference is a pointer; `value.place` is where that pointer lives, so the target is
+    -- An address is a pointer; `value.place` is where that pointer lives, so the target is
     -- one dereference further on. The pointee type travels with the place, like every other typed
     -- IR node, so the verifier needs no type-cell table to check it.
     local pointee = S.environmentOf(self:refTargetType(value.ty))
@@ -930,6 +948,14 @@ end
 function Eval:evalPtr(ctx, expr)
     if expr.kind == "Reference" then
         local slot = lookup(ctx.scope, expr.name.text)
+        -- `Ptr(Node)` inside Node's own definition must not demand Node's layout: a pointer is an
+        -- indirection boundary exactly as a reference is, so it names the cell the definition
+        -- reserved and the recursion stays finite.
+        if slot and slot.open and slot.value == nil and slot.cell and self:isTypeDefinition(slot) then
+            if self.referencedCells == nil then self.referencedCells = {} end
+            self.referencedCells[slot.cell] = true
+            return V.type(S.ptr(S.named(slot.cell)))
+        end
         local value = slot and self:demand(slot, expr.span).value or nil
         local held = value and self:asType(value, expr.span) or nil
         if held then return V.type(S.ptr(self:canonicalize(held))) end
@@ -1259,7 +1285,7 @@ function Eval:placeOf(ctx, expr, span)
         -- Dereferencing first, the way a reference is handled, would read the element and then try to
         -- index it.
         if base.ty and S.isPtr(base.ty) then
-            local element = base.ty.target
+            local element = self:pointeeType(base.ty)
             local index = self:evalExpr(ctx, expr.index)
             self:requireType(index, S.U32, expr.index.span)
             if ctx.mode ~= "residual" then
@@ -1365,7 +1391,7 @@ function Eval:derefContainer(ctx, container, span)
     if container.ty and S.isPtr(container.ty) then
         -- The pointer is a value, so it is spilled once to reach the record it addresses; from there the
         -- selection is the same route a reference takes.
-        local target = self:canonicalize(container.ty.target)
+        local target = self:pointeeType(container.ty)
         if ctx.mode ~= "residual" then
             D.reject("runtime-in-normalization", "A pointer field needs runtime code", span)
         end
@@ -2501,7 +2527,10 @@ function Eval:evalFieldSelect(ctx, expr)
         local caseType = S.caseOf(base.value, name)
         if not caseType then D.reject("unknown-member", "Sum type has no alternative " .. name, expr.field.span) end
         return V.ctor(base.value, name, caseType)
-    elseif tag == "ir" and S.isRef(base.ty) then
+    elseif tag == "ir" and (S.isRef(base.ty) or S.isPtr(base.ty)) then
+        -- A reference and a raw pointer reach the record they address the same way, so the field is
+        -- the same projection one dereference on; only the lifetime rule differs, and a pointer has
+        -- none to check.
         -- A runtime reference is a pointer, so the field lives at the place it points to.
         local ty = S.field(self:refTargetType(base.ty), name)
         if not ty then D.reject("unknown-member", "Record has no field " .. name, expr.field.span) end
