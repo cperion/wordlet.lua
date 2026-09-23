@@ -505,6 +505,18 @@ is much more than named-argument convenience.
 
 A key gives a requirement semantic identity.
 
+A word's requirements may be keyed directly, not only a schema's:
+
+```text
+let distance { x: U32, y: U32 }: U32 = x * x + y * y
+let d = distance { x = 3, y = 4 }
+```
+
+The keys are the word's own requirements, supplied by name in any order; supplying
+fewer returns a specialized word; a schema is just the keyed word whose terminal
+constructs an instance. So `()` and `{}` are two spellings of one word's
+requirements, and the definition chooses which identity they carry.
+
 Use `()` when position communicates enough.
 
 Use `{}` when names communicate essential structure.

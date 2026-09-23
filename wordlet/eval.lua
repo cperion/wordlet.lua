@@ -501,10 +501,15 @@ end
 function Eval:define(node, lexical, fields, label)
     self.nextDef = self.nextDef + 1
     local name = label or (node.name and node.name.text) or ("lambda#" .. self.nextDef)
+    local keyed = node.keyed
+    if keyed ~= nil and #keyed == 0 then keyed = nil end
     return {
         id = self.nextDef, name = name,
         node = node, span = (node.name and node.name.span) or node.span,
-        params = node.params, result = node.result, body = node.body,
+        -- A keyed word's requirements are its keyed parameters, in declaration order; `keyed` marks
+        -- that they are supplied by name rather than by position.
+        params = keyed or node.params, keyed = keyed, statics = {},
+        result = node.result, body = node.body,
         lexical = lexical, fields = fields,
         tailSelf = node.body ~= nil and Resolve.tailCalls(node.body, name),
     }
@@ -2488,6 +2493,9 @@ function Eval:evalSupply(ctx, expr)
     if V.tag(base) == "variant" or (V.tag(base) == "ir" and S.isSum(base.ty)) then
         return self:evalMatch(ctx, base, expr, nil)
     end
+    if V.tag(base) == "word" and base.def.keyed then
+        return self:applyKeyed(ctx, base, expr.fields, expr.span)
+    end
     if V.tag(base) ~= "schema" then
         D.reject("schema-required", "Keyed supply needs a schema on the left", expr.schema.span)
     end
@@ -3932,6 +3940,9 @@ function Eval:apply(ctx, word, args, span)
     for _, value in ipairs(word.args) do bound[#bound + 1] = value end
     for _, value in ipairs(args) do bound[#bound + 1] = value end
     if #bound > #def.params then D.reject("arity", "Overapplication is not supported", span) end
+    if def.keyed and #bound < #def.params then
+        D.reject("keyed-required", "A keyed word is supplied by name, as in word { key = value }", span)
+    end
     if #bound < #def.params then
         for index, value in ipairs(bound) do
             if not V.isStatic(value) then
@@ -3971,6 +3982,52 @@ function Eval:apply(ctx, word, args, span)
         D.reject("runtime-in-normalization", "This call needs runtime storage or values", span)
     end
     return self:applyResidual(ctx, def, bound, span)
+end
+
+-- `Word { key = value }`: supply a word's keyed requirements. Values are evaluated in written
+-- order; a name that is not a requirement, or one supplied twice, rejects. Supplying every key
+-- invokes the body; otherwise the supplied values, which must be static, become part of a
+-- specialized word that still awaits the rest.
+function Eval:applyKeyed(ctx, word, fields, span)
+    local def = word.def
+    local params = def.params
+    local known = {}
+    for _, param in ipairs(params) do known[param.name.text] = true end
+    local bound = {}
+    for name, value in pairs(def.statics or {}) do bound[name] = value end
+    for _, field in ipairs(fields) do
+        local name = field.name.text
+        if not known[name] then
+            D.reject("unknown-member", "Word " .. def.name .. " has no keyed requirement " .. name,
+                field.name.span)
+        end
+        if bound[name] ~= nil then
+            D.reject("duplicate", "Keyed requirement " .. name .. " is supplied twice", field.name.span)
+        end
+        bound[name] = self:evalExpr(ctx, field.value)
+    end
+    local remaining = {}
+    for _, param in ipairs(params) do
+        if bound[param.name.text] == nil then remaining[#remaining + 1] = param end
+    end
+    if #remaining == 0 then
+        local values = {}
+        for index, param in ipairs(params) do values[index] = bound[param.name.text] end
+        return self:apply(ctx, V.word(def, values, span), {}, span)
+    end
+    for _, value in pairs(bound) do
+        if not V.isStatic(value) then
+            D.reject("static-required", "Partial keyed supply needs a static value", span)
+        end
+    end
+    self.nextDef = self.nextDef + 1
+    local specialized = {
+        id = self.nextDef, name = def.name, node = def.node, span = def.span,
+        params = remaining, keyed = remaining, statics = bound,
+        result = def.result, body = def.body, lexical = def.lexical, fields = def.fields,
+        tailSelf = def.tailSelf,
+    }
+    return V.word(specialized, {}, span)
 end
 
 function Eval:applyMethod(ctx, method, args, span)
@@ -4028,6 +4085,11 @@ function Eval:parameterScope(def, values, receiver)
                 declare(sc, name, self:fieldSlot(rdef, receiver, name), def.span)
             end
         end
+    end
+    -- A keyed word partially supplied earlier carries those values as statics, so the body sees
+    -- them exactly as if they had been supplied now.
+    for name, value in pairs(def.statics or {}) do
+        declare(sc, name, { kind = "value", name = name, value = value }, def.span)
     end
     for index, param in ipairs(def.params) do
         -- Check each requirement against the supplied value before binding the next parameter,
@@ -4231,6 +4293,10 @@ function Eval:buildInstance(key, def, values, span, receiver)
                     place = Ir.Project(Ir.Local(storage), Ir.Field(name)), retaining = true }, def.span)
             end
         end
+    end
+    -- Keyed values supplied earlier travel on the definition, so the body sees them as bindings.
+    for name, value in pairs(def.statics or {}) do
+        declare(sc, name, { kind = "value", name = name, value = value }, span)
     end
 
     for index, param in ipairs(def.params) do

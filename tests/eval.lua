@@ -624,6 +624,23 @@ do
     compile(source)
 end
 
+-- Keyed requirements on a word: supplied by name, in any order, and partially. Each key is
+-- annotated because a keyed requirement has no position to infer its type from.
+do
+    local source = "let distance { x: U32, y: U32 }: U32 = x * x + y * y\n"
+        .. "let full(): U32 = distance { x = 3, y = 4 }\n"
+        .. "let partial(): U32 = distance { x = 3 } { y = 4 }\n"
+        .. "let reordered(): U32 = distance { y = 4, x = 3 }\n"
+        .. "return { functions = { full, partial, reordered } }"
+    check(interpret("full", {}, source)[1] == 25, "a keyed word is invoked by name")
+    check(interpret("partial", {}, source)[1] == 25, "keyed supply specializes and then completes")
+    check(interpret("reordered", {}, source)[1] == 25, "keyed requirements have no order")
+    compile(source)
+end
+rejects("unknown-member", "let f { x: U32 } = x\nlet bad(): U32 = f { y = 1 }\nreturn { functions = { bad } }")
+rejects("duplicate", "let f { x: U32 } = x\nlet bad(): U32 = f { x = 1, x = 2 }\nreturn { functions = { bad } }")
+rejects("keyed-required", "let f { x: U32, y: U32 }: U32 = x + y\nlet g = f(1)\nreturn { functions = {} }")
+
 -- `OneOf(cases)` builds a sum from a keyed schema; member selection names a constructor and keyed
 -- application either constructs one alternative or matches on the tag.
 local shapes = [==[

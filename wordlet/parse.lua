@@ -410,6 +410,13 @@ function Parser:declaration()
     if first.kind == "name" and first.text == "use" then return self:useDecl() end
     local let = self:expect("let")
     local name = self:expectName("a definition name")
+    if self:at("{") then
+        -- `let f { a: T, b: U }: R = body`: a word whose requirements are keyed. Each key is
+        -- annotated, because a keyed requirement has no position to infer its type from.
+        local keyed = self:keyedParameters()
+        local def = self:definitionBody(A.name(name), asList({}), keyed)
+        return A.c.WordDecl(def, mergeSpan(let.span, spanOf(def) or name.span))
+    end
     if self:at("(") then
         self:next()
         local params = self:parameters(")", true)
@@ -434,7 +441,7 @@ function Parser:declaration()
 end
 
 -- Shared tail of a named definition and a method: `: result? = body`, after the `)`.
-function Parser:definitionBody(name, params)
+function Parser:definitionBody(name, params, keyed)
     local result = nil
     if self:at(":") then
         self:next()
@@ -445,7 +452,29 @@ function Parser:definitionBody(name, params)
         D.reject("parse", "A result is declared with ':'; '->' introduces a lambda body", self:peek().span)
     end
     self:expect("=")
-    return A.c.WordDef(name, params, result, self:body())
+    return A.c.WordDef(name, params, keyed or asList({}), result, self:body())
+end
+
+-- `{ name: Type, ... }`: a word's keyed requirements, in the form a schema literal uses. A word
+-- definition writes them after its name; the same braces with `=` supply them at a call site.
+function Parser:keyedParameters()
+    local open = self:expect("{")
+    local params = {}
+    if not self:at("}") then
+        self:inBrackets(function()
+            repeat
+                local name = self:expectName("a keyed requirement name")
+                self:expect(":", "':' and a type after a keyed requirement name")
+                local annotation = self:expression()
+                params[#params + 1] = A.c.Param(A.name(name), annotation,
+                    mergeSpan(name.span, annotation.span))
+            until not self:more("}")
+        end)
+    end
+    local close = self:expect("}")
+    local list = asList(params)
+    list.span = mergeSpan(open.span, close.span)
+    return list
 end
 
 Parser.methodSuffix = Parser.definitionBody

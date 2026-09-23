@@ -15,7 +15,7 @@ module Ast {
        | ForeignDecl(ForeignDef def, Span span)
 
   # let f(a, b: U32): (U32, U32) = body
-  WordDef = (Name name, Param* params, ResultSpec? result, Body body)
+  WordDef = (Name name, Param* params, Param* keyed, ResultSpec? result, Body body)
   # A host function: a name, annotated requirements and a declared result, and no body, because the
   # implementation is not written in this language.
   ForeignDef = (Name name, Param* params, ResultSpec result)

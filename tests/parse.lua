@@ -122,6 +122,12 @@ check(apply.kind == "Apply" and apply.arguments[1].kind == "SchemaExpr",
     "a keyed definition after a word is an application to a schema")
 check(parses("let P = { x: U32 }\nlet p = P { x = 3 }\nreturn { types = { P } }")
     .declarations[2].def.values[1].kind == "RecordSupply", "a keyed supply stays a supply")
+-- A word's requirements may be keyed: `let f { k: T } = body`, supplied by name.
+local keyedWord = parses("let distance { x: U32, y: U32 }: U32 = x * x + y * y\nreturn { functions = { distance } }")
+check(keyedWord.declarations[1].kind == "WordDecl" and keyedWord.declarations[1].def.keyed ~= nil
+    and #keyedWord.declarations[1].def.keyed == 2, "a keyed word carries its keyed requirements")
+check(parses("let d = distance { x = 3, y = 4 }\nreturn { functions = {} }")
+    .declarations[1].def.values[1].kind == "RecordSupply", "keyed supply of a word is a RecordSupply")
 check(parses("let y = r.value\nreturn { functions = {} }").declarations[1].def.values[1].kind == "FieldSelect",
     "field selection")
 

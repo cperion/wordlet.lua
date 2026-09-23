@@ -101,6 +101,19 @@ Adjacent names share the following annotation: `(a, b, x: U32)` declares three U
 named-definition parameter must have an annotation. The result annotation is optional except where
 section 10 requires it. Duplicate parameter names reject.
 
+A named definition may take **keyed** requirements instead, written like a schema's members:
+
+```
+let distance { x: U32, y: U32 }: U32 = x * x + y * y
+let d = distance { x = 3, y = 4 }
+```
+
+Every keyed requirement is annotated, because a key has no position to infer a type from. Supplying
+every key invokes the body; supplying fewer returns a specialized word, exactly as ordered partial
+supply does, and the supplied values must be static. Keyed requirements have no order, so supplies
+may be written in any order, and the word is applied by name. A schema is the special case of a
+keyed word whose terminal constructs an instance.
+
 Type requirements are evaluated left-to-right when arguments are supplied. An earlier parameter may
 appear in a later requirement:
 
@@ -1004,8 +1017,10 @@ in section 7. Semantic arity/staticness/type checks are not disguised as parser 
 
 ```
 module          := top-let* export-config EOF
-local-let       := named-definition | value-binding | foreign-declaration
+local-let       := named-definition | keyed-definition | value-binding | foreign-declaration
 named-definition:= 'let' Name parameters result-annotation? '=' body
+keyed-definition:= 'let' Name keyed-parameters result-annotation? '=' body
+keyed-parameters:= '{' (Name ':' type-expression) (',' Name ':' type-expression)* ','? '}'
 -- A host function: no body, so the result is required rather than optional.
 foreign-declaration := 'extern' 'let' Name parameters ':' result-spec
 value-binding   := 'let' binder (',' binder)* '=' expression-list
