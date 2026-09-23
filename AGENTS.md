@@ -11,12 +11,12 @@ LICENSE and vendor/LICENSE, including in generated bundles.
 The compiler is implemented and works end to end for the subset listed in README.md's status
 table: lexer, parser and AST (`ast.asdl`), semantic types and structured IR (`ir.asdl`), a
 static/normalization/residual evaluator, verification, and a C11 backend. Implemented and covered
-by tests: records, schemas, methods and field stores; the integer types (`U8`..`I64`); arrays;
-references and recursive types; sum types; closures, borrowed captures and tagged callables;
-imports; and self-tail calls. `F64` is specified in `syntax.md` §1 but not implemented, and has
-no float literal yet. Some shapes are deliberately rejected rather than miscompiled: nested
-borrowed closures, erasing a runtime-tagged callable into a signature, and the
-`ref-target`/`ref-escape` rules raise diagnostics.
+by tests: records, schemas, methods and field stores; the integer types (`U8`..`I64`) and `F64`
+as IEEE-754 double with float literals; arrays, slices and strings; references and recursive
+types; `Ptr` and `Null`; sum types; closures, borrowed captures and tagged callables; `defer`;
+foreign declarations (`extern`); imports; and self-tail calls. Some shapes are deliberately
+rejected rather than miscompiled: nested borrowed closures, erasing a runtime-tagged callable
+into a signature, and the `ref-target`/`ref-escape` rules raise diagnostics.
 
 `wordletkit.lua` is NOT the compiler. The `.let` examples under `examples/` compile and run today;
 the expected values in VALIDATION.md are the reference-interpreter oracle. Do not claim that
@@ -46,7 +46,8 @@ value for an unimplemented phase.
 All project dependencies must live here or be documented external host tools/modules. Never reach into
 an enclosing checkout. Keep bundled modules explicit in bundle-manifest.lua; use its host allowlist for
 built-ins such as bit. The isolation test copies this project to a temporary directory and clears Lua
-search paths. If you add required project files, update its copy manifest too.
+search paths. If you add required project files, update its copy manifest too. The `editor/` tree
+is editor support, not a compiler dependency, so it is deliberately absent from that manifest.
 
 Keep compiler code separate from the vendored libraries. Record any vendor edits and provenance in
 THIRD_PARTY.md. Preserve upstream attribution. Do not install process-global ASDL caches retaining
