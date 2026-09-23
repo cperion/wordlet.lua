@@ -1524,6 +1524,9 @@ end
 
 let Node = { value: U32, next: Ptr(Node) }
 extern let host_node() : Ptr(Node)
+-- A recursive named target is representable as a pointer even though the named cell itself is not a
+-- runtime value, so the null pointer to it is accepted.
+let none() : Ptr(Node) = Null(Node)
 let chain() : U32 = do
   let head = host_node()
   return head.value + head.next.value
@@ -1537,7 +1540,7 @@ let set(i: U32, v: U32) : U32 = do
   Ptr(pool[i])[0] = v
   return Ptr(pool[i])[0]
 end
-return { functions = { sum, missing, present, at, set, total, raised, chain, nothing } }
+return { functions = { sum, missing, present, at, set, total, raised, chain, nothing, none } }
 ]==]
     local generated = wordlet.compile{ source = source, name = "ptr.let" }:unit()
     check(generated:find("uint8_t * host_region(uint32_t", 1, true) ~= nil,
@@ -1561,6 +1564,8 @@ return { functions = { sum, missing, present, at, set, total, raised, chain, not
     local pointType = generated:match("(wordletrecord_%d+) %* host_point")
     local nodeType = generated:match("(wordletrecord_%d+) %* host_node")
     check(pointType ~= nil and nodeType ~= nil, "the pointer targets have named layouts")
+    check(generated:match("(wordletrecord_%d+) %* wordlet_none") == nodeType,
+        "Null(Node) resolves a recursive named target to the node layout")
     write(path, generated .. ([[
 
 #include <assert.h>
@@ -1597,6 +1602,7 @@ int main(void) {
       n->f_value = 5; n->f_next = next; next->f_value = 6; }
     assert(wordlet_chain() == UINT32_C(11));
     assert(wordlet_nothing() == NULL);
+    assert(wordlet_none() == NULL);
     return 0;
 }
 ]]):format(pointType, pointType, nodeType, nodeType, pointType, pointType,
