@@ -11,9 +11,14 @@ module Ast {
        # `use util.helper`: the dotted name names a file next to this one, and the last segment
        # names the namespace its exports are reached through.
        | UseDecl(Name name, string path, Span span)
+       # `extern let name(a: U32) : T`: a host function. It has no body, so its result is required.
+       | ForeignDecl(ForeignDef def, Span span)
 
   # let f(a, b: U32): (U32, U32) = body
   WordDef = (Name name, Param* params, ResultSpec? result, Body body)
+  # A host function: a name, annotated requirements and a declared result, and no body, because the
+  # implementation is not written in this language.
+  ForeignDef = (Name name, Param* params, ResultSpec result)
   # let a: U32, b = expr
   ValueDef = (Binder* binders, Expr* values)
   Binder = (Name name, Expr? annotation, Span span)
@@ -26,6 +31,10 @@ module Ast {
        | U64Literal(number high, number low)
        | BoolLiteral(boolean value)
        | UnitLiteral
+       # A string literal is a byte sequence, not a text type: its bytes are the source bytes.
+       | StringLiteral(string bytes)
+       # A float literal is IEEE-754 double; its value is the number the decimal text denotes.
+       | FloatLiteral(number value)
        | Reference(Name name)
        | Apply(Expr callee, Expr* arguments)
        | FieldSelect(Expr base, Name field)
@@ -50,6 +59,9 @@ module Ast {
        | CallStmt(Expr call, Span span)
        | IfStmt(Expr test, Stmt* yes, Stmt* no, Span span)
        | ReturnStmt(Expr* values, Span span)
+       # `defer host_free(p)`: a call whose callee and arguments are evaluated here, and whose
+       # invocation happens when the enclosing block is left.
+       | Defer(Expr call, Span span)
 
   # Module export configuration; a separate grammar, not a runtime table.
   Export = (ExportItem* types, ExportItem* functions, ResultEntry* results)

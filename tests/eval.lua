@@ -32,6 +32,47 @@ local function rejects(code, program, entry, args)
     return err
 end
 
+-- F64 follows IEEE-754 rather than the integer rules: a division by zero is an infinity or a NaN, a
+-- NaN comparison is false, an integer rounds to the nearest double, and a float truncates toward an
+-- integer with the target's range checked.
+do
+    local source = "let third(): F64 = 1.0 / 3.0\n"
+        .. "let inf(): F64 = 1.0 / 0.0\n"
+        .. "let nan(): F64 = 0.0 / 0.0\n"
+        .. "let nan_eq(): Bool = (0.0 / 0.0) == (0.0 / 0.0)\n"
+        .. "let nan_ne(): Bool = (0.0 / 0.0) != (0.0 / 0.0)\n"
+        .. "let huge(): Bool = 1.0 / 0.0 > 1.0e308\n"
+        .. "let rounds(): F64 = F64(18446744073709551615)\n"
+        .. "let truncates(): U32 = U32(2.75)\n"
+        .. "let adopts(x: F64): F64 = x * 2.0\n"
+        .. "let adopted(): F64 = adopts(3)\n"
+        .. "let negated(x: F64): F64 = -x\n"
+        .. "let ordered(a: F64, b: F64): Bool = a < b\n"
+        .. "return { functions = { third, inf, nan, nan_eq, nan_ne, huge, rounds, truncates,\n"
+        .. "    adopted, negated, ordered } }"
+    check(interpret("third", {}, source)[1] == 1.0 / 3.0, "a float division is IEEE")
+    check(interpret("inf", {}, source)[1] == math.huge, "a division by zero is an infinity")
+    local nan = interpret("nan", {}, source)[1]
+    check(nan ~= nan, "zero over zero is a NaN")
+    check(interpret("nan_eq", {}, source)[1] == false, "a NaN is not equal to itself")
+    check(interpret("nan_ne", {}, source)[1] == true, "a NaN is not equal to itself, so `!=` holds")
+    check(interpret("huge", {}, source)[1] == true, "an infinity exceeds every finite double")
+    check(interpret("rounds", {}, source)[1] == 18446744073709551616.0,
+        "an integer rounds to the nearest double, ties to even")
+    check(interpret("truncates", {}, source)[1] == 2, "a float truncates toward zero")
+    check(interpret("adopted", {}, source)[1] == 6.0, "an integer literal adopts F64")
+    check(interpret("negated", { 2.5 }, source)[1] == -2.5, "a double negates as itself")
+    check(interpret("ordered", { 1.5, 2.5 }, source)[1] == true, "a double orders as IEEE does")
+    -- An integer that is not a literal needs the conversion written, because rounding may lose a value.
+    rejects("type-mismatch", "let f(n: U32): F64 = n + 1.5\nreturn { functions = { f } }", "f", { 1 })
+    -- F64 has no remainder, power, shift or bitwise operator.
+    rejects("type-mismatch", "let f(): F64 = 1.5 % 2.0\nreturn { functions = { f } } ")
+    rejects("type-mismatch", "let f(): F64 = 1.5 & 2.0\nreturn { functions = { f } }")
+    -- A known value outside the target's range is refused while compiling.
+    rejects("numeric-range", "let f(): U32 = U32(4294967296.0)\nreturn { functions = { f } }")
+    rejects("numeric-range", "let f(): U32 = U32(18446744073709551615.0)\nreturn { functions = { f } }")
+end
+
 -- Static evaluation ----------------------------------------------------------------------------
 check(interpret("affine", { 3, 7, 4 },
     "let affine(a, b, x: U32) : U32 = a * x + b\nreturn { functions = { affine } }")[1] == 19,
@@ -1364,6 +1405,168 @@ check(aliasUnit:find("wordlet_a", 1, true) and aliasUnit:find("wordlet_b", 1, tr
 local one = compile("let f(x: U32) : U32 = x * 3 + 1\nreturn { functions = { f } }"):unit()
 local two = compile("let f(x: U32) : U32 = x * 3 + 1\nreturn { functions = { f } }"):unit()
 check(one == two, "emission is deterministic")
+
+-- A deferred action runs when the block it is written in is left: in reverse order, after the value
+-- has been read, from a statement conditional's arm as much as from the block itself, and after a tail
+-- self-call has returned rather than as a back edge. The counter shifts a digit in per action, so the
+-- number left behind spells the order they ran in.
+do
+    local source = "let Counter = { n: U32 }\n"
+        .. "let counter = Counter { n = 0 }\n"
+        .. "let push(v: U32): U32 = do\n  let c = Ref(counter)\n  c.n = c.n * 10 + v\n"
+        .. "  return c.n\nend\n"
+        .. "let reset(): U32 = do\n  let c = Ref(counter)\n  c.n = 0\n  return 0\nend\n"
+        .. "let body(): U32 = do\n  defer push(1)\n  defer push(2)\n  return 0\nend\n"
+        .. "let ordered(): U32 = do\n  reset()\n  let before = body()\n"
+        .. "  return (before + 1) * 1000 + Ref(counter).n\nend\n"
+        .. "let arm(): U32 = do\n  defer push(7)\n"
+        .. "  if Ref(counter).n == 0 then return 1 end\n  return 2\nend\n"
+        .. "let via_arm(): U32 = do\n  reset()\n  let r = arm()\n  return r * 10 + Ref(counter).n\nend\n"
+        .. "let countdown(n: U32, acc: U32): U32 = do\n  if n == 0 then return acc end\n"
+        .. "  defer push(n)\n  return countdown(n - 1, acc * 10 + n)\nend\n"
+        .. "let tailed(): U32 = do\n  reset()\n  let acc = countdown(3, 0)\n"
+        .. "  return acc * 1000 + Ref(counter).n\nend\n"
+        .. "let counted(n: U32): U32 = do\n  reset()\n  return countdown(n, 0)\nend\n"
+        -- `countdown` is exported so its emitted C has a predictable name to inspect below.
+        .. "return { functions = { ordered, via_arm, tailed, counted, countdown } }"
+    check(interpret("ordered", {}, source)[1] == 1021,
+        "two actions run in reverse order, after the returned value was read")
+    check(interpret("via_arm", {}, source)[1] == 17,
+        "a return inside a statement conditional's arm still runs the pending action")
+    check(interpret("tailed", {}, source)[1] == 321123,
+        "a tail self-call runs the action after the call returns")
+    check(interpret("counted", { 0 }, source)[1] == 0, "a deferred block with no iteration")
+    check(interpret("counted", { 5 }, source)[1] == 54321, "the deferral survives every recursion")
+    local generated = compile(source):unit()
+    local start = generated:find("uint32_t wordlet_countdown(uint32_t v1, uint32_t v3) {", 1, true)
+    check(start ~= nil, "the deferred recursion is emitted")
+    local body = generated:sub(start, (generated:find("\n}", start, true) or #generated))
+    check(body:find("for (;;)", 1, true) == nil,
+        "a block with a pending action does not become a loop")
+    check(body:find("wordlet_countdown(", 1, true) ~= nil,
+        "the tail self-call is a real call, so the action runs after it returns")
+end
+
+-- A call whose only purpose is an effect still has to be compiled. A store through a local binding that
+-- holds a reference to module storage *is* a store to module storage, so folding such a call away would
+-- silently drop the write from the generated code.
+do
+    local source = "let Counter = { n: U32 }\n"
+        .. "let counter = Counter { n = 0 }\n"
+        .. "let reset(): U32 = do\n  let c = Ref(counter)\n  c.n = 0\n  return 0\nend\n"
+        .. "let bump(v: U32): U32 = do\n  let c = Ref(counter)\n  c.n += v\n  return c.n\nend\n"
+        .. "let use(): U32 = do\n  reset()\n  bump(5)\n  return Ref(counter).n\nend\n"
+        .. "return { functions = { use } }"
+    check(interpret("use", {}, source)[1] == 5, "a write through a reference to module storage is seen")
+    local generated = compile(source):unit()
+    -- The definition, not the prototype: everything from the prototype onwards spans other functions.
+    local start = generated:find("uint32_t wordlet_use(void) {", 1, true)
+    check(start ~= nil, "the effect-only entry is emitted")
+    local body = generated:sub(start, (generated:find("\n}", start, true) or #generated))
+    local calls = select(2, body:gsub("wordletfn_%d+%(", ""))
+    check(calls == 2,
+        ("both effect-only calls are compiled, not folded away (found %d)"):format(calls))
+end
+
+-- Exhausting a budget is a diagnostic, not a crash. A recursive word whose static arguments change
+-- specializes once per value, which must stop at a resource rather than at the host's own stack; a
+-- fold that merely runs out of depth is compiled instead; and the reference interpreter, which has no
+-- fallback, is bounded where it cannot reach the host stack limit.
+do
+    local indexed = "let scan(s: String, b: U8, i: U32): U32 = do\n"
+        .. "  if i >= s.length then return 0 end\n"
+        .. "  if s[i] == b then return 1 + scan(s, b, i + 1) end\n"
+        .. "  return scan(s, b, i + 1)\n"
+        .. "end\n"
+        .. "let count_a(s: String): U32 = scan(s, 'a', 0)\n"
+        .. "return { functions = { count_a } }"
+    rejects("depth", indexed)
+    -- The reference interpreter folds the same scan, because its view is concrete and six bytes long.
+    check(interpret("count_a", { "banana" }, indexed)[1] == 3, "a concrete view folds the scan")
+    local deep = "let g(n: U32): U32 = if n == 0 then 0 else n + g(n - 1)\n"
+        .. "return { functions = { g } }"
+    check(compile(deep):unit():find("wordlet_g(", 1, true) ~= nil,
+        "a fold that runs out of depth is compiled, not refused")
+    check(interpret("g", { 1000 }, deep)[1] == 500500, "a recursion inside the interpreter's depth runs")
+    rejects("static-depth", deep, "g", { 5000 })
+    -- A top-level initializer is folded, and has no runtime code to fall back to, so a fold that
+    -- runs out of depth there is the answer rather than a reason to compile.
+    rejects("static-depth", deep:gsub("return { functions = { g } }",
+        "let x: U32 = g(2000)\nreturn { functions = {} }"))
+end
+
+-- The literal surface: grouped digits, binary, byte literals, long strings and long comments.
+do
+    local source = "let grouped(): U32 = 1_000_000 + 0b1010_1010\n"
+        .. "let wide(): U32 = 0b1111_1111_1111_1111_1111_1111_1111_1111_1111_1111 % 4294967296\n"
+        .. "let hex(): U32 = 0xffff_ffff\n"
+        .. "let byte(): U32 = U32('\\n')\n"
+        .. "let is_a(): Bool = 'a' == 97\n"
+        .. "let raw(): U32 = [=[a\\tb]=].length\n"
+        .. "let long(): U32 = [=[\nab\ncd\n]=].length\n"
+        .. "let commented(): U32 = do\n  --[[ a ]=] b ]]\n  return 7\nend\n"
+        .. "return { functions = { grouped, wide, hex, byte, is_a, raw, long, commented } }"
+    check(interpret("grouped", {}, source)[1] == 1000170, "a grouped decimal and a binary literal")
+    check(interpret("wide", {}, source)[1] == 4294967295, "a binary literal above a word keeps its bits")
+    check(interpret("hex", {}, source)[1] == 4294967295, "a grouped hexadecimal literal")
+    check(interpret("byte", {}, source)[1] == 10, "a byte literal takes the escapes a string does")
+    check(interpret("is_a", {}, source)[1] == true, "a byte literal is a numeric literal")
+    check(interpret("raw", {}, source)[1] == 4, "a long string is raw, so a backslash is a byte")
+    check(interpret("long", {}, source)[1] == 6, "a long string spans lines, less one leading newline")
+    check(interpret("commented", {}, source)[1] == 7, "a long comment is skipped")
+end
+
+-- Tail position belongs to the whole returned expression, so a self-call inside a larger expression
+-- is a real call and not a back edge whose result would be Unit.
+do
+    local mixed = "let f(n: U32): U32 = do\n"
+        .. "  if n == 0 then return 0 end\n"
+        .. "  if n == 1 then return 100 + f(n - 1) end\n"
+        .. "  return f(n - 1)\n"
+        .. "end\nreturn { functions = { f } }"
+    check(interpret("f", { 0 }, mixed)[1] == 0, "the base case returns zero")
+    check(interpret("f", { 1 }, mixed)[1] == 100, "a non-tail self-call is evaluated, not discarded")
+    check(interpret("f", { 3 }, mixed)[1] == 100, "the tail branch reaches the non-tail branch")
+    local generated = compile(mixed):unit()
+    check(generated:find("for (;;)", 1, true) ~= nil, "the tail branch is still a loop")
+    check(generated:find("wordlet_f(", 1, true) ~= nil, "the non-tail branch is a real call")
+end
+
+-- The documented values of examples/strings.let, so the VALIDATION bullet is executable.
+do
+    local path = (source:match("^(.*[/\\])") or "./") .. "../examples/strings.let"
+    local file = assert(io.open(path, "rb"))
+    local text = file:read("*a")
+    assert(file:close())
+    local expected = {
+        { "byte_at", { "A", 0 }, 65 }, { "length_of", { "hello" }, 5 },
+        { "count_a", { "banana", 0 }, 3 }, { "same", {}, true }, { "different", {}, false },
+        { "escaped", {}, 4 }, { "empty_length", {}, 0 }, { "grouped", {}, 1000170 },
+        { "banner_length", {}, 13 }, { "banner_first", {}, 102 }, { "banner_is_raw", {}, 4 },
+        { "module_view", { 1 }, 20 }, { "sliced_sum", {}, 60 },
+    }
+    for _, case in ipairs(expected) do
+        local got = interpret(case[1], case[2], text)[1]
+        check(got == case[3], ("examples/strings.let %s: expected %s but got %s")
+            :format(case[1], tostring(case[3]), tostring(got)))
+    end
+end
+
+-- Reading module storage through a reference is an ordinary run-time read. A call whose arguments
+-- happen to be static must still be compiled rather than folded when the body needs that storage.
+do
+    local shared = "let Counter = { value: U32 }\nlet shared = Counter { value = 5 }\n"
+        .. "let read_shared(x: U32): U32 = Ref(shared).value + x\n"
+    check(interpret("read_shared", { 1 }, shared .. "return { functions = { read_shared } }")[1] == 6,
+        "module initialization reads module storage through a reference")
+    local generated = compile(shared .. "let peek(): U32 = read_shared(1)\n"
+        .. "return { functions = { peek } }"):unit()
+    check(generated:find("wordletmodule_1", 1, true) ~= nil,
+        "a literal-argument call to a module-storage reader is compiled, not folded")
+    check(generated:find("f_value", 1, true) ~= nil, "the module read is emitted rather than baked")
+    -- A body that is genuinely wrong is still reported: only the need for run-time code falls back.
+    rejects("type-mismatch", "let bad(): U32 = 1 + true\nreturn { functions = { bad } }")
+end
 
 -- A long binding chain must compile in time linear in the chain. Interned expressions name their
 -- operands by id, not by re-encoding the subtree, so a key costs the same however deep an operand

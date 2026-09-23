@@ -291,8 +291,19 @@ function M.expr(expr, locals, storages)
             elseif expr.literal.value > S.maxOf(expr.type) then
                 D.bug("ir-literal", "A constant does not fit in its own width")
             end
+        elseif expr.type == S.F64 then
+            if expr.literal.kind ~= "Float" then D.bug("ir-literal", "F64 constant needs a Float literal") end
         elseif expr.type == S.Bool then
             if expr.literal.kind ~= "Boolean" then D.bug("ir-literal", "Bool constant needs a Boolean literal") end
+        elseif S.isSlice(expr.type) then
+            -- A byte slice is the one aggregate with a literal spelling, and its bytes are the
+            -- constant. Any other element type has no literal, so a Str there is a compiler bug.
+            if expr.literal.kind ~= "Str" then
+                D.bug("ir-literal", "A slice constant needs a string literal")
+            end
+            if not S.isString(expr.type) then
+                D.bug("ir-literal", "Only a byte slice has a literal spelling")
+            end
         else
             D.bug("ir-const", "Unsupported constant type " .. S.encode(expr.type))
         end
@@ -303,6 +314,19 @@ function M.expr(expr, locals, storages)
         end
         return expr.type
     elseif kind == "Make" then
+        if S.isSlice(expr.type) then
+            -- A slice is a data pointer and a length. The pointer is an ordinary reference to the
+            -- element, so constructing a view needs no new kind of value.
+            if #expr.fields ~= 2 then D.bug("ir-arity", "A slice needs a data pointer and a length") end
+            local data = M.expr(expr.fields[1], locals, storages)
+            if not S.isRef(data) or data.target ~= expr.type.element then
+                D.bug("ir-type", "Slice data must be a reference to the element type")
+            end
+            if M.expr(expr.fields[2], locals, storages) ~= S.U32 then
+                D.bug("ir-type", "A slice length is a U32")
+            end
+            return expr.type
+        end
         local record = S.environmentOf(expr.type)
         if S.isArray(record) then
             if #expr.fields ~= record.length then
@@ -329,11 +353,15 @@ function M.expr(expr, locals, storages)
         -- An address is pure: it computes the address of a place and reads nothing. The pointee
         -- identity is a type-cell fact the verifier does not re-derive, so this checks the recorded
         -- type is a reference and that the place is well formed.
-        if not S.isRef(expr.type) then D.bug("ir-type", "Addr needs a reference type") end
+        -- An address is the same node for a reference and for a raw pointer: they share a
+        -- representation, and the only difference is a lifetime rule the checker does not decide.
+        if not S.isRef(expr.type) and not S.isPtr(expr.type) then
+            D.bug("ir-type", "Addr needs a reference or a pointer type")
+        end
         local placeType = M.place(expr.place, storages, locals)
         if placeType == nil then D.bug("ir-place", "Addr needs a place with a known type") end
         if not S.isNamed(expr.type.target) and placeType ~= expr.type.target then
-            D.bug("ir-type", "Addr place type does not match the reference target")
+            D.bug("ir-type", "Addr place type does not match the address target")
         end
         return expr.type
     elseif kind == "Get" then
@@ -345,9 +373,12 @@ function M.expr(expr, locals, storages)
         return expr.type
     elseif kind == "Convert" then
         -- A conversion is between integer widths, and its type is the width it converts to.
+        -- A conversion is between integer widths, or between an integer and F64, and its type is what
+        -- it converts to.
         local operand = M.expr(expr.operand, locals, storages)
-        if not S.isInteger(operand) or not S.isInteger(expr.type) then
-            D.bug("ir-type", "Convert needs two integer widths")
+        if not ((S.isInteger(operand) and S.isInteger(expr.type))
+            or (S.isF64(operand) ~= S.isF64(expr.type))) then
+            D.bug("ir-type", "Convert needs two integer widths, or one integer and F64")
         end
         return expr.type
     elseif kind == "Un" then
@@ -356,7 +387,9 @@ function M.expr(expr, locals, storages)
         if op == "Not" then
             if operand ~= S.Bool or expr.type ~= S.Bool then D.bug("ir-type", "Not requires Bool") end
         elseif op == "Neg" or op == "BitNot" then
-            if not S.isInteger(operand) or operand ~= expr.type then
+            -- F64 has negation but no complement: IEEE defines no bitwise operation on a double.
+            local doubleNegation = op == "Neg" and S.isF64(operand) and operand == expr.type
+            if not doubleNegation and (not S.isInteger(operand) or operand ~= expr.type) then
                 D.bug("ir-type", "Unary " .. op .. " requires one integer width")
             end
         else
@@ -370,8 +403,13 @@ function M.expr(expr, locals, storages)
         local arithmetic = { Add = true, Sub = true, Mul = true, Div = true, Rem = true, Pow = true,
             BitAnd = true, BitOr = true, BitXor = true }
         if arithmetic[op] then
-            if not S.isInteger(left) or left ~= right or expr.type ~= left then
-                D.bug("ir-type", "Arithmetic " .. op .. " requires one integer width")
+            -- F64 is one type on both sides too, but it has no remainder and no power: IEEE puts
+            -- those outside the arithmetic operators rather than making them a rounding question.
+            if not (S.isInteger(left) or S.isF64(left)) or left ~= right or expr.type ~= left then
+                D.bug("ir-type", "Arithmetic " .. op .. " requires one integer width or F64 on both sides")
+            end
+            if S.isF64(left) and op ~= "Add" and op ~= "Sub" and op ~= "Mul" and op ~= "Div" then
+                D.bug("ir-op", "F64 has no " .. op .. " operator")
             end
         elseif op == "Shl" or op == "Shr" then
             -- The amount is a plain U32; the value keeps its own width.
@@ -381,12 +419,22 @@ function M.expr(expr, locals, storages)
         elseif op == "Eq" or op == "Ne" then
             if left ~= right or expr.type ~= S.Bool then D.bug("ir-type", "Equality requires matching types") end
         elseif op == "Lt" or op == "Le" or op == "Gt" or op == "Ge" then
-            if not S.isInteger(left) or not S.isInteger(right) or expr.type ~= S.Bool then
-                D.bug("ir-type", "Ordering requires two integers")
+            -- F64 orders as IEEE does, which is what C's operators already implement.
+            if not (S.isInteger(left) or S.isF64(left)) or left ~= right or expr.type ~= S.Bool then
+                D.bug("ir-type", "Ordering requires two integers or two F64 values")
             end
         else
             D.bug("ir-op", "Unknown binary operation " .. tostring(op))
         end
+        return expr.type
+    elseif kind == "Null" then
+        -- The null pointer of a Ptr type, and of nothing else: there is no null reference.
+        if not S.isPtr(expr.type) then D.bug("ir-type", "Null needs a Ptr type") end
+        return expr.type
+    elseif kind == "SliceLength" then
+        local view = S.environmentOf(M.expr(expr.view, locals, storages))
+        if not S.isSlice(view) then D.bug("ir-type", "SliceLength needs a slice view") end
+        if expr.type ~= S.U32 then D.bug("ir-type", "A slice length is a U32") end
         return expr.type
     end
     D.bug("ir-expr", "Unknown expression variant " .. tostring(kind))
@@ -410,7 +458,11 @@ function M.place(place, storages, locals)
         -- A reference names the place it points at. The pointee type is recorded on the node, and
         -- the base must itself be a place holding a reference.
         local base = M.place(place.base, storages, locals)
-        if not S.isRef(base) then D.bug("ir-place", "Deref needs a reference place") end
+        -- Deref is the route through a reference *or* a raw pointer: they share a representation, and
+        -- the difference between them is a lifetime rule this checker does not decide.
+        if not S.isRef(base) and not S.isPtr(base) then
+            D.bug("ir-place", "Deref needs a reference or a pointer place")
+        end
         return place.type
     end
     if kind == "Local" then
@@ -427,6 +479,32 @@ function M.place(place, storages, locals)
         if not field then D.bug("ir-field", "Project names an unknown field " .. place.field.name) end
         return field
     end
+    if kind == "PtrIndex" then
+        -- A pointer is a value, so its type is checked like any expression; there is no length to
+        -- compare against, which is exactly what makes this different from a slice index.
+        local view = S.environmentOf(M.expr(place.view, locals, storages))
+        if not S.isPtr(view) then D.bug("ir-place", "PtrIndex needs a pointer view") end
+        if view.target ~= place.type then
+            D.bug("ir-type", "PtrIndex element type does not match the pointer")
+        end
+        if M.expr(place.index, locals, storages) ~= S.U32 then
+            D.bug("ir-type", "PtrIndex needs a U32 index")
+        end
+        return place.type
+    end
+    if kind == "SliceIndex" then
+        -- The view is a value rather than a place, so its type is checked like any expression;
+        -- the element type is recorded on the node and the index has to be a U32.
+        local view = S.environmentOf(M.expr(place.view, locals, storages))
+        if not S.isSlice(view) then D.bug("ir-place", "SliceIndex needs a slice view") end
+        if view.element ~= place.type then
+            D.bug("ir-type", "SliceIndex element type does not match the view")
+        end
+        if M.expr(place.index, locals, storages) ~= S.U32 then
+            D.bug("ir-type", "SliceIndex needs a U32 index")
+        end
+        return place.type
+    end
     D.bug("ir-place", "Unknown place variant " .. tostring(kind))
 end
 
@@ -437,8 +515,14 @@ function M.arg(arg, locals, storages)
     D.bug("ir-arg", "Unknown argument variant " .. tostring(arg.kind))
 end
 
-function M.program(fnList, modules)
+function M.program(fnList, modules, foreigns)
     local definitions = {}
+    -- A foreign target is declared rather than defined, so it has a result contract and no body, which
+    -- is all the call check needs to know about it.
+    for _, foreign in ipairs(foreigns or {}) do
+        definitions[foreign.target] = { results = foreign.results, inputs = foreign.inputs,
+            foreign = true }
+    end
     for _, fn in ipairs(fnList) do
         if definitions[fn.id] then D.bug("ir-duplicate", "Duplicate function id " .. fn.id) end
         if fn.role.kind ~= "Body" and fn.role.kind ~= "Entry" then

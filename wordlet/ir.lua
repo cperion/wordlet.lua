@@ -24,6 +24,10 @@ function M.eachExpr(expr, fn)
         M.eachExpr(expr.aggregate, fn)
     elseif kind == "Make" then
         for _, field in ipairs(expr.fields) do M.eachExpr(field, fn) end
+    elseif kind == "Null" then
+        return
+    elseif kind == "SliceLength" then
+        M.eachExpr(expr.view, fn)
     elseif kind == "Owned" then
         M.eachExpr(expr.environment, fn)
     elseif kind == "Convert" then
@@ -127,6 +131,9 @@ function Builder:u32(n) return self:const(S.U32, Ir.UInt(n)) end
 function Builder:int(ty, n) return self:const(ty, Ir.UInt(n)) end
 function Builder:int64(ty, high, low) return self:const(ty, Ir.UInt64(high, low)) end
 function Builder:bool(b) return self:const(S.Bool, Ir.Boolean(b)) end
+-- A float constant. Its intern key is the value's own exact encoding, so two equal doubles share a
+-- node and two unequal ones do not.
+function Builder:float(ty, n) return self:const(ty, Ir.Float(n)) end
 function Builder:ref(value, ty)
     return self:intern("ref|" .. value.id .. "|" .. S.encode(ty), function()
         return Ir.Ref(value, ty)
@@ -220,6 +227,30 @@ function Builder:addr(place, ty)
     return self:intern("addr|" .. S.encode(place) .. "|" .. S.encode(ty), function()
         return Ir.Addr(place, ty)
     end)
+end
+-- The length of a slice value. Pure, like a record field projection, so it is interned and keyed
+-- by the view's own id rather than by re-encoding it.
+function Builder:sliceLength(view, ty)
+    return self:intern("slicelen|" .. view.id .. "|" .. S.encode(ty), function()
+        return Ir.SliceLength(view, ty)
+    end)
+end
+
+-- An element place of a slice value. Places are constructed, not interned, because a place names
+-- storage instead of being a value; it can be read and, when the viewed storage is mutable, written.
+-- The null pointer of a Ptr type. Pure, and interned by its type, so every null of one type is one
+function Builder:nullPtr(ty)
+    return self:intern("null|" .. S.encode(ty), function() return Ir.Null(ty) end)
+end
+
+-- An element place of a pointer. A pointer carries no length, so unlike a slice index this one has
+-- no bounds check to emit; it is a place because the element can be written through it.
+function Builder:ptrIndex(view, index, ty)
+    return Ir.PtrIndex(view, index, ty)
+end
+
+function Builder:sliceIndex(view, index, ty)
+    return Ir.SliceIndex(view, index, ty)
 end
 
 -- Statement emitters append to a list and return any result values.

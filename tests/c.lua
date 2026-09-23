@@ -50,6 +50,15 @@ local function assertValue(checks, path, value)
         checks[#checks + 1] = "    assert((" .. path .. ") == " .. (value and "true" or "false") .. ");"
     elseif value == "unit" then
         checks[#checks + 1] = "    (void)(" .. path .. ");"
+    elseif kind == "string" then
+        -- A string result is a slice, so its bytes are compared through the struct's own fields.
+        local items = {}
+        for index = 1, #value do items[#items + 1] = tostring(value:byte(index)) end
+        if #items == 0 then items[1] = "0" end
+        checks[#checks + 1] = "    { static const uint8_t expected[] = { " .. table.concat(items, ", ") .. " };"
+        checks[#checks + 1] = "      assert((" .. path .. ").f_length == UINT32_C(" .. #value .. "));"
+        checks[#checks + 1] = "      assert((" .. path .. ").f_length == UINT32_C(0) || memcmp((" .. path
+            .. ").f_data, expected, " .. #value .. ") == 0); }"
     elseif kind == "table" and value.record then
         local any = false
         for name, field in pairs(value) do
@@ -726,11 +735,250 @@ return { types = {  }, functions = { low, high, square_low, square_high, cube_lo
             { entry = "big_literal", arity = 1, inputs = { { 0 }, { 1 }, { 4294967295 } } },
         },
     },
+    {
+        name = "strings",
+        source = [[
+let length_of(): U32 = "hello".length
+let empty_length(): U32 = "".length
+let first_byte(): U32 = U32("A"[0])
+let last_byte(): U32 = U32("abc"[2])
+let same(): Bool = "hello" == "hello"
+let different(): Bool = "hello" == "world"
+let escaped(): U32 = "a\tb".length
+let nul(): U32 = U32("a\0b"[1])
+let sum(s: Slice(U32)): U32 = s[0] + s[1] + s[2]
+let through_call(): U32 = do
+  let arr = [10, 20, 30]
+  return sum(Slice(arr))
+end
+let whole(): U32 = do
+  let arr = [4, 5, 6]
+  let view = Slice(arr)
+  return view.length * 100 + view[1]
+end
+let size_at(s: String): U32 = s.length
+let byte_string(): U32 = size_at("four")
+return { functions = { length_of, empty_length, first_byte, last_byte, same, different, escaped,
+    nul, through_call, whole, byte_string } }
+]],
+        entries = {
+            { entry = "length_of", arity = 0, inputs = { {} } },
+            { entry = "empty_length", arity = 0, inputs = { {} } },
+            { entry = "first_byte", arity = 0, inputs = { {} } },
+            { entry = "last_byte", arity = 0, inputs = { {} } },
+            { entry = "same", arity = 0, inputs = { {} } },
+            { entry = "different", arity = 0, inputs = { {} } },
+            { entry = "escaped", arity = 0, inputs = { {} } },
+            { entry = "nul", arity = 0, inputs = { {} } },
+            { entry = "through_call", arity = 0, inputs = { {} } },
+            { entry = "whole", arity = 0, inputs = { {} } },
+            { entry = "byte_string", arity = 0, inputs = { {} } },
+        },
+    },
+    {
+        name = "stringparam",
+        source = [[
+let length_of(s: String): U32 = s.length
+let byte_at(s: String, i: U32): U32 = U32(s[i])
+let same(a: String, b: String): Bool = a == b
+let echo(s: String): String = s
+return { functions = { length_of, byte_at, same, echo } }
+]],
+        entries = {
+            { entry = "length_of", arity = 1, inputs = { { "" }, { "a" }, { "hello" } } },
+            { entry = "byte_at", arity = 2, inputs = { { "A", 0 }, { "hello", 4 }, { "\255", 0 } } },
+            { entry = "same", arity = 2,
+                inputs = { { "ab", "ab" }, { "ab", "ac" }, { "", "" } } },
+            { entry = "echo", arity = 1, inputs = { { "" }, { "round trip" } } },
+        },
+    },
+    {
+        name = "f64",
+        source = "let half(x: F64): F64 = x / 2.0\n"
+            .. "let negate(x: F64): F64 = -x\n"
+            .. "let scaled(x: F64): F64 = half(x) * 2.0 + 1.0\n"
+            .. "let ordered(a: F64, b: F64): Bool = a < b\n"
+            .. "let equal(a: F64, b: F64): Bool = a == b\n"
+            .. "let truncate(x: F64): U32 = U32(x)\n"
+            .. "let widen(n: U32): F64 = F64(n)\n"
+            .. "let from_u64(): F64 = F64(18446744073709551615)\n"
+            .. "let nan(): F64 = 0.0 / 0.0\n"
+            .. "let infinity(): F64 = 1.0 / 0.0\n"
+            .. "let nan_eq(): Bool = (0.0 / 0.0) == (0.0 / 0.0)\n"
+            .. "let nan_ne(): Bool = (0.0 / 0.0) != (0.0 / 0.0)\n"
+            .. "let folded(): F64 = 2.0 * 3\n"
+            .. "let thirds(): F64 = 1.0 / 3.0\n"
+            .. "return { functions = { half, negate, scaled, ordered, equal, truncate, widen, from_u64,\n"
+            .. "    nan, infinity, nan_eq, nan_ne, folded, thirds } }",
+        entries = {
+            { entry = "half", arity = 1, inputs = { { 2.5 }, { -2.5 }, { 1e300 }, { 0.5 } } },
+            { entry = "negate", arity = 1, inputs = { { 2.5 }, { -0.5 } } },
+            { entry = "scaled", arity = 1, inputs = { { 2.5 }, { 0.25 } } },
+            { entry = "ordered", arity = 2, inputs = { { 1.5, 2.5 }, { 2.5, 1.5 }, { 1.5, 1.5 } } },
+            { entry = "equal", arity = 2, inputs = { { 1.5, 1.5 }, { 1.5, 2.5 } } },
+            { entry = "truncate", arity = 1, inputs = { { 2.75 }, { 0 }, { 4294967295.0 } } },
+            { entry = "widen", arity = 1, inputs = { { 1 }, { 4294967295 } } },
+            { entry = "from_u64", arity = 0, inputs = { {} } },
+            { entry = "nan", arity = 0, inputs = { {} } },
+            { entry = "infinity", arity = 0, inputs = { {} } },
+            { entry = "nan_eq", arity = 0, inputs = { {} } },
+            { entry = "nan_ne", arity = 0, inputs = { {} } },
+            { entry = "folded", arity = 0, inputs = { {} } },
+            { entry = "thirds", arity = 0, inputs = { {} } },
+        },
+    },
+    {
+        name = "defer",
+        -- Every entry resets the counter first, so the case does not depend on call order.
+        source = [==[
+let Counter = { n: U32 }
+let counter = Counter { n = 0 }
+
+let push(v: U32): U32 = do
+  let c = Ref(counter)
+  c.n = c.n * 10 + v
+  return c.n
+end
+
+let reset(): U32 = do
+  let c = Ref(counter)
+  c.n = 0
+  return 0
+end
+
+let body(): U32 = do
+  defer push(1)
+  defer push(2)
+  return 0
+end
+
+let ordered(): U32 = do
+  reset()
+  let before = body()
+  return (before + 1) * 1000 + Ref(counter).n
+end
+
+let arm(): U32 = do
+  defer push(7)
+  if Ref(counter).n == 0 then return 1 end
+  return 2
+end
+
+let via_arm(): U32 = do
+  reset()
+  let r = arm()
+  return r * 10 + Ref(counter).n
+end
+
+let countdown(n: U32, acc: U32): U32 = do
+  if n == 0 then return acc end
+  defer push(n)
+  return countdown(n - 1, acc * 10 + n)
+end
+
+let tailed(): U32 = do
+  reset()
+  let acc = countdown(3, 0)
+  return acc * 1000 + Ref(counter).n
+end
+
+let counted(n: U32): U32 = do
+  reset()
+  return countdown(n, 0)
+end
+return { functions = { ordered, via_arm, tailed, counted, countdown } }
+]==],
+        entries = {
+            { entry = "ordered", arity = 0, inputs = { {} } },
+            { entry = "via_arm", arity = 0, inputs = { {} } },
+            { entry = "tailed", arity = 0, inputs = { {} } },
+            { entry = "counted", arity = 1, inputs = { { 0 }, { 1 }, { 3 }, { 5 } } },
+        },
+    },
+    {
+        name = "recursionmix",
+        source = "let f(n: U32): U32 = do\n"
+            .. "  if n == 0 then return 0 end\n"
+            .. "  if n == 1 then return 100 + f(n - 1) end\n"
+            .. "  return f(n - 1)\n"
+            .. "end\n"
+            .. "let g(n: U32): U32 = if n == 0 then 0 else n + g(n - 1)\n"
+            .. "return { functions = { f, g } }",
+        entries = {
+            { entry = "f", arity = 1, inputs = { { 0 }, { 1 }, { 3 }, { 100 } } },
+            -- The reference interpreter is bounded at 1024 nested static evaluations, well below
+            -- the host stack limit, so this stays inside that budget; a deeper program reports a
+            -- `resource` diagnostic instead of overflowing the Lua stack.
+            { entry = "g", arity = 1, inputs = { { 0 }, { 1 }, { 100 }, { 1000 } } },
+        },
+    },
+    {
+        name = "literals",
+        source = [==[
+let banner = [=[
+ab
+cd
+]=]
+let banner_length(): U32 = banner.length
+let banner_byte(i: U32): U32 = U32(banner[i])
+let binary(): U32 = 0b1010_1010
+let separated(): U32 = 1_000_000
+let hexsep(): U32 = 0xffff_ffff
+let byte_eq(): Bool = 'a' == 97
+let byte_nl(): U32 = U32('\n')
+let byte_adapt(x: U8): U8 = 'z' - x
+let byte_match(s: String): U32 = if s[0] == 'a' then 1 else 0
+let raw_quote(): U32 = [=[a "quoted" word]=].length
+let nested(): U32 = [[1, 2], [3, 4]][1][0]
+return { functions = { banner_length, banner_byte, binary, separated, hexsep, byte_eq,
+    byte_nl, byte_adapt, byte_match, raw_quote, nested } }
+]==],
+        entries = {
+            { entry = "banner_length", arity = 0, inputs = { {} } },
+            { entry = "banner_byte", arity = 1, inputs = { { 0 }, { 3 }, { 5 } } },
+            { entry = "binary", arity = 0, inputs = { {} } },
+            { entry = "separated", arity = 0, inputs = { {} } },
+            { entry = "hexsep", arity = 0, inputs = { {} } },
+            { entry = "byte_eq", arity = 0, inputs = { {} } },
+            { entry = "byte_nl", arity = 0, inputs = { {} } },
+            { entry = "byte_adapt", arity = 1, inputs = { { 0 }, { 2 }, { 122 } } },
+            -- The empty input is left out: a known index into an empty view rejects while compiling.
+            { entry = "byte_match", arity = 1, inputs = { { "abc" }, { "xyz" }, { "a" } } },
+            { entry = "raw_quote", arity = 0, inputs = { {} } },
+            { entry = "nested", arity = 0, inputs = { {} } },
+        },
+    },
 }
 
-local function cLiteral(value)
-    if type(value) == "number" then return "UINT32_C(" .. value .. ")" end
+-- A `String` argument is a slice, so it arrives as the same struct any other view uses: a pointer
+-- to its bytes and its length. The bytes live in a compound literal with automatic storage, so
+-- they last for the call.
+-- A double written exactly. A hex float literal denotes the same bits in C11, and an infinity has no
+-- literal at all, so it is named from <math.h>; a NaN is tested with `isnan` rather than compared.
+local function cFloat(n)
+    if n == math.huge then return "INFINITY" end
+    if n == -math.huge then return "-INFINITY" end
+    return string.format("%a", n)
+end
+
+local function cLiteral(value, sliceType)
+    -- A Lua number is a double, so a fractional one is an F64 argument written exactly and a whole one
+    -- is a U32. An F64 parameter takes the integer constant too, by conversion.
+    if type(value) == "number" then
+        if value ~= value then return "NAN" end
+        -- The same rule `interpret` uses for an argument: a whole number that fits a U32 is one, and
+        -- anything else is a double.
+        if value % 1 ~= 0 or value < 0 or value > 4294967295 then return cFloat(value) end
+        return "UINT32_C(" .. value .. ")"
+    end
     if type(value) == "boolean" then return value and "true" or "false" end
+    if type(value) == "string" and sliceType then
+        local items = {}
+        for index = 1, #value do items[#items + 1] = tostring(value:byte(index)) end
+        if #items == 0 then items[1] = "0" end
+        return "((" .. sliceType .. "){ (uint8_t *)(const uint8_t[]){ " .. table.concat(items, ", ")
+            .. " }, UINT32_C(" .. #value .. ") })"
+    end
     return nil
 end
 
@@ -751,12 +999,23 @@ local function runCase(case)
             local expected = wordlet.interpret{ source = case.source, name = case.name .. ".let",
                 entry = target.entry, args = args }
             local literalArgs = {}
-            for index, value in ipairs(args) do literalArgs[index] = cLiteral(value) end
+            -- The slice layout is numbered by first use, so the argument type is read from the unit.
+            local sliceType = unit:match("(wordletslice_%d+)")
+            for index, value in ipairs(args) do literalArgs[index] = cLiteral(value, sliceType) end
             -- Export names are escaped: underscore becomes _5F, so the C symbol is not the source name.
             local call = C.functionName(target.entry) .. "(" .. table.concat(literalArgs, ", ") .. ")"
             local before = #checksList
+            -- A double is compared through the return type rather than through the Lua value, because a
+            -- Lua number cannot say whether it means an integer or a float.
+            local returns = #expected == 1 and resultType(unit, C.functionName(target.entry)) or nil
             local scalar = #expected == 1 and cLiteral(expected[1]) ~= nil
-            if scalar then
+            if #expected == 1 and returns == "double" then
+                if expected[1] ~= expected[1] then
+                    checksList[#checksList + 1] = "    assert(isnan(" .. call .. "));"
+                else
+                    checksList[#checksList + 1] = "    assert((" .. call .. ") == " .. cFloat(expected[1]) .. ");"
+                end
+            elseif scalar then
                 checksList[#checksList + 1] = "    assert((" .. call .. ") == " .. cLiteral(expected[1]) .. ");"
             else
                 -- An aggregate result is bound once and then compared field by field, so the call
@@ -776,7 +1035,7 @@ local function runCase(case)
         end
     end
 
-    local main = { "#include <assert.h>", "#include <stdint.h>", "#include <stdbool.h>", "",
+    local main = { "#include <assert.h>", "#include <math.h>", "#include <stdint.h>", "#include <stdbool.h>", "",
         unit, "", "int main(void) {" }
     -- Module-level storage is assigned by an explicit host call, not implicitly.
     if unit:find("void wordlet_init(void)", 1, true) then main[#main + 1] = "    wordlet_init();" end
@@ -1113,6 +1372,9 @@ do
 let Counter = { value: U32 }
 let shared = Counter { value = 5 }
 let read_shared(x: U32): U32 = Ref(shared).value + x
+-- A call with a literal argument is still a run-time read of module storage, so it must observe a
+-- mutation the host made after `wordlet_init` rather than a snapshot folded while compiling.
+let peek(): U32 = read_shared(1)
 let via(r: Ref(Counter)): U32 = r.value
 let via_set(r: Ref(Counter), v: U32): U32 = do
   r.value = v
@@ -1138,7 +1400,7 @@ let bump_following(): U32 = n0.next {
     return r.value
   end,
 }
-return { types = { Counter, Node, Link }, functions = { read_shared, via, via_set, bump_shared, following, bump_following } }
+return { types = { Counter, Node, Link }, functions = { read_shared, peek, via, via_set, bump_shared, following, bump_following } }
 ]==]
     local artifact = wordlet.compile{ source = source, name = "refmod.let" }
     local generated = artifact:unit()
@@ -1158,6 +1420,8 @@ int main(void) {
     assert(wordlet_bump_5Fshared(UINT32_C(1)) == UINT32_C(7));
     /* the bump stores the incremented value and returns it plus its argument */
     assert(wordlet_read_5Fshared(UINT32_C(0)) == UINT32_C(6));
+    /* shared.value is 6 now, so a literal-argument call must answer 7 rather than the start value. */
+    assert(wordlet_peek() == UINT32_C(7));
     /* a host may pass a pointer for a reference parameter */
     assert(wordlet_via(%s) == UINT32_C(6));
     assert(wordlet_via_5Fset(%s, UINT32_C(20)) == UINT32_C(20));
@@ -1175,6 +1439,154 @@ int main(void) {
         "reference and recursion C failed to compile:\n" .. read(directory .. "/refmoderr.txt"))
     check(shell("timeout --kill-after=2s 10s '" .. exe .. "'") == 0,
         "a reference over module storage or a recursive structure did not run correctly")
+end
+
+-- A host function is declared, never defined: the artifact carries a prototype and the call is direct.
+-- The host links its own definition, so this is C-only, and the reference interpreter has no binding
+-- to call, which is why a constant argument does not make a foreign call foldable.
+do
+    local source = [==[
+extern let host_add(a: U32, b: U32) : U32
+extern let host_scale(a: U32) : U32
+extern let host_sink(a: U32) : Unit
+
+let combined(x: U32): U32 = host_add(x, host_scale(x))
+let ignored(x: U32): U32 = do
+  host_sink(x)
+  return host_scale(x)
+end
+return { functions = { combined, ignored } }
+]==]
+    local generated = wordlet.compile{ source = source, name = "foreign.let" }:unit()
+    check(generated:find("uint32_t host_scale(uint32_t a1);", 1, true) ~= nil,
+        "a foreign word is declared, not defined")
+    check(generated:find("WORDLET_PRIVATE uint32_t host_scale", 1, true) == nil,
+        "a foreign prototype has external linkage")
+    local path = directory .. "/foreign.c"
+    write(path, generated .. [[
+
+#include <assert.h>
+uint32_t host_scale(uint32_t a) { return a * 10; }
+uint32_t host_add(uint32_t a, uint32_t b) { return a + b; }
+static uint32_t sunk;
+void host_sink(uint32_t a) { sunk = a; }
+int main(void) {
+    assert(wordlet_combined(UINT32_C(3)) == UINT32_C(33));
+    assert(wordlet_ignored(UINT32_C(4)) == UINT32_C(40));
+    assert(sunk == UINT32_C(4));
+    return 0;
+}
+]])
+    check(shell("timeout --kill-after=2s 30s " .. CC .. " -std=c11 -Wall -Wextra -Werror -O2 -o '"
+        .. directory .. "/foreign' '" .. path .. "' 2> " .. directory .. "/foreignerr.txt") == 0,
+        "foreign declaration C failed to compile:\n" .. read(directory .. "/foreignerr.txt"))
+    check(shell("timeout --kill-after=2s 10s '" .. directory .. "/foreign'") == 0,
+        "a declared host function did not run correctly")
+end
+
+-- A raw pointer is an address the compiler does not track, and a host region is acquired and released
+-- by an ordinary word that takes a body. When the body is known that word inlines away entirely, so
+-- what survives in the generated code is the acquire, the body, and the release, in that order.
+do
+    local source = [==[
+extern let host_region(bytes: U32) : Ptr(U8)
+extern let host_release(p: Ptr(U8)) : Unit
+extern let host_null() : Ptr(U8)
+
+let with_region(R: Type, bytes: U32, body: (Ptr(U8)): R) : R = do
+  let region = host_region(bytes)
+  let result = body(region)
+  host_release(region)
+  return result
+end
+
+let sum() : U32 = with_region(U32, 8, |p: Ptr(U8)| -> do
+  p[0] = 7
+  p[1] = 35
+  return U32(p[0]) + U32(p[1])
+end)
+
+let missing() : Bool = host_null() == Null(U8)
+let present() : Bool = host_region(4) == Null(U8)
+
+-- `Ptr(place)` to storage the program already has. The array index is still checked; the pointer
+-- index that follows it is not, which is the whole difference between the two.
+let pool = [7, 8, 9]
+let at(i: U32) : U32 = Ptr(pool[i])[0]
+let set(i: U32, v: U32) : U32 = do
+  Ptr(pool[i])[0] = v
+  return Ptr(pool[i])[0]
+end
+return { functions = { sum, missing, present, at, set } }
+]==]
+    local generated = wordlet.compile{ source = source, name = "ptr.let" }:unit()
+    check(generated:find("uint8_t * host_region(uint32_t", 1, true) ~= nil,
+        "a foreign declaration returning a pointer is declared, not defined")
+    -- The combinator is neither called nor emitted: a known body makes it straight-line code.
+    check(generated:find("with_5Fregion", 1, true) == nil,
+        "a known body inlines the combinator away, leaving no call and no helper")
+    -- A known body is specialized rather than erased, so the whole unit holds no invocation pointer at
+    -- all: the call site is a direct call to a per-invocation copy of the combinator.
+    check(generated:find("wordletview", 1, true) == nil,
+        "a known body needs no invocation pointer")
+    check(select(2, generated:gsub("with_5Fregion", "")) == 0,
+        "no generic instantiation of the combinator survives")
+    local acquire, release = generated:find("host_region(", 1, true),
+        generated:find("host_release(", 1, true)
+    check(acquire ~= nil and release ~= nil and acquire < release,
+        "the region is acquired before the body and released after it")
+    local path = directory .. "/ptr.c"
+    write(path, generated .. [[
+
+#include <assert.h>
+#include <string.h>
+static unsigned char arena[16];
+static unsigned releases;
+uint8_t *host_region(uint32_t bytes) {
+    releases = 0;
+    memset(arena, 0, sizeof arena);
+    (void)bytes;
+    return arena;
+}
+void host_release(uint8_t *p) { releases += 1; (void)p; }
+uint8_t *host_null(void) { return NULL; }
+int main(void) {
+    wordlet_init();
+    assert(wordlet_sum() == UINT32_C(42));
+    assert(arena[0] == 7 && arena[1] == 35);
+    assert(releases == 1);
+    assert(wordlet_missing() == true);
+    assert(wordlet_present() == false);
+    assert(wordlet_at(UINT32_C(0)) == UINT32_C(7));
+    assert(wordlet_set(UINT32_C(2), UINT32_C(77)) == UINT32_C(77));
+    return 0;
+}
+]])
+    check(shell("timeout --kill-after=2s 30s " .. CC .. " -std=c11 -Wall -Wextra -Werror -O2 -o '"
+        .. directory .. "/ptr' '" .. path .. "' 2> " .. directory .. "/ptrerr.txt") == 0,
+        "pointer C failed to compile:\n" .. read(directory .. "/ptrerr.txt"))
+    check(shell("timeout --kill-after=2s 10s '" .. directory .. "/ptr'") == 0,
+        "a pointer or a scoped region did not run correctly")
+end
+
+-- A pointer is not a reference, in either direction: it cannot satisfy a `Ref` requirement, and
+-- `Ref(p)` cannot turn one back into a checked borrow.
+do
+    local shared = "extern let host_null() : Ptr(U8)\n"
+    local ok, err = pcall(function()
+        return wordlet.compile{ source = shared
+            .. "let takes(r: Ref(U8)): U32 = 0\nlet use(): U32 = takes(host_null())\n"
+            .. "return { functions = { use } }", name = "ptrref.let" }
+    end)
+    check(not ok and D.is(err) and err.code == "type-mismatch",
+        "a pointer does not satisfy a reference requirement")
+    local ok2, err2 = pcall(function()
+        return wordlet.compile{ source = shared
+            .. "let use(): U32 = do\n  let r = Ref(host_null())\n  return 1\nend\n"
+            .. "return { functions = { use } }", name = "ptrref2.let" }
+    end)
+    check(not ok2 and D.is(err2) and err2.code == "ref-target",
+        "a pointer cannot be turned back into a reference")
 end
 
 -- A pool of nodes in module storage, reached by a reference to an element, and the bounds guard a

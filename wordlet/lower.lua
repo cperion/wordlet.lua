@@ -28,7 +28,14 @@ function collectPlaceExprs(place, out)
     if not place then return end
     local kind = place.kind
     if kind == "Project" or kind == "Deref" then collectPlaceExprs(place.base, out)
-    elseif kind == "Index" then collectPlaceExprs(place.base, out); out[#out + 1] = place.index end
+    elseif kind == "Index" then collectPlaceExprs(place.base, out); out[#out + 1] = place.index
+    elseif kind == "PtrIndex" then
+        -- A pointer element names the pointer value it addresses, so that value is an operand.
+        out[#out + 1] = place.view; out[#out + 1] = place.index
+    elseif kind == "SliceIndex" then
+        -- A slice element names the view value it indexes, so the view is an expression operand.
+        out[#out + 1] = place.view; out[#out + 1] = place.index
+    end
 end
 
 function collectExprs(expr, out)
@@ -40,7 +47,22 @@ function collectExprs(expr, out)
     elseif kind == "Owned" then out[#out + 1] = expr.environment
     elseif kind == "Convert" then out[#out + 1] = expr.operand
     elseif kind == "Addr" then collectPlaceExprs(expr.place, out)
+    elseif kind == "SliceLength" then out[#out + 1] = expr.view
+    elseif kind == "Null" then
+        -- A null pointer has no operand to walk.
     end
+end
+
+-- A double written so C reads exactly the same value: `%.17g` round-trips, and a decimal point or an
+-- exponent keeps it a floating constant rather than an integer one. An infinity or a NaN has no
+-- literal spelling, so it is named from <math.h>, which is included only when one appears.
+local function doubleText(n)
+    if n ~= n then return "NAN" end
+    if n == math.huge then return "INFINITY" end
+    if n == -math.huge then return "(-INFINITY)" end
+    local text = string.format("%.17g", n)
+    if not text:find("[.eEnN]") then text = text .. ".0" end
+    return text
 end
 
 -- A shift amount that is a compile-time constant below the width needs no run-time range guard.
@@ -107,6 +129,28 @@ function Emitter:render(expr)
             return "UINT32_C(" .. expr.literal.value .. ")"
         end
         if expr.literal.kind == "Boolean" then return expr.literal.value and "true" or "false" end
+        if expr.literal.kind == "Float" then
+            local n = expr.literal.value
+            if n ~= n or n == math.huge or n == -math.huge then
+                self.layouts.usesFloatSpecials = true
+            end
+            return doubleText(n)
+        end
+        if expr.literal.kind == "Str" then
+            -- A string literal is read-only static storage plus its length. Identical literals share
+            -- one buffer, so the emitted object does not depend on how often one is written.
+            local key = expr.literal.bytes
+            local index = self.layouts.stringIndex[key]
+            if not index then
+                index = self.layouts.stringCount + 1
+                self.layouts.stringCount = index
+                self.layouts.stringIndex[key] = index
+                self.layouts.strings[index] = key
+            end
+            local layout = self.layouts.sliceLayout(expr.type)
+            return "(" .. layout.name .. "){ .f_data = (uint8_t *)wordlet_str_" .. index
+                .. ", .f_length = UINT32_C(" .. #key .. ") }"
+        end
         D.bug("c-literal", "Unknown literal")
     elseif kind == "Ref" then
         return self:value(expr.value.id)
@@ -114,6 +158,8 @@ function Emitter:render(expr)
         local op = expr.op.kind
         if op == "Not" then return "(!(" .. self:expr(expr.operand) .. "))" end
         local operand = self:expr(expr.operand)
+        -- A double negates as itself; the bit-pattern dance below is for integers only.
+        if S.isF64(expr.type) then return "(-(" .. operand .. "))" end
         if S.isSigned(expr.type) then
             -- Negation and complement of a signed value are done on the bit pattern.
             if op == "Neg" then
@@ -135,6 +181,11 @@ function Emitter:render(expr)
         end
         local cOp = BINARY_OP[op]
         if not cOp then D.bug("c-op", "No C operator for " .. tostring(op)) end
+        if S.isF64(expr.left.type) or S.isF64(expr.right.type) then
+            -- IEEE arithmetic and comparison are exactly C's, including a NaN comparing false and a
+            -- division by zero producing an infinity rather than trapping.
+            return "(" .. self:expr(expr.left) .. ") " .. cOp .. " (" .. self:expr(expr.right) .. ")"
+        end
         local resultType = self.layouts:cType(expr.type)
         if S.isWide(expr.type) then
             -- A signed 64-bit operation reinterprets the bit pattern of its operands.
@@ -227,9 +278,21 @@ function Emitter:render(expr)
         if op == "BitAnd" or op == "BitOr" or op == "BitXor" then
             return "(" .. resultType .. ")((" .. left .. ") " .. cOp .. " (" .. right .. "))"
         end
+        if (op == "Eq" or op == "Ne") and S.isString(expr.left.type) then
+            -- A byte string compares by content. The helper tests the length first, so unequal
+            -- strings never read either buffer.
+            self.layouts.usesstreq = true
+            local call = "wordlet_streq(" .. left .. ", " .. right .. ")"
+            return op == "Eq" and call or ("(!" .. call .. ")")
+        end
         -- A comparison keeps its operands parenthesised but not the whole expression: an extra outer
         -- pair makes clang's -Wparentheses-equality fire when the comparison is a condition.
         return "(" .. left .. ") " .. cOp .. " (" .. right .. ")"
+    elseif kind == "Make" and S.isSlice(expr.type) then
+        -- A slice is a compound literal: the address of the first element and the length.
+        local layout = self.layouts.sliceLayout(expr.type)
+        return "(" .. layout.name .. "){ .f_data = " .. self:expr(expr.fields[1])
+            .. ", .f_length = " .. self:expr(expr.fields[2]) .. " }"
     elseif kind == "Make" and S.isArray(S.environmentOf(expr.type)) then
         -- An array is a struct holding a C array, so its elements initialise that member.
         local layout = self.layouts.arrayLayout(S.environmentOf(expr.type))
@@ -268,6 +331,10 @@ function Emitter:render(expr)
     elseif kind == "Addr" then
         -- The address of a place: a root plus field names, with no load.
         return "&(" .. self:placeC(expr.place) .. ")"
+    elseif kind == "Null" then
+        return "NULL"
+    elseif kind == "SliceLength" then
+        return "(" .. self:expr(expr.view) .. ").f_length"
     end
     D.todo("c-expr", "No C lowering for expression " .. tostring(kind))
 end
@@ -289,6 +356,14 @@ function Emitter:placeC(place)
     if place.kind == "Index" then
         -- Elements live in the array member, and the index expression is a plain U32 value.
         return self:placeC(place.base) .. ".f_data[" .. self:expr(place.index) .. "]"
+    end
+    if place.kind == "PtrIndex" then
+        -- A pointer carries no length, so the address is the only thing between here and the element.
+        return "(" .. self:expr(place.view) .. ")[" .. self:expr(place.index) .. "]"
+    end
+    if place.kind == "SliceIndex" then
+        -- The view is a value, so its element is reached through the view's pointer member.
+        return "(" .. self:expr(place.view) .. ").f_data[" .. self:expr(place.index) .. "]"
     end
     D.todo("c-place", "No C lowering for place " .. tostring(place.kind))
 end
@@ -568,6 +643,7 @@ function M.typeDeclarations(layouts)
     for _, layout in ipairs(layouts.tupleOrder) do forward(layout.name) end
     for _, layout in ipairs(layouts.recordOrder) do forward(layout.name) end
     for _, layout in ipairs(layouts.arrayOrder) do forward(layout.name) end
+    for _, layout in ipairs(layouts.sliceOrder) do forward(layout.name) end
     for _, layout in ipairs(layouts.sumOrder) do forward(layout.name) end
     for _, layout in ipairs(layouts.taggedOrder) do forward(layout.name) end
     for _, layout in ipairs(layouts.viewOrder) do forward(layout.name) end
@@ -641,6 +717,15 @@ function M.typeDeclarations(layouts)
             lines[#lines + 1] = "typedef struct " .. layout.name .. " {\n    "
                 .. layouts:cType(layout.element) .. " f_data[" .. tostring(layout.length)
                 .. "];\n} " .. layout.name .. ";"
+        end)
+    end
+    for _, layout in ipairs(layouts.sliceOrder) do
+        -- A slice is a pointer and a length. The element is named but not embedded, so the element
+        -- type need not be complete yet, which is what keeps a recursive slice a finite layout.
+        define(layout, {}, function()
+            lines[#lines + 1] = "typedef struct " .. layout.name .. " {\n    "
+                .. layouts:cType(layout.element) .. " *f_data;\n    uint32_t f_length;\n} "
+                .. layout.name .. ";"
         end)
     end
     for _, layout in ipairs(layouts.sumOrder) do
@@ -752,7 +837,8 @@ function M.signatureText(layouts, signature)
     -- it and falls back to plain `static` on a C11 compiler without the attribute; an export keeps
     -- external linkage for the host.
     local linkage = ""
-    if not signature.exported then
+    -- A foreign prototype is a plain declaration: external linkage, and no body to emit.
+    if not signature.exported and not signature.foreign then
         linkage = layouts.privateInline == false and "static " or "WORDLET_PRIVATE "
     end
     return linkage .. returns .. " " .. signature.name .. "(" .. table.concat(parameters, ", ") .. ")"
@@ -767,6 +853,10 @@ end
 
 function M.prototypes(layouts)
     local lines = M.moduleDeclarations(layouts)
+    -- A foreign word is declared, never defined: the host has the body.
+    for _, signature in ipairs(layouts.foreignOrder or {}) do
+        lines[#lines + 1] = M.signatureText(layouts, signature) .. ";"
+    end
     for _, instance in ipairs(layouts.order) do
         local signature = layouts.signatures[instance.target]
         lines[#lines + 1] = M.signatureText(layouts, signature) .. ";"
@@ -778,23 +868,49 @@ function M.prototypes(layouts)
 end
 
 function M.prelude(layouts)
+    local lines = {}
     -- The 32-bit power helper is only emitted when a body actually uses `^`.
-    if not layouts.usespow32 then return {} end
-    return {
-        "uint32_t wordlet_pow(uint32_t base, uint32_t exponent) {",
-        "    uint32_t result = UINT32_C(1);",
-        "    while (exponent > UINT32_C(0)) {",
-        "        if ((exponent & UINT32_C(1)) != UINT32_C(0)) {",
-        "            result = (uint32_t)((uint64_t)result * (uint64_t)base);",
-        "        }",
-        "        exponent = exponent >> 1;",
-        "        if (exponent > UINT32_C(0)) {",
-        "            base = (uint32_t)((uint64_t)base * (uint64_t)base);",
-        "        }",
-        "    }",
-        "    return result;",
-        "}",
-    }
+    if layouts.usespow32 then
+        lines[#lines + 1] = "uint32_t wordlet_pow(uint32_t base, uint32_t exponent) {"
+        lines[#lines + 1] = "    uint32_t result = UINT32_C(1);"
+        lines[#lines + 1] = "    while (exponent > UINT32_C(0)) {"
+        lines[#lines + 1] = "        if ((exponent & UINT32_C(1)) != UINT32_C(0)) {"
+        lines[#lines + 1] = "            result = (uint32_t)((uint64_t)result * (uint64_t)base);"
+        lines[#lines + 1] = "        }"
+        lines[#lines + 1] = "        exponent = exponent >> 1;"
+        lines[#lines + 1] = "        if (exponent > UINT32_C(0)) {"
+        lines[#lines + 1] = "            base = (uint32_t)((uint64_t)base * (uint64_t)base);"
+        lines[#lines + 1] = "        }"
+        lines[#lines + 1] = "    }"
+        lines[#lines + 1] = "    return result;"
+        lines[#lines + 1] = "}"
+    end
+    if layouts.usesstreq then
+        -- Two byte strings are equal when their lengths match and their bytes match. Testing the
+        -- length first means an unequal pair never reads either buffer.
+        local layout = layouts.sliceLayout(S.String)
+        lines[#lines + 1] = "static bool wordlet_streq(" .. layout.name .. " a, " .. layout.name .. " b) {"
+        lines[#lines + 1] = "    if (a.f_length != b.f_length) return false;"
+        lines[#lines + 1] = "    return a.f_length == UINT32_C(0) || memcmp(a.f_data, b.f_data, a.f_length) == 0;"
+        lines[#lines + 1] = "}"
+    end
+    return lines
+end
+
+-- Read-only byte buffers for string literals, emitted once per distinct literal in first-use order
+-- so the object is deterministic. A zero-length string still occupies one byte, because C has no
+-- array of length zero.
+function M.stringDeclarations(layouts)
+    local lines = {}
+    for index = 1, layouts.stringCount do
+        local bytes = layouts.strings[index]
+        local items = {}
+        for position = 1, #bytes do items[#items + 1] = tostring(bytes:byte(position)) end
+        if #items == 0 then items[1] = "0" end
+        lines[#lines + 1] = "static const uint8_t wordlet_str_" .. index .. "[" .. #items .. "] = { "
+            .. table.concat(items, ", ") .. " };"
+    end
+    return lines
 end
 
 -- The storage IDs a function actually references through a place. A loop-carried `Var` is declared
@@ -832,7 +948,9 @@ local function usedStorages(fn)
         if not value then return end
         if value.kind == "Local" then used[value.storage.id] = true
         elseif value.kind == "Project" or value.kind == "Deref" then place(value.base)
-        elseif value.kind == "Index" then place(value.base) expr(value.index) end
+        elseif value.kind == "Index" then place(value.base) expr(value.index)
+        elseif value.kind == "SliceIndex" or value.kind == "PtrIndex" then
+            expr(value.view) expr(value.index) end
     end
     function expr(value)
         if not value then return end
@@ -844,6 +962,7 @@ local function usedStorages(fn)
         elseif kind == "Owned" then expr(value.environment)
         elseif kind == "Convert" then expr(value.operand)
         elseif kind == "Addr" then place(value.place)
+        elseif kind == "SliceLength" then expr(value.view)
         end
     end
     statements(fn.body)
@@ -1035,6 +1154,7 @@ end
 
 local INCLUDES = { "#include <stdint.h>", "#include <stdbool.h>", "#include <stdlib.h>", "#include <string.h>" }
 
+
 -- A 64-bit value is a C integer of its own width, but the signed operations still go through helpers
 -- so that the cases C leaves undefined or implementation-defined - an overflowing signed operation,
 -- the most negative value divided by -1, and a shift of a negative value - behave as two's complement.
@@ -1176,7 +1296,8 @@ function M.cdef(layouts, namespace)
     if namespace and namespace ~= "" then
         local names = {}
         for _, group in ipairs({ layouts.tupleOrder, layouts.recordOrder, layouts.arrayOrder,
-            layouts.sumOrder, layouts.taggedOrder, layouts.viewOrder, layouts.adapterOrder or {} }) do
+            layouts.sumOrder, layouts.taggedOrder, layouts.viewOrder, layouts.adapterOrder or {},
+            layouts.sliceOrder }) do
             for _, layout in ipairs(group) do names[#names + 1] = layout.name end
         end
         for _, exported in ipairs(layouts.typeExports or {}) do names[#names + 1] = exported.name end
@@ -1195,6 +1316,7 @@ function M.unit(layouts)
     local declarations = M.typeDeclarations(layouts)
     local lines = {}
     for _, line in ipairs(INCLUDES) do lines[#lines + 1] = line end
+    if layouts.usesFloatSpecials then lines[#lines + 1] = "#include <math.h>" end
     for _, line in ipairs(M.privateLinkage(layouts)) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""
     if layouts.usesSigned then
@@ -1207,6 +1329,7 @@ function M.unit(layouts)
         lines[#lines + 1] = ""
     end
     for _, line in ipairs(declarations) do lines[#lines + 1] = line end
+    for _, line in ipairs(M.stringDeclarations(layouts)) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""
     for _, line in ipairs(M.prototypes(layouts)) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""
@@ -1231,6 +1354,7 @@ function M.source(layouts, headerName)
     local lines = {}
     if headerName then lines[#lines + 1] = '#include "' .. headerName .. '"' end
     for _, line in ipairs(INCLUDES) do lines[#lines + 1] = line end
+    if layouts.usesFloatSpecials then lines[#lines + 1] = "#include <math.h>" end
     for _, line in ipairs(M.privateLinkage(layouts)) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""
     if layouts.usesSigned then
@@ -1243,6 +1367,7 @@ function M.source(layouts, headerName)
         lines[#lines + 1] = ""
     end
     for _, line in ipairs(declarations) do lines[#lines + 1] = line end
+    for _, line in ipairs(M.stringDeclarations(layouts)) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""
     for _, line in ipairs(M.prototypes(layouts)) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""

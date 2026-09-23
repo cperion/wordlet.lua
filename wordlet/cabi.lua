@@ -67,6 +67,11 @@ function M.close(compilation)
         recordOrder = {},
         arrays = {},        -- Ty.Array -> { name, element, length }
         arrayOrder = {},
+        slices = {},        -- Ty.Slice -> { name, element }
+        sliceOrder = {},
+        strings = {},      -- distinct string literals, in first-use order
+        stringIndex = {},
+        stringCount = 0,
         sums = {},          -- Ty.Sum -> { name, cases }
         sumOrder = {},
         tagged = {},        -- Ty.Tagged -> { name, cases }
@@ -105,6 +110,21 @@ function M.close(compilation)
         layouts:cType(ty.element)
         return layout
     end
+
+    -- A slice is a pointer and a length. The pointer member is what keeps a slice finite even when
+    -- its element type is recursive: the element's layout is named, but a pointer to an incomplete
+    -- type is a complete type, so `Slice(Node)` inside `Node` is a legal layout.
+    local function sliceLayout(ty)
+        local existing = layouts.slices[ty]
+        if existing then return existing end
+        local layout = { name = "wordletslice_" .. (#layouts.sliceOrder + 1), type = ty,
+            element = ty.element }
+        layouts.slices[ty] = layout
+        layouts.sliceOrder[#layouts.sliceOrder + 1] = layout
+        layouts:cType(ty.element)
+        return layout
+    end
+    layouts.sliceLayout = sliceLayout
 
     -- A sum and a tagged callable are both a tag plus a union of alternative payloads, so they share
     -- one layout: only the struct name and the table that owns it differ. Payloads are held by value
@@ -214,9 +234,18 @@ function M.close(compilation)
 
     function layouts:cType(ty)
         if S.isNamed(ty) then return layouts:cType(layouts:resolveNamed(ty)) end
+        if S.isPtr(ty) then
+            -- Same C type as a reference, and deliberately a different language type.
+            return layouts:cType(ty.target) .. " *"
+        end
         if S.isRef(ty) then
             -- A pointer to a target, so the target needs a declaration but not a definition here.
             return layouts:cType(ty.target) .. " *"
+        end
+        if ty == S.F64 then
+            -- The host's own double, so the arithmetic below the boundary is IEEE-754 exactly.
+            layouts.usesFloat = true
+            return "double"
         end
         if ty == S.U32 then return "uint32_t" end
         if ty == S.U8 then return "uint8_t" end
@@ -243,6 +272,7 @@ function M.close(compilation)
         if S.isOwned(ty) then return viewLayout(ty).name end
         if S.isRecord(ty) then return recordLayout(ty).name end
         if S.isArray(ty) then return arrayLayout(ty).name end
+        if S.isSlice(ty) then return sliceLayout(ty).name end
         if S.isSum(ty) then return sumLayout(ty).name end
         if S.isTagged(ty) then return taggedLayout(ty).name end
         D.todo("c-type", "No C representation for " .. S.encode(ty))
@@ -290,6 +320,21 @@ function M.close(compilation)
         signatures[instance.target] = signature(instance.fn, cName)
         signatures[instance.target].aliases = entry and entry.aliases or {}
         signatures[instance.target].exported = entry ~= nil
+    end
+
+    -- A foreign declaration has no instance to specialize and no body to emit, so its signature is its
+    -- declared shape and its name is the host symbol. The prototype is what the call site needs.
+    layouts.foreignOrder = {}
+    for _, foreign in ipairs(compilation.foreigns or {}) do
+        local params = {}
+        for index, ty in ipairs(foreign.inputTypes) do
+            params[#params + 1] = { name = "a" .. index, type = ty, input = index - 1 }
+        end
+        local entry = { fn = { id = foreign.target, params = {}, results = foreign.results },
+            name = foreign.target, params = params, placeParams = {}, foreign = true,
+            results = resultLayout(foreign.results), hidden = 0 }
+        signatures[foreign.target] = entry
+        layouts.foreignOrder[#layouts.foreignOrder + 1] = entry
     end
 
     -- Exported record types get a public alias so consumers never name a numbered struct.

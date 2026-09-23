@@ -22,6 +22,9 @@ function M.u8(n) return M.int(S.U8, n) end
 function M.u16(n) return M.int(S.U16, n) end
 function M.isInteger(v) return v.tag == "int" end
 function M.bool(b) return make{ tag = "bool", ty = S.Bool, b = b } end
+-- An IEEE-754 double, held as a Lua number, which is one. Its type says which rules apply to it.
+function M.float(ty, n) return make{ tag = "float", ty = ty, n = n } end
+function M.f64(n) return M.float(S.F64, n) end
 function M.unit() return make{ tag = "unit", ty = S.Unit } end
 function M.type(ty) return make{ tag = "type", ty = S.Type, value = ty } end
 -- `place` is the place the value was read from, when there is one: a reference read from storage
@@ -59,6 +62,18 @@ end
 -- backed by storage.
 function M.array(ty, items, place, borrowed)
     return make{ tag = "array", ty = ty, items = items, place = place, borrowed = borrowed or false }
+end
+
+-- A string literal is a compile-time constant byte sequence. Its bytes are the bytes of the source
+-- literal, and generated code keeps them in read-only static storage.
+function M.string(ty, bytes) return make{ tag = "string", ty = ty, bytes = bytes } end
+
+-- A slice: a runtime-length view of storage someone else owns. `source` is the container it views,
+-- `start`/`count` the range, and `tied` records that the source belongs to an enclosing activation
+-- rather than to module storage, so the view cannot escape that activation.
+function M.slice(ty, source, start, count, tied)
+    return make{ tag = "slice", ty = ty, source = source, start = start or 0, count = count,
+        tied = tied or false }
 end
 
 -- A module namespace: the exported functions and types of a `use`d module, reached by member
@@ -118,6 +133,8 @@ function M.isKnown(v)
     if tag == "record" then
         for _, field in pairs(v.fields) do if not M.isKnown(field) then return false end end
     end
+    if tag == "string" then return true end
+    if tag == "slice" then return M.isKnown(v.source) end
     if tag == "array" then
         if not v.items then return false end
         for _, item in ipairs(v.items) do if not M.isKnown(item) then return false end end
@@ -133,7 +150,7 @@ function M.isStatic(v)
     local tag = v.tag
     -- A schema and a type are compile-time descriptions: capturing one is a static fact, not a
     -- runtime environment entry.
-    if tag == "int" or tag == "bool" or tag == "unit" or tag == "type" or tag == "schema"
+    if tag == "int" or tag == "float" or tag == "bool" or tag == "unit" or tag == "type" or tag == "schema"
         or tag == "namespace" then
         return true
     end
@@ -141,6 +158,10 @@ function M.isStatic(v)
         for _, arg in ipairs(v.args) do if not M.isStatic(arg) then return false end end
         return true
     end
+    -- A string is immutable bytes, so it is a static fact and a specialization key. A slice is a view
+    -- of storage, so its identity is a borrow rather than a compile-time constant.
+    if tag == "string" then return true end
+    if tag == "slice" then return false end
     if tag == "array" then
         if not v.items then return false end
         for _, item in ipairs(v.items) do if not M.isStatic(item) then return false end end
@@ -167,6 +188,8 @@ function M.encode(v)
         return S.encode(v.ty) .. ":" .. tostring(v.n)
     end
     if tag == "bool" then return "bool:" .. tostring(v.b) end
+    -- Enough digits to round-trip, so two equal floats encode equally and unequal ones do not.
+    if tag == "float" then return S.encode(v.ty) .. ":" .. string.format("%.17g", v.n) end
     if tag == "unit" then return "unit" end
     if tag == "type" then return "type:" .. S.encode(v.value) end
     if tag == "namespace" then return "namespace:" .. tostring(v.module) end
@@ -179,6 +202,8 @@ function M.encode(v)
         end
         return table.concat(parts, ",")
     end
+    if tag == "string" then return "str:" .. tostring(#v.bytes) .. ":" .. v.bytes end
+    if tag == "slice" then return nil end
     if tag == "array" then
         if not v.items then return nil end
         local parts = {}
@@ -221,11 +246,14 @@ function M.encode(v)
 end
 
 function M.describe(v)
+    if M.is(v) and v.tag == "float" then return string.format("%.17g", v.n) end
     if not M.is(v) then return tostring(v) end
     if v.tag == "type" then return "Type(" .. S.encode(v.value) .. ")" end
     if v.tag == "ir" then return "residual<" .. S.encode(v.ty) .. ">#" .. tostring(v.expr.kind) end
     if v.tag == "object" then return "object<" .. S.encode(v.ty) .. ">" end
     if v.tag == "record" then return "record<" .. S.encode(v.ty) .. ">" end
+    if v.tag == "string" then return string.format("string<%d bytes>", #v.bytes) end
+    if v.tag == "slice" then return "slice<" .. S.encode(v.ty) .. ">" end
     if v.tag == "array" then return "array<" .. S.encode(v.ty) .. ">" end
     if v.tag == "namespace" then return "namespace<" .. tostring(v.module) .. ">" end
     if v.tag == "schema" then return "schema<" .. tostring(v.def.name or v.def.id) .. ">" end

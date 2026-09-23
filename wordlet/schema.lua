@@ -14,6 +14,9 @@ M.Ir = M.ctx.Ir
 local Ty = M.Ty
 M.U32, M.U8, M.U16, M.I32 = Ty.U32, Ty.U8, Ty.U16, Ty.I32
 M.U64, M.I64 = Ty.U64, Ty.I64
+-- IEEE-754 double. It is a scalar like the integers, but it follows IEEE 754 rather than the
+-- integer rules, so it is never an integer width and never wraps.
+M.F64 = Ty.F64
 M.Bool, M.Unit, M.Type = Ty.Bool, Ty.Unit, Ty.Type
 
 function M.list(items) return ASDL.List(items) end
@@ -33,6 +36,10 @@ local MAXIMA = { [Ty.U8] = 255, [Ty.U16] = 65535, [Ty.U32] = 4294967295, [Ty.I32
 local MINIMA = { [Ty.I32] = -2147483648 }
 local SIGNED = { [Ty.I32] = true, [Ty.I64] = true }
 function M.isInteger(t) return WIDTHS[t] ~= nil end
+function M.isF64(t) return t == Ty.F64 end
+-- What the arithmetic and comparison operators accept. A float and an integer are both numbers, but
+-- an operation still needs one type on both sides; only a literal adopts the other side's type.
+function M.isNumeric(t) return WIDTHS[t] ~= nil or t == Ty.F64 end
 function M.widthOf(t) return WIDTHS[t] end
 function M.isWide(t) return WIDTHS[t] == 64 end
 function M.maxOf(t) return MAXIMA[t] end
@@ -183,10 +190,24 @@ end
 function M.ref(target) return Ty.Ref(target) end
 function M.isRef(t) return type(t) == "table" and t.kind == "Ref" end
 
+-- A raw pointer is an address with no lifetime attached. It has the same C representation as a
+-- reference and none of the same guarantee, which is why it is a separate kind rather than a flag on
+-- one: a signature that asks for `Ptr(T)` is asking for an unchecked address.
+function M.ptr(target) return Ty.Ptr(target) end
+function M.isPtr(t) return type(t) == "table" and t.kind == "Ptr" end
+
 -- An array is a fixed-length sequence of one element type. Its length is part of the type, so a
 -- static index is checked while compiling and only a run-time index needs a bounds guard.
 function M.array(element, length) return Ty.Array(element, length) end
 function M.isArray(t) return type(t) == "table" and t.kind == "Array" end
+
+-- A slice is a runtime-length view of storage someone else owns: a pointer and a length. Its
+-- length is not part of its type, which is what lets one word accept arrays of any extent. A
+-- `String` is the byte slice, so text and bytes are one mechanism rather than two.
+function M.slice(element) return Ty.Slice(element) end
+function M.isSlice(t) return type(t) == "table" and t.kind == "Slice" end
+M.String = Ty.Slice(Ty.U8)
+function M.isString(t) return t == M.String end
 
 -- A named cell is the identity a recursive type definition reserves for itself while its own layout
 -- is still being computed. It may only appear as a reference target, so it is deliberately not a
@@ -228,15 +249,26 @@ end
 
 -- Validate that a type can appear as a runtime value type.
 function M.runtime(t, visiting)
-    if M.isInteger(t) or t == Ty.Bool or t == Ty.Unit then return true end
+    if M.isInteger(t) or t == Ty.F64 or t == Ty.Bool or t == Ty.Unit then return true end
     if t == Ty.Type then return false end
     if M.isRef(t) then
         -- A pointer is a runtime value whatever it points at; a named cell is always a data type
         -- that was sealed, so the target's own runtime-ness was checked when it was defined.
         return M.isNamed(t.target) or M.runtime(t.target, visiting)
     end
+    if M.isPtr(t) then
+        -- A pointer is a word of address whatever it points at, exactly as a reference is.
+        return M.isNamed(t.target) or M.runtime(t.target, visiting)
+    end
     if M.isArray(t) then
         if t.length < 1 then return false end
+        return M.isNamed(t.element) or M.runtime(t.element, visiting)
+    end
+    if M.isSlice(t) then
+        -- The element is reached through a pointer, so it needs a representation of its own. A
+        -- slice of Unit reaches no bytes at all, so it is not a value.
+        if t.element == Ty.Unit then return false end
+        -- The element is reached through the pointer, so it needs a representation of its own.
         return M.isNamed(t.element) or M.runtime(t.element, visiting)
     end
     if M.isNamed(t) then
@@ -285,7 +317,9 @@ end
 -- environment that a view is, so it is representable as well.
 function M.representable(t)
     if M.isArray(t) then return M.runtime(t) end
+    if M.isSlice(t) then return M.runtime(t) end
     if M.isRef(t) then return M.runtime(t) end
+    if M.isPtr(t) then return M.runtime(t) end
     if M.isNamed(t) then return false end
     if M.isView(t) then return M.runtime(t) end
     if M.isTaggedType(t) then return M.runtime(t) end
@@ -294,6 +328,16 @@ function M.representable(t)
         return M.runtime(t.environment)
     end
     return M.runtime(t)
+end
+
+-- A type as a diagnostic should show it. A record or a sum names its fields, which is what a source
+-- signature names; everything else is already its own encoding.
+function M.display(t)
+    if M.isRecord(t) then return "{" .. M.encodeFields(t.fields) .. "}" end
+    if M.isSum(t) then return "OneOf({" .. M.encodeFields(t.cases) .. "})" end
+    if M.isPtr(t) then return "Ptr(" .. M.display(t.target) .. ")" end
+    if M.isRef(t) then return "Ref(" .. M.display(t.target) .. ")" end
+    return M.encode(t)
 end
 
 function M.checkRuntime(t, span)

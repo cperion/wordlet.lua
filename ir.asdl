@@ -1,7 +1,7 @@
 # Wordlet runtime semantic types and structured IR. Checkable with vendor/asdl.lua.
 # Ir.Value/Storage/Bundle IDs are function-local; Ir.Fn.id is compilation-wide.
 module Ty {
-  V = U32 | U8 | U16 | I32 | U64 | I64 | Bool | Unit | Type
+  V = U32 | U8 | U16 | I32 | U64 | I64 | F64 | Bool | Unit | Type
     | Record(string meaning, Field* fields) unique
     | Tuple(V* fields) unique
     | Sig(Input* inputs, V* results) unique
@@ -10,7 +10,13 @@ module Ty {
     | Sum(string meaning, Field* cases) unique
     | Tagged(Sig visible, Field* arms) unique
     | Ref(V target) unique
+    # An address the compiler does not track: no lifetime, no ownership and no null check. It is a
+    # different type from Ref on purpose, so a signature says which guarantee it carries.
+    | Ptr(V target) unique
     | Array(V element, number length) unique
+    # A slice is a runtime-length view of storage someone else owns: an element pointer and a
+    # length. It is the only array-like type whose length is not part of the type.
+    | Slice(V element) unique
     | Named(string cell) unique
   Field = (string name, V type) unique
   Input = InValue(V type) unique | InPlace(V type) unique | InBundle(V env) unique
@@ -25,6 +31,11 @@ module Ir {
   Field = (string name) unique
 
   Literal = UInt(number value) | UInt64(number high, number low) | Boolean(boolean value)
+          # Byte string; a compile-time constant whose bytes live in read-only static storage.
+          | Str(string bytes)
+          # An IEEE-754 double. The value is exact: a Lua number is one, and an encoding of it is
+          # written with enough digits to round-trip.
+          | Float(number value)
   Unary = Neg | Not | BitNot
   Binary = Add | Sub | Mul | Div | Rem | Pow
          | BitAnd | BitOr | BitXor | Shl | Shr
@@ -42,12 +53,25 @@ module Ir {
        | Owned(Expr environment, Ty.V type)
        | Convert(Expr operand, Ty.V type)
        | Addr(Place place, Ty.V type)
+       # The length of a slice value. Pure, like a record field projection.
+       | SliceLength(Expr view, Ty.V type)
+       # The null pointer of a Ptr type. Pure, so it is interned like any other constant.
+       | Null(Ty.V type)
 
   Place = Local(Storage storage)
         | Captured(Bundle bundle, number slot)
         | Project(Place base, Field field)
         | Deref(Place base, Ty.V type)
         | Index(Place base, Expr index, Ty.V type)
+        # `base[index]` through a slice: base names the slice place, and the element is at data[index]
+        # after a runtime bounds check against length.
+        # `view[index]`: the element a slice value views, checked against its length before use. The
+        # slice is a value rather than a place because a view needs no storage of its own, and the
+        # place it names is still writable when the storage it views is.
+        | SliceIndex(Expr view, Expr index, Ty.V type)
+        # `view[index]`: the element an unchecked pointer addresses. No length, so no bounds check,
+        # which is the whole difference between this and a slice.
+        | PtrIndex(Expr view, Expr index, Ty.V type)
 
   Arg = ValueArg(Expr value) | BorrowArg(Place place) | BundleArg(Bundle bundle)
 

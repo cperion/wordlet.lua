@@ -41,6 +41,13 @@ one directly.
   aliased(3)=99099. A literal takes its type from its elements or an annotation, a known index is
   checked while compiling, a run-time index is guarded, and a local binding aliases while a pass,
   return or field store copies.
+- examples/strings.let: byte_at("A",0)=65, length_of("hello")=5, count_a("banana",0)=3, same()=true,
+  different()=false, escaped()=4, empty_length()=0, grouped()=1000170, banner_length()=13,
+  banner_first()=102, banner_is_raw()=4, module_view(1)=20, sliced_sum()=60. A string is a byte
+  slice, so `==` compares content; a byte literal is a numeric literal; a long string is raw and may
+  span lines; a view of module storage may be returned while a view of a local rejects; and a slice
+  parameter's length is only known while it runs. `tests/eval.lua` reads this file and asserts every
+  value listed here, so this bullet is executable rather than prose.
 - examples/references.let: read_shared(1)=6, bump_shared(1)=7, borrowed(2)=55, following()=10,
   bump_following()=15. A reference to module storage persists a store; a reference to a captured
   record is live for the caller; a recursive Node/Link reaches and mutates its neighbour through a
@@ -128,6 +135,55 @@ Gates 1–5 and 9–11 have their first executable form in `tests/parse.lua`, `t
    that need both words, division and remainder of a signed value, a shift into the high word, and a
    `numeric-range` rejection for a known value that does not fit. The differential case compares all
    of it against the interpreter.
+8h. **Slices and strings (implemented):** a string literal's bytes and escapes, an empty literal, and
+   a multi-byte character taken as its source bytes; content equality and inequality; a slice parameter
+   whose length is unknown while compiling, a slice over a module array, a slice over a local array, and
+   an array literal viewed as a temporary; the read-only rejection (`not-a-place`) for a store through a
+   view; the `borrow-escape` rejection for a view of a local returned from its activation and for a record
+   holding one, while a view of module storage and a `String` literal both return; the `lex-string`
+   rejections; and a `String` parameter and result compared against the interpreter through the generated
+   C ABI, where the argument is built as the same two-member struct the backend emits.
+8i. **Literals (implemented):** decimal, hexadecimal and binary integers, with a separator allowed
+   between digits; a separator that leads, trails or doubles rejected (`lex-number`); a binary literal
+   above a word taking the same exact 64-bit path a hexadecimal one does; a byte literal as one byte
+   with the same escapes a string has, rejected when it is not exactly one byte; a long string that is
+   raw, spans lines, drops one newline after its opening bracket and lets its level contain a lower
+   level's close; a long comment at any level, and a line comment that merely begins with a bracket
+   after a space kept as a line comment; `[[` still read as an array whose first element is an array;
+   and a multi-line literal keeping the line of whatever follows it, so a later diagnostic still
+   points where it should.
+8j. **IEEE-754 double (implemented):** float literals with a point, an exponent and separators, and a
+   point that needs a digit on both sides so `1.` stays an integer; IEEE arithmetic including a
+   division by zero producing an infinity, zero over zero producing a NaN, and a NaN comparing false
+   while `!=` holds; both conversion directions, with an integer rounding to the nearest double by
+   ties-to-even and a float truncating toward zero, a known out-of-range value rejected (`numeric-range`)
+   and a run-time one stopped by an emitted guard, including one for a NaN; F64 negated; F64 rejecting
+   the remainder, power, shift and bitwise operators; an integer literal adopting F64 while a wider
+   non-literal integer needs `F64(x)`; and a differential case comparing every one of those against the
+   generated C, where an infinity and a NaN are named and tested rather than compared.
+8k. **Deferred actions (implemented):** `defer` as a statement form taking a call, with its callee and
+   arguments evaluated where it is written; several actions in one block running in reverse order; a
+   `return` inside a statement conditional's arm running the pending action as well, which is why the
+   action is emitted at each return rather than once after the block; and a tail self-call in a deferred
+   block staying a real call so the action runs after it returns instead of being skipped by a back
+   edge. This work also found and fixed an effect-only rule: a call whose body writes module storage
+   through a local binding holding a reference is compiled rather than folded away, because the write is
+   runtime state and folding it dropped the store from the generated code.
+8l. **Foreign declarations (implemented):** `extern let` declaring a host function with no body and a
+   required result; the artifact emitting a prototype with external linkage and a direct call, which the
+   host links its own definition against; a `Unit` result being erased so the call is a statement; the
+   reference interpreter rejecting a foreign call (`foreign-effect`); and a fold that cannot complete
+   because of one being compiled instead.
+8m. **Raw pointers and scoped resources (implemented):** `Ptr(T)` as a distinct type from `Ref`, with
+   `Ptr(place)` taking an address without reading what it addresses, a host-returned pointer indexed and
+   written through with no bounds check, `p.field` selecting through `Ptr(Record)`, `Null(T)` and address
+   comparison, and the two rejections that keep the types apart: a pointer does not satisfy a `Ref`
+   requirement and `Ref(p)` does not turn one back into a checked borrow. Also the region shape of
+   section 8.7: a known body specialized so the generic combinator does not survive and the call site is
+   direct, no invocation pointer anywhere in the artifact, and the acquire emitted before the body and
+   the release after it. A run-time argument is now checked against its parameter's requirement in the
+   residual path as well, where a wrong type used to reach the IR checker and be reported as a compiler
+   bug rather than a source error.
 9. **IR/checking:** storage/value distinction, scope and definite assignment, target signature checks,
    module storage seeded outside every function,
    dynamic failure guards, transitive borrow provenance, finite layouts, no metadata runtime slots.
@@ -145,7 +201,27 @@ generated C on the same programs, comparing returned vectors AND ordered state c
 Use bounded compiler/execution subprocesses and report wall-clock time. A static interpreter work
 budget counts work even when no residual instruction is emitted.
 
-## Initial resource settings to implement
+## Initial resource settings
+
+These are explicit starting configuration defaults, not measured limits or language type rules:
+source size 16 MiB per file; lexical tokens 1,000,000 per file; static depth 64; static evaluator
+steps 1,000,000 per root demand; source/AST nesting 256; residual
+statements 100,000 per instance; residual body keys 1,024 per program; aggregate depth 64 and expanded
+components 1,000,000 per value. Keep counters cumulative across dependent work in the corresponding
+root scope; retries must not reset the counter that is supposed to bound them. Limit exhaustion is a
+resource diagnostic naming the scope. There is no exponential replay-path counter.
+
+**Implemented so far**, and what they exist to stop:
+
+| Budget | Default | A diagnostic for |
+| --- | --- | --- |
+| specialization nesting (`depth`) | 256 | a recursive word whose static arguments change specializing once per value. The host's own stack gives out well before a key budget of a thousand nested builds would be reached, so the nesting is bounded below it and exhaustion is a `resource` rather than an unlabelled stack overflow |
+| static depth (`static-depth`) | 64 compiling, 1024 in the reference interpreter | nested compile-time folding. Folding is an optimization in residual code, so a fold that runs out of depth is compiled instead; the interpreter has no fallback and gets the largest bound it can have without reaching the host limit, measured at roughly 2500 |
+| residual body keys (`keys`) | 1024 per program | one instance per distinct specialization |
+| static evaluator steps (`steps`) | 1,000,000 | total compile-time evaluation work |
+
+Still unimplemented: source size and token count, source/AST nesting, residual statements per
+instance, and aggregate depth and expanded components per value.
 
 These are explicit starting configuration defaults, not measured limits or language type rules:
 source size 16 MiB per file; lexical tokens 1,000,000 per file; static depth 64; static evaluator

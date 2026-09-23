@@ -63,6 +63,24 @@ function fitsAlways(from, to)
         and compare(maxFromHigh, maxFromLow, maxToHigh, maxToLow)
 end
 
+-- The two words of a double, as unsigned, which is exact whenever the double is an integer already.
+local function wordsOfDouble(d)
+    local low = d % 4294967296
+    local high = ((d - low) / 4294967296) % 4294967296
+    return high, low
+end
+
+-- The exclusive upper bound and the inclusive lower bound of an integer type as doubles. Every 32-bit
+-- bound is exact and the 64-bit bounds are powers of two, so comparing against them decides the range
+-- exactly rather than approximately.
+local function floatBounds(ty)
+    if S.isWide(ty) then
+        if S.isSigned(ty) then return 9223372036854775808.0, -9223372036854775808.0 end
+        return 18446744073709551616.0, 0.0
+    end
+    return S.maxOf(ty) + 1, S.minOf(ty)
+end
+
 -- A readable form of an integer value's words, for a diagnostic.
 function describeWords(ty, high, low)
     if S.isWide(ty) then return U64Kernel.tostring(high, low, S.isSigned(ty)) end
@@ -77,6 +95,9 @@ local ARITH = {
     ["+"] = "Add", ["-"] = "Sub", ["*"] = "Mul", ["/"] = "Div", ["%"] = "Rem", ["^"] = "Pow",
     ["<<"] = "Shl", [">>"] = "Shr", ["&"] = "BitAnd", ["|"] = "BitOr", ["~"] = "BitXor",
 }
+-- F64 has no remainder, power, shift or bitwise operator: those are integer operations, and IEEE
+-- division already answers an infinity or a NaN rather than trapping.
+local FLOAT_ARITH = { ["+"] = "Add", ["-"] = "Sub", ["*"] = "Mul", ["/"] = "Div" }
 local COMPARE = { ["=="] = "Eq", ["!="] = "Ne", ["<"] = "Lt", ["<="] = "Le", [">"] = "Gt", [">="] = "Ge" }
 local COMPOUND = {
     ["+="] = "+", ["-="] = "-", ["*="] = "*", ["/="] = "/", ["%="] = "%", ["^="] = "^",
@@ -115,7 +136,10 @@ Ctx.__index = Ctx
 function Ctx:arm(list)
     return setmetatable({ session = self.session, mode = self.mode, scope = self.scope,
         span = self.span, builder = self.builder, body = list,
-        instance = self.instance, tail = self.tail, expectedResult = self.expectedResult }, Ctx)
+        instance = self.instance, tail = self.tail, expectedResult = self.expectedResult,
+        -- An arm is part of the enclosing block, so a deferred action pending there is still pending
+        -- inside the arm: a `return` in an arm must run it too.
+        deferFrame = self.deferFrame }, Ctx)
 end
 
 function M.session(options)
@@ -124,6 +148,8 @@ function M.session(options)
     return setmetatable({
         options = options, limits = limits,
         definitions = {}, instances = {}, order = {}, moduleStorages = {},
+        -- Foreign declarations in first-use order, so the prototypes they need are deterministic.
+        foreignInstances = {}, foreignOrder = {},
         -- Tagged-callable arms, keyed by the code identity that names them in a type.
         arms = {},
         -- Sealed definitions of named cells, keyed by the identity a recursive definition reserved.
@@ -131,6 +157,15 @@ function M.session(options)
         nextTypeCell = 0,
         nextDef = 0, nextFn = 0, steps = 0,
         maxSteps = limits.steps or 1000000,
+        -- Three separate budgets, because they bound three different recursions. Specialization
+        -- nesting is the depth of nested instance building; static depth is nested compile-time
+        -- folding, which is an optimization in residual code and can fall back to compiling; and
+        -- the interpreter, which has no fallback, gets the largest bound it can have without
+        -- reaching the host's own stack limit (measured at roughly 2500 on this host, so this
+        -- deliberately stays well below it).
+        buildDepth = 0, maxBuildDepth = limits.depth or 256,
+        staticDepth = 0, maxStaticDepth = limits.staticDepth or 64,
+        maxInterpretDepth = limits.interpretDepth or 1024,
     }, Eval)
 end
 
@@ -138,6 +173,36 @@ function Eval:step(span)
     self.steps = self.steps + 1
     if self.steps > self.maxSteps then D.resource("steps", "Static evaluation budget exhausted", span) end
 end
+
+-- Specialization nests: building one instance evaluates its body, and a body that specializes again
+-- nests another build. The host's Lua stack gives out long before a thousand nested builds would reach
+-- the key budget, so the nesting is bounded here and its exhaustion names a resource instead of
+-- surfacing as an unlabelled stack overflow.
+function Eval:enterBuild(span)
+    self.buildDepth = self.buildDepth + 1
+    if self.buildDepth > self.maxBuildDepth then
+        D.resource("depth", "Specialization nests more than " .. self.maxBuildDepth
+            .. " deep; a recursive word whose static arguments change specializes once per value, so"
+            .. " bind the changing value at run time", span)
+    end
+end
+
+function Eval:leaveBuild() self.buildDepth = self.buildDepth - 1 end
+
+-- Folding a known call is optional in residual code, so its depth is a budget rather than a wall: a
+-- fold that runs out of depth is compiled instead. The reference interpreter has no such fallback, so
+-- it is given the largest bound it can have without reaching the host stack limit.
+function Eval:enterStatic(def, span)
+    self.staticDepth = self.staticDepth + 1
+    local allowed = self.run and self.maxInterpretDepth or self.maxStaticDepth
+    if self.staticDepth > allowed then
+        D.resource("static-depth", "Static evaluation nests more than " .. allowed .. " deep in "
+            .. def.name .. "; a recursive word with a run-time argument is compiled instead, and"
+            .. " the reference interpreter is bounded", span)
+    end
+end
+
+function Eval:leaveStatic() self.staticDepth = self.staticDepth - 1 end
 
 function Eval:context(mode, sc, span)
     return setmetatable({ session = self, mode = mode, scope = sc, span = span }, Ctx)
@@ -149,7 +214,11 @@ function Eval:load(program)
     local top = scope(nil)
     self.top = top
     for _, decl in ipairs(program.declarations) do
-        if decl.kind == "WordDecl" then
+        if decl.kind == "ForeignDecl" then
+            local slot = declare(top, decl.def.name.text,
+                { kind = "word", name = decl.def.name.text }, decl.span)
+            slot.def = self:foreignDef(decl.def, top)
+        elseif decl.kind == "WordDecl" then
             local slot = declare(top, decl.def.name.text, { kind = "word", name = decl.def.name.text }, decl.span)
             slot.def = self:define(decl.def, top, nil)
         elseif decl.kind == "UseDecl" then
@@ -173,7 +242,7 @@ function Eval:load(program)
         end
         ::continue::
     end
-    for _, name in ipairs({ "U32", "U8", "U16", "I32", "U64", "I64", "Bool", "Unit", "Type" }) do
+    for _, name in ipairs({ "U32", "U8", "U16", "I32", "U64", "I64", "F64", "Bool", "Unit", "Type" }) do
         declare(top, name, { kind = "value", name = name, value = V.type(S[name]) })
     end
     -- `Ref(T)` is a type and `Ref(place)` is a reference to that place. Both are the same ordinary
@@ -188,6 +257,31 @@ function Eval:load(program)
     -- A reference must name a place, and only the argument expression says whether that place has
     -- an identity that outlives the reference, so `Ref` needs the expression as well as the value.
     refBuiltin.refOf = true
+    -- `Ptr(T)` is a type and `Ptr(place)` is an unchecked address to that place: one word, like `Ref`,
+    -- dispatched the same way. It is the only place a lifetime is deliberately written off.
+    local ptrBuiltin = self:builtin("Ptr", { { name = "target" } }, function(engine, ctx, values, span)
+        local ty = engine:asType(values[1], span)
+        if not ty then D.reject("type-required", "Ptr needs an element type or a place", span) end
+        S.checkRuntime(ty, span)
+        return V.type(S.ptr(engine:canonicalize(ty)))
+    end)
+    ptrBuiltin.ptrOf = true
+    declare(top, "Ptr", { kind = "word", name = "Ptr", def = ptrBuiltin })
+    -- `Null(T)` is the null `Ptr(T)`. There is no null reference, so a pointer is the only thing it
+    -- can make, and it needs runtime code because an address has no compile-time value.
+    declare(top, "Null", { kind = "word", name = "Null",
+        def = self:builtin("Null", { { name = "type" } }, function(engine, ctx, values, span)
+            local ty = engine:asType(values[1], span)
+            if not ty then D.reject("type-required", "Null needs an element type, as in Null(U8)", span) end
+            local target = engine:canonicalize(ty)
+            S.checkRuntime(target, span)
+            if ctx.mode ~= "residual" then
+                D.reject("runtime-in-normalization",
+                    "A null pointer exists only in compiled code", span)
+            end
+            local pointer = S.ptr(target)
+            return V.ir(ctx.builder:nullPtr(pointer), pointer)
+        end) })
     declare(top, "Ref", { kind = "word", name = "Ref", def = refBuiltin })
     -- `OneOf(cases)` builds a sum type; the cases are a keyed schema whose fields are the
     -- alternatives. Nothing new is needed in the grammar: member selection names a constructor and
@@ -211,6 +305,23 @@ function Eval:load(program)
                 end
                 return V.type(S.array(element, length.n))
             end) })
+    -- `String` is the byte slice: text is an array of bytes with a runtime length, not a separate
+    -- kind of value, so it needs no rule of its own.
+    declare(top, "String", { kind = "value", name = "String", value = V.type(S.String) })
+    -- `Slice(T)` is a type and `Slice(array)` is a view of that array. One word, dispatched on
+    -- whether its argument is a type value or a storage array, exactly as `Ref` is.
+    local sliceBuiltin = self:builtin("Slice", { { name = "source" } }, function(engine, ctx, values, span)
+        local element = engine:asType(values[1], span)
+        if not element then
+            D.reject("type-required", "Slice needs an element type or an array", span)
+        end
+        S.checkRuntime(element, span)
+        return V.type(S.slice(element))
+    end)
+    -- Only the argument expression says whether the view's storage outlives it, so `Slice` needs
+    -- the expression as well as the value, exactly as `Ref` does.
+    sliceBuiltin.sliceOf = true
+    declare(top, "Slice", { kind = "word", name = "Slice", def = sliceBuiltin })
     declare(top, "OneOf", { kind = "word", name = "OneOf",
         def = self:builtin("OneOf", { { name = "cases" } }, function(engine, ctx, values, span)
             local cases = values[1]
@@ -257,6 +368,7 @@ function Eval:compile(program, loadedTop)
     end
 
     local compilation = { session = self, exports = exports, functions = {}, types = exports.types,
+        foreigns = self.foreignOrder,
         modules = self.moduleStorages }
     for _, export in ipairs(exports.functions) do
         local instance = self:instanceFor(export.word.def, export.span, export.word.args)
@@ -812,6 +924,50 @@ function Eval:placeOrigin(ctx, expr)
     return nil
 end
 
+-- `Ptr(place)` takes the address of a place and writes off its lifetime. Unlike a reference there is no
+-- target rule to check, and that is the point: from here the program is responsible, so the one place
+-- a lifetime is dropped is spelled rather than inferred.
+function Eval:evalPtr(ctx, expr)
+    if expr.kind == "Reference" then
+        local slot = lookup(ctx.scope, expr.name.text)
+        local value = slot and self:demand(slot, expr.span).value or nil
+        local held = value and self:asType(value, expr.span) or nil
+        if held then return V.type(S.ptr(self:canonicalize(held))) end
+    end
+    -- Only a non-place expression can be a type, and evaluating a place would read it: taking an
+    -- address must not also load what it addresses.
+    if expr.kind ~= "Reference" and expr.kind ~= "FieldSelect" and expr.kind ~= "IndexExpr" then
+        local asType = self:asType(self:evalExpr(ctx, expr), expr.span)
+        if asType then return V.type(S.ptr(self:canonicalize(asType))) end
+        D.reject("type-required", "Ptr needs an element type or a place to address", expr.span)
+    end
+    if ctx.mode ~= "residual" then
+        D.reject("runtime-in-normalization", "A raw pointer exists only in compiled code", expr.span)
+    end
+    -- A place expression names storage directly, so the address is that place and nothing is read.
+    local ok, reached = pcall(function() return self:placeOf(ctx, expr, expr.span) end)
+    if not (ok and reached.place) then
+        -- A local binding to an instance is an alias, so its storage is what the address names; that
+        -- storage is created here when the instance only exists as a value so far.
+        local held = self:evalExpr(ctx, expr)
+        local tag = V.tag(held)
+        if tag == "record" then
+            reached = { place = self:recordPlace(ctx, held, expr.span), ty = held.ty }
+        elseif tag == "array" then
+            reached = { place = self:arrayPlace(ctx, held, expr.span), ty = held.ty }
+        end
+    end
+    if not reached.place then
+        D.reject("not-a-place", "Ptr needs an element type or a place to address", expr.span)
+    end
+    if not reached.place then
+        D.reject("not-a-place", "Ptr needs a place to address", expr.span)
+    end
+    local target = self:canonicalize(reached.ty)
+    local pointer = S.ptr(target)
+    return V.ir(ctx.builder:addr(reached.place, pointer), pointer)
+end
+
 function Eval:evalRef(ctx, expr)
     local slot
     if expr.kind == "Reference" then
@@ -921,6 +1077,70 @@ end
 
 -- The place an array value's elements live at. A value that only exists as an SSA value is spilled
 -- into storage once, which is what lets a parameter or a call result be indexed.
+-- `Slice(array)` is a runtime-length view of an array: the address of its first element and its
+-- length. The view borrows the storage it names, so the lifetime rules of a reference apply to it.
+function Eval:evalSlice(ctx, expr)
+    local container = self:containerOf(ctx, expr, expr.span)
+    -- `Slice(T)` is a type, exactly as `Ref(T)` is; only a non-type argument names a view.
+    local element = self:asType(container.value, expr.span)
+    if element then
+        S.checkRuntime(element, expr.span)
+        return V.type(S.slice(self:canonicalize(element)))
+    end
+    local ty = container.ty
+    if not S.isArray(ty) then
+        D.reject("type-mismatch", "Slice needs an array, found " .. S.encode(ty or S.Unit), expr.span)
+    end
+    -- A reference to module storage may leave the activation; a view of anything else may not.
+    local tied = not (container.container and container.container.module)
+    if ctx.mode ~= "residual" then
+        local held = container.value
+        if not (type(held) == "table" and V.tag(held) == "array" and held.items) then
+            D.reject("runtime-in-normalization", "A runtime slice must be built in runtime code", expr.span)
+        end
+        -- A view names storage rather than being storage, so a view of module storage is not a
+        -- compile-time constant: folding it would bake the read into the output. Module
+        -- initialization and the reference interpreter execute over that storage, so for them it
+        -- is the value; elsewhere the call is compiled instead.
+        if container.container and container.container.module
+            and not (ctx.session.run or ctx.session.moduleDemand) then
+            D.reject("runtime-in-normalization",
+                "A view of module storage is built where it is used, not folded while compiling",
+                expr.span)
+        end
+        return V.slice(S.slice(ty.element), held, 0, ty.length, tied)
+    end
+    if not container.place then
+        if not container.value then
+            D.reject("not-a-place", "Slice needs an array with storage", expr.span)
+        end
+        container.place = self:arrayPlace(ctx, container.value, expr.span)
+    end
+    -- Both halves of a view are pure: an address and a length need no storage of their own.
+    local data = ctx.builder:addr(Ir.Index(container.place, ctx.builder:u32(0), ty.element),
+        S.ref(ty.element))
+    local view = ctx.builder:make(S.slice(ty.element), { data, ctx.builder:u32(ty.length) })
+    return V.ir(view, S.slice(ty.element), tied, container.place)
+end
+
+-- The length of a slice value, when the compiler knows it.
+function Eval:sliceCount(value)
+    if V.tag(value) == "string" then return #value.bytes end
+    if V.tag(value) == "slice" then return value.count end
+    return nil
+end
+
+-- One element of a slice value at a known index.
+function Eval:sliceElement(value, index)
+    if V.tag(value) == "string" then return V.u8(value.bytes:byte(index + 1)) end
+    if V.tag(value) == "slice" then
+        local items = value.source and value.source.items
+        if not items then return nil end
+        return items[value.start + index + 1]
+    end
+    return nil
+end
+
 function Eval:arrayPlace(ctx, value, span)
     if value.place then return value.place end
     if ctx.mode ~= "residual" then
@@ -965,6 +1185,16 @@ end
 
 -- The place an lvalue expression names, without reading it. Every assignable target and every
 -- reference target is a chain of selections over a root, so this is the one place that knows how to
+-- A name the reference specifies but this implementation does not provide is a known-but-unimplemented
+-- feature rather than an unknown name. Nothing is in that state now that F64 exists, so the table is
+-- empty; a name goes here when its rules are written down and its implementation is not.
+local UNIMPLEMENTED_NAMES = {}
+function Eval:unknownName(name, span)
+    local note = UNIMPLEMENTED_NAMES[name]
+    if note then D.todo("unimplemented", note, span) end
+    D.reject("unknown-name", "Unknown name: " .. name, span)
+end
+
 -- reach storage. A concrete result describes a compile-time container; a residual one is an
 -- `Ir.Place` with the type it refers to.
 --   { concrete = "field", record = <value>, name = <field>, ty = <ty> }
@@ -973,7 +1203,7 @@ end
 function Eval:placeOf(ctx, expr, span)
     if expr.kind == "Reference" then
         local slot = lookup(ctx.scope, expr.name.text)
-        if not slot then D.reject("unknown-name", "Unknown name: " .. expr.name.text, expr.name.span) end
+        if not slot then self:unknownName(expr.name.text, expr.name.span) end
         if slot.atTop then
             -- The binding is demanded first: its named storage is built from the value it computes.
             local demanded = self:demand(slot, expr.name.span)
@@ -1023,8 +1253,50 @@ function Eval:placeOf(ctx, expr, span)
         return { place = place, ty = ty, container = container.container }
     end
     if expr.kind == "IndexExpr" then
-        local container = self:derefContainer(ctx, self:containerOf(ctx, expr.base, expr.base.span),
-            expr.span)
+        local base = self:containerOf(ctx, expr.base, expr.base.span)
+        -- An unchecked pointer is indexed by address, before any dereference: `p[i]` is the element at
+        -- `p + i`, so the pointer's target is that element rather than a container to index into.
+        -- Dereferencing first, the way a reference is handled, would read the element and then try to
+        -- index it.
+        if base.ty and S.isPtr(base.ty) then
+            local element = base.ty.target
+            local index = self:evalExpr(ctx, expr.index)
+            self:requireType(index, S.U32, expr.index.span)
+            if ctx.mode ~= "residual" then
+                D.reject("runtime-in-normalization", "A pointer element needs runtime code", expr.span)
+            end
+            local view = self:expression(ctx, base.value, base.ty)
+            local indexExpr = self:expression(ctx, index, S.U32)
+            -- No length and so no guard: that is the whole difference from the slice index below.
+            return { place = ctx.builder:ptrIndex(view, indexExpr, element), ty = element }
+        end
+        local container = self:derefContainer(ctx, base, expr.span)
+        if S.isSlice(container.ty) then
+            local element = container.ty.element
+            local index = self:evalExpr(ctx, expr.index)
+            self:requireType(index, S.U32, expr.index.span)
+            local count = self:sliceCount(container.value)
+            if V.isKnown(index) and V.isInteger(index) and count then
+                if index.n >= count then
+                    D.reject("index-range", "Index " .. tostring(index.n) .. " is outside a slice of "
+                        .. "length " .. tostring(count), expr.span)
+                end
+                local held = self:sliceElement(container.value, index.n)
+                if held and ctx.mode ~= "residual" then
+                    return { concrete = "element", value = held, ty = element, readonly = true }
+                end
+            end
+            if ctx.mode ~= "residual" then
+                D.reject("runtime-in-normalization", "A run-time slice index needs runtime code", expr.span)
+            end
+            local view = self:expression(ctx, container.value, container.ty)
+            local indexExpr = self:expression(ctx, index, S.U32)
+            -- A run-time index is checked before it is used, exactly as an array's is.
+            ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Ge", indexExpr,
+                ctx.builder:sliceLength(view, S.U32), S.Bool), "index-range"))
+            return { place = ctx.builder:sliceIndex(view, indexExpr, element), ty = element,
+                readonly = true }
+        end
         if not S.isArray(container.ty) then
             D.reject("type-mismatch",
                 "Expected an array but found " .. S.encode(container.ty or S.Unit), expr.span)
@@ -1090,6 +1362,21 @@ function Eval:derefContainer(ctx, container, span)
     -- A selection directly off a reference field or a runtime reference: the place holds the
     -- pointer, so the target is one dereference further on. This is checked after the value cases,
     -- because a frontend reference already names the target place.
+    if container.ty and S.isPtr(container.ty) then
+        -- The pointer is a value, so it is spilled once to reach the record it addresses; from there the
+        -- selection is the same route a reference takes.
+        local target = self:canonicalize(container.ty.target)
+        if ctx.mode ~= "residual" then
+            D.reject("runtime-in-normalization", "A pointer field needs runtime code", span)
+        end
+        local place = container.place
+        if not place then
+            local storage = ctx.builder:var(ctx.body, container.ty,
+                self:expression(ctx, container.value, container.ty))
+            place = Ir.Local(storage)
+        end
+        return { place = Ir.Deref(place, target), ty = target, container = { retaining = true } }
+    end
     if container.ty and S.isRef(container.ty) then
         local target = self:refTargetType(container.ty)
         if not container.place then return container end
@@ -1136,6 +1423,7 @@ function Eval:evalIndex(ctx, expr)
     -- concrete state, so they read it directly.
     if ctx.mode ~= "residual" and (ctx.session.run or ctx.session.moduleDemand
         or self:placeOrigin(ctx, expr) ~= "module") then
+        if reached.concrete == "element" then return reached.value end
         if reached.concrete == "index" then return reached.array.items[reached.index + 1] end
         if reached.concrete == "field" then return reached.record.fields[reached.name] or V.unit() end
     end
@@ -1340,6 +1628,12 @@ function Eval:expression(ctx, value, want)
         end
         return value.expr
     end
+    if tag == "string" then return ctx.builder:const(value.ty, Ir.Str(value.bytes)) end
+    if tag == "float" then return ctx.builder:float(value.ty, value.n) end
+    if tag == "slice" then
+        if value.expr then return value.expr end
+        D.reject("runtime-in-normalization", "A compile-time slice has no runtime representation", ctx.span)
+    end
     if tag == "int" then
         if value.high then return ctx.builder:int64(value.ty, value.high, value.low) end
         return ctx.builder:int(value.ty, value.n)
@@ -1473,6 +1767,8 @@ end
 function Eval:isBorrowed(value)
     local tag = V.tag(value)
     if tag == "ref" then return value.tied == true end
+    -- A slice is a view of storage, so it is as tied to its activation as the place it views.
+    if tag == "slice" then return value.tied == true end
     if tag == "array" then return value.borrowed == true end
     if tag == "object" or tag == "record" or tag == "ir" then return value.borrowed == true end
     if tag == "closure" then return #(value.plan.borrowedOrder or {}) > 0 end
@@ -1486,6 +1782,36 @@ end
 -- is defined and needs no check; any other change that cannot lose a value is implicit, and one that
 -- can is accepted only for a known value that fits.
 function Eval:convert(value, ty, span)
+    if S.isF64(ty) then
+        -- An integer becomes a double implicitly only when the double is exact: rounding can lose a
+        -- value, so the rounding is written `F64(x)` where it happens.
+        if not S.isInteger(value.ty) then return nil end
+        local from = value.ty
+        if V.isKnown(value) then
+            local high, low = wordsOf(value)
+            local rounded
+            -- Only a signed wide value is negative: the same bits are a large positive U64.
+            if S.isWide(from) and S.isSigned(from) and U64Kernel.slt(high, low, 0, 0) then
+                rounded = -U64Kernel.tofloat(U64Kernel.neg(high, low))
+            elseif S.isWide(from) then
+                rounded = U64Kernel.tofloat(high, low)
+            else
+                rounded = value.n
+            end
+            local backHigh, backLow = wordsOfDouble(rounded)
+            if backHigh == high and backLow == low then return V.f64(rounded) end
+            D.reject("numeric-range", "Value " .. describeWords(from, high, low)
+                .. " is not exactly an F64; write F64(x) to round it", span)
+        end
+        if S.isWide(from) then return nil end
+        -- Every value of a 32-bit or narrower type is exactly a double.
+        if V.tag(value) == "ir" then
+            value.cast = true
+            value.ty = S.F64
+            return value
+        end
+        return V.f64(value.n)
+    end
     local from = value.ty
     if from == ty then return value end
     if not (S.isInteger(from) and S.isInteger(ty)) then return nil end
@@ -1519,13 +1845,19 @@ function Eval:requireType(value, ty, span)
             .. "; narrow a run-time value with an explicit conversion such as "
             .. S.encode(ty):lower() .. "(x)", span)
     end
-    D.reject("type-mismatch", "Expected " .. S.encode(ty) .. " but found " .. S.encode(value.ty), span)
+    D.reject("type-mismatch", "Expected " .. S.display(ty) .. " but found " .. S.display(value.ty), span)
 end
 
 -- Expressions ---------------------------------------------------------------------------------
 
 function Eval:evalExpr(ctx, expr)
     self:step(expr.span)
+    -- Tail position belongs to this node alone, so it is taken here and handed back only to a construct
+    -- whose child really is the returned expression: a call that is the whole expression, and the arms
+    -- of a conditional. An operand of `+`, an index or an argument is never a tail position, so a
+    -- self-call there stays a real call instead of becoming a back edge whose result is Unit.
+    local tail = ctx.tail
+    ctx.tail = false
     local kind = expr.kind
     if kind == "U32Literal" then
         -- A literal adapts to another operand's type when it fits, which is decided from the syntax.
@@ -1541,9 +1873,11 @@ function Eval:evalExpr(ctx, expr)
     elseif kind == "Reference" then return self:evalReference(ctx, expr)
     elseif kind == "UnaryExpr" then return self:evalUnary(ctx, expr)
     elseif kind == "BinaryExpr" then return self:evalBinary(ctx, expr)
-    elseif kind == "Condition" then return self:evalCondition(ctx, expr, nil)
-    elseif kind == "Apply" then return self:evalApply(ctx, expr)
+    elseif kind == "Condition" then ctx.tail = tail; return self:evalCondition(ctx, expr, nil)
+    elseif kind == "Apply" then ctx.tail = tail; return self:evalApply(ctx, expr)
     elseif kind == "SchemaExpr" then return self:evalSchema(ctx, expr)
+    elseif kind == "StringLiteral" then return V.string(S.String, expr.bytes)
+    elseif kind == "FloatLiteral" then return V.f64(expr.value)
     elseif kind == "ArrayExpr" then return self:evalArray(ctx, expr, nil)
     elseif kind == "IndexExpr" then return self:evalIndex(ctx, expr)
     elseif kind == "RecordSupply" then return self:evalSupply(ctx, expr)
@@ -1573,7 +1907,7 @@ end
 function Eval:evalReference(ctx, expr)
     local name = expr.name.text
     local slot = lookup(ctx.scope, name)
-    if not slot then D.reject("unknown-name", "Unknown name: " .. name, expr.name.span) end
+    if not slot then self:unknownName(name, expr.name.span) end
     if slot.kind == "value" then
         local demanded = self:demand(slot, expr.name.span)
         if demanded.value == nil then D.reject("value-required", name .. " has no value", expr.name.span) end
@@ -1607,7 +1941,11 @@ function Eval:readFieldValue(ctx, slot, span)
     if ctx.mode ~= "residual" then
         -- Normalize code reads the frontend value a borrowed or module place stands for directly.
         local record = slot.record and slot.record.backing
-        if record and record.fields and not slot.record.module then
+        -- A module object is read the same way, but only where reading it is the point: module
+        -- initialization and the reference interpreter both execute over concrete state, while
+        -- residual specialization must not bake a snapshot of module storage into the output.
+        if record and record.fields
+            and (not slot.record.module or ctx.session.run or ctx.session.moduleDemand) then
             local held = record.fields[slot.name]
             if held == nil then D.bug("module-field", "Module storage has no field " .. slot.name) end
             return held
@@ -1619,6 +1957,47 @@ function Eval:readFieldValue(ctx, slot, span)
     return V.ir(ctx.builder:ref(read, slot.ty), slot.ty, nil, slot.place)
 end
 
+-- Arithmetic and comparison on IEEE-754 doubles. Both sides must be F64 once a literal has adopted the
+-- other side's type, exactly as an integer operation needs one width: an integer that is not a literal
+-- needs an explicit conversion, because rounding it may lose a value. IEEE decides the rest, so a
+-- division by zero is an infinity or a NaN rather than a trap and a NaN comparison is false.
+function Eval:floatOp(ctx, op, left, right, leftSpan, rightSpan, span)
+    for _, side in ipairs({ { left, leftSpan }, { right, rightSpan } }) do
+        local value, where = side[1], side[2]
+        if value.ty ~= S.F64 then
+            if S.isInteger(value.ty) and value.literal then
+                -- A literal adopts F64, which is what lets `2.0 * 3` read as it looks.
+                self:requireType(value, S.F64, where)
+            else
+                D.reject("type-mismatch", "A float operation needs two F64 values, found "
+                    .. S.encode(left.ty or S.Unit) .. " and " .. S.encode(right.ty or S.Unit)
+                    .. "; convert one side explicitly", span)
+            end
+        end
+    end
+    local irOp = FLOAT_ARITH[op] or COMPARE[op]
+    if not irOp then
+        D.reject("type-mismatch", "Operator " .. op .. " has no meaning for F64", span)
+    end
+    if V.isKnown(left) and V.isKnown(right) then
+        local a, b = left.n, right.n
+        if op == "+" then return V.f64(a + b) end
+        if op == "-" then return V.f64(a - b) end
+        if op == "*" then return V.f64(a * b) end
+        if op == "/" then return V.f64(a / b) end
+        local result
+        if op == "==" then result = a == b
+        elseif op == "!=" then result = a ~= b
+        elseif op == "<" then result = a < b
+        elseif op == "<=" then result = a <= b
+        elseif op == ">" then result = a > b
+        else result = a >= b end
+        return V.bool(result)
+    end
+    local ty = COMPARE[op] and S.Bool or S.F64
+    return V.ir(ctx.builder:bin(irOp, self:expression(ctx, left), self:expression(ctx, right), ty), ty)
+end
+
 function Eval:evalUnary(ctx, expr)
     local value = self:evalExpr(ctx, expr.operand)
     local op = expr.operator
@@ -1626,6 +2005,15 @@ function Eval:evalUnary(ctx, expr)
         self:requireType(value, S.Bool, expr.operand.span)
         if V.tag(value) == "bool" then return V.bool(not value.b) end
         return V.ir(ctx.builder:un("Not", self:expression(ctx, value), S.Bool), S.Bool)
+    end
+    if S.isF64(value.ty) then
+        -- Only negation applies to a float; complement and shift are integer operations.
+        if op ~= "-" then
+            D.reject("type-mismatch", "Negation is the only unary operator F64 has, not " .. op,
+                expr.operand.span)
+        end
+        if V.isKnown(value) then return V.f64(-value.n) end
+        return V.ir(ctx.builder:un("Neg", self:expression(ctx, value), S.F64), S.F64)
     end
     if not S.isInteger(value.ty) then
         D.reject("type-mismatch", "Expected an integer but found " .. S.encode(value.ty), expr.operand.span)
@@ -1653,7 +2041,35 @@ end
 
 -- One implementation of every binary operator, shared by expressions and compound stores.
 function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
+    if S.isPtr(left.ty) or S.isPtr(right.ty) then
+        -- Two addresses of one element type compare by address. A pointer has no order and no integer
+        -- value, so nothing else about it is offered.
+        if (op ~= "==" and op ~= "!=") or left.ty ~= right.ty then
+            D.reject("type-mismatch", "A pointer compares only with a pointer of one element type, found "
+                .. S.encode(left.ty or S.Unit) .. " and " .. S.encode(right.ty or S.Unit), span)
+        end
+        if ctx.mode ~= "residual" then
+            D.reject("runtime-in-normalization", "A pointer comparison needs runtime code", span)
+        end
+        return V.ir(ctx.builder:bin(COMPARE[op], self:expression(ctx, left),
+            self:expression(ctx, right), S.Bool), S.Bool)
+    end
+    if S.isF64(left.ty) or S.isF64(right.ty) then
+        return self:floatOp(ctx, op, left, right, leftSpan, rightSpan, span)
+    end
     leftSpan, rightSpan, span = leftSpan or ctx.span, rightSpan or ctx.span, span or ctx.span
+    if (op == "==" or op == "!=") and S.isString(left.ty) and S.isString(right.ty) then
+        -- Strings compare by content: a byte sequence has no identity a program can observe, so
+        -- pointer equality would be a surprising answer rather than the useful one.
+        if V.tag(left) == "string" and V.tag(right) == "string" then
+            return V.bool((left.bytes == right.bytes) == (op == "=="))
+        end
+        if ctx.mode ~= "residual" then
+            D.reject("runtime-in-normalization", "A run-time string comparison needs runtime code", span)
+        end
+        return V.ir(ctx.builder:bin(COMPARE[op], self:expression(ctx, left), self:expression(ctx, right),
+            S.Bool), S.Bool)
+    end
     if COMPARE[op] then
         -- A comparison widens both sides, which is always safe and never narrows.
         if S.isInteger(left.ty) and S.isInteger(right.ty) and left.ty ~= right.ty then
@@ -1830,6 +2246,9 @@ function Eval:evalExpected(ctx, expr, expected)
 end
 
 function Eval:evalCondition(ctx, expr, expected)
+    -- The test is not a tail position; both arms are.
+    local tail = ctx.tail
+    ctx.tail = false
     local test = self:evalExpr(ctx, expr.test)
     self:requireType(test, S.Bool, expr.test.span)
     if V.tag(test) == "bool" then
@@ -1838,7 +2257,10 @@ function Eval:evalCondition(ctx, expr, expected)
     local builder = ctx.builder
     local testExpr = self:expression(ctx, test)
     local yesList, noList = {}, {}
+    -- Both arms are tail positions, so each arm context inherits the flag.
+    ctx.tail = tail
     local yesCtx, noCtx = ctx:arm(yesList), ctx:arm(noList)
+    ctx.tail = false
     local yesValue = self:evalExpected(yesCtx, expr.yes, expected)
     local yesTerminated = yesCtx.terminated or false
     local noValue = self:evalExpected(noCtx, expr.no, expected)
@@ -2044,6 +2466,14 @@ function Eval:evalFieldSelect(ctx, expr)
     -- Selection through a reference selects from the instance it names, so the reference is read as
     -- that instance and the ordinary member rules apply.
     base = self:placeObject(base) or base
+    if base.ty and S.isSlice(base.ty) and name == "length" then
+        local known = self:sliceCount(base)
+        if known then return V.u32(known) end
+        if ctx.mode ~= "residual" then
+            D.reject("runtime-in-normalization", "A runtime slice length needs runtime code", expr.span)
+        end
+        return V.ir(ctx.builder:sliceLength(self:expression(ctx, base, base.ty), S.U32), S.U32)
+    end
     local tag = V.tag(base)
     if tag == "object" then
         local def = base.schema
@@ -2183,10 +2613,15 @@ function Eval:storeTarget(ctx, target)
     -- storage is runtime state, so compile-time initialization and residual specialization never
     -- write it; a mutating top-level initializer rejects instead of baking a moved start value.
     local origin = ctx.mode ~= "residual" and self:placeOrigin(ctx, target) or nil
+    -- `placeOrigin` names the route a *name* spells, so a write through a local binding that holds a
+    -- reference to module storage looks like a local write. What the place turned out to be is the
+    -- other half of the question, and without it such a write is folded away with its effect lost.
+    local modules = origin == "module"
+        or (reached.container ~= nil and reached.container.module == true)
     -- Module storage is runtime state: residual specialization never writes it, because such a store
     -- would not appear in the generated code. Initialization (`session.moduleDemand`) and the reference
     -- interpreter (`session.run`) execute over concrete state and do write it.
-    if ctx.mode ~= "residual" and origin == "module"
+    if ctx.mode ~= "residual" and modules
         and not (ctx.session.run or ctx.session.moduleDemand) then
         D.reject("runtime-in-normalization",
             "Module storage is runtime state, so only module initialization may write it", target.span)
@@ -2200,6 +2635,12 @@ function Eval:storeTarget(ctx, target)
             return { kind = "concrete-index", array = reached.array, index = reached.index,
                 ty = reached.ty }, nil
         end
+    end
+    -- A slice is a view of storage someone else owns, not storage of its own, and a string
+    -- literal's bytes are read-only. A write therefore names the array the view came from.
+    if reached.readonly then
+        D.reject("not-a-place", "A slice is a read-only view; write the array it views instead",
+            target.span)
     end
     if not reached.place then
         D.bug("not-a-place", "A store target in residual code must be storage")
@@ -2649,6 +3090,7 @@ function Eval:callableInstance(callable, args, span)
 end
 
 function Eval:buildCallableInstance(key, callable, args, span)
+    self:enterBuild(span)
     local plan, def = callable.plan, callable.plan.def
     self.nextFn = self.nextFn + 1
     local instance = { key = key, def = def, plan = plan, target = "wordletfn_" .. self.nextFn,
@@ -2781,6 +3223,7 @@ function Eval:buildCallableInstance(key, callable, args, span)
     for _, stmt in ipairs(body) do statements[#statements + 1] = stmt end
     instance.fn = Ir.Fn(instance.target, Ir.Body, 0, S.list(inputs), S.list(instance.results),
         S.list(params), S.list(statements))
+    self:leaveBuild()
     instance.status = "done"
     return instance
 end
@@ -2798,10 +3241,68 @@ end
 
 -- Bodies --------------------------------------------------------------------------------------
 
-function Eval:execBlock(ctx, statements)
-    for _, stmt in ipairs(statements) do
+-- A deferred action hands the rest of the list to a nested block over the same context, so every way
+-- out of what follows passes through a `return`, which the action is attached to. A second action
+-- nests inside the first, which is what makes several of them run in reverse order. The action itself
+-- runs at the return rather than here: a return inside a statement conditional's arm is an exit from
+-- this block too, and running the action here would miss that path and could only ever produce one
+-- value.
+function Eval:execDefer(ctx, statements, index, stmt)
+    local frame = { pending = self:deferredCall(ctx, stmt), parent = ctx.deferFrame, span = stmt.span }
+    ctx.deferFrame = frame
+    local terminated = self:execBlock(ctx, statements, index + 1)
+    ctx.deferFrame = frame.parent
+    return terminated
+end
+
+-- Every deferred action pending at a return, innermost first, which is the reverse of the order the
+-- `defer` statements were written. Running them here is what makes a transfer out of the block in
+-- the middle of a conditional reach them as well.
+function Eval:runPendingDefers(ctx)
+    local frame = ctx.deferFrame
+    while frame do
+        self:invoke(ctx, frame.pending.callee, frame.pending.args, frame.pending.span)
+        frame = frame.parent
+    end
+end
+
+-- The callee and the arguments of a deferred action are evaluated where the `defer` is written, so a
+-- read of mutable storage there is a snapshot of what the program had rather than of what the names
+-- mean later.
+function Eval:deferredCall(ctx, stmt)
+    local callee = self:evalExpr(ctx, stmt.call.callee)
+    local args = self:evalArguments(ctx, stmt.call.arguments, callee)
+    return { callee = callee, args = args, span = stmt.call.span }
+end
+
+-- Runs an already-evaluated call, which is how a deferred action is invoked without evaluating its
+-- source a second time. The callee kinds are the ones `evalApply` dispatches on; a new kind has to be
+-- added here as well.
+function Eval:invoke(ctx, callee, args, span)
+    local tag = V.tag(callee)
+    if tag == "word" then return self:apply(ctx, callee, args, span) end
+    if tag == "method" then return self:applyMethod(ctx, callee, args, span) end
+    if tag == "closure" then
+        return self:applyClosure(ctx, callee.plan, nil, args, span, callee.bound)
+    end
+    if tag == "ir" and S.isOwned(callee.ty) then return self:applyOwned(ctx, callee, args, span) end
+    if tag == "ir" and S.isView(callee.ty) then return self:applyView(ctx, callee, args, span) end
+    if (tag == "ir" or tag == "variant") and callee.ty and S.isTagged(callee.ty) then
+        return self:applyTagged(ctx, callee, args, span)
+    end
+    D.reject("callable-required", "A deferred action must be a call, found "
+        .. (callee.ty and S.encode(callee.ty) or V.describe(callee)), span)
+end
+
+
+function Eval:execBlock(ctx, statements, from)
+    -- A statement list is not a tail position; only a `return` inside it is, and it sets the flag.
+    ctx.tail = false
+    for index = from or 1, #statements do
+        local stmt = statements[index]
         self:step(stmt.span)
         local kind = stmt.kind
+        if kind == "Defer" then return self:execDefer(ctx, statements, index, stmt) end
         if kind == "ValueStmt" then
             local values = self:expand(self:evalValueDef(ctx, stmt.def))
             for index, binder in ipairs(stmt.def.binders) do
@@ -2824,11 +3325,19 @@ function Eval:execBlock(ctx, statements)
             if ctx.terminated then return true end
             ctx.terminated = savedTerminated
             if ctx.mode == "residual" then
-                ctx.builder:emit(ctx.body, Ir.Return(S.list(self:materializeAll(ctx, values,
-                    ctx.instance and ctx.instance.results or nil))))
+                local exprs = self:materializeAll(ctx, values,
+                    ctx.instance and ctx.instance.results or nil)
                 ctx.resultTypes = {}
                 for index, value in ipairs(values) do ctx.resultTypes[index] = value.ty end
+                -- The action runs after the returned expression has been evaluated and before the value
+                -- leaves. `materializeAll` above is what takes the snapshot the returned value names,
+                -- so a read of storage the action changes still yields what it was at the return.
+                self:runPendingDefers(ctx)
+                ctx.builder:emit(ctx.body, Ir.Return(S.list(exprs)))
             else
+                -- The interpreter executes the program rather than compiling it, so the actions run as
+                -- ordinary calls on the way out of the block.
+                self:runPendingDefers(ctx)
                 ctx.result = values
             end
             return true
@@ -3039,7 +3548,62 @@ end
 
 -- `U8(x)`, `U16(x)` and `U32(x)` convert between integer widths: widening is free, narrowing traps
 -- when the value does not fit, and a known value outside the target is rejected while compiling.
+-- An integer becomes the nearest double, rounding once with ties to even. The exact kernel does the
+-- rounding, because a Lua division would round twice for a value above 2^53.
+function Eval:roundToFloat(ctx, value, span)
+    local from = value.ty
+    if V.isKnown(value) then
+        local high, low = wordsOf(value)
+        if S.isWide(from) and S.isSigned(from) and U64Kernel.slt(high, low, 0, 0) then
+            return V.f64(-U64Kernel.tofloat(U64Kernel.neg(high, low)))
+        end
+        if S.isWide(from) then return V.f64(U64Kernel.tofloat(high, low)) end
+        return V.f64(value.n)
+    end
+    return V.ir(ctx.builder:convert(self:expression(ctx, value), S.F64), S.F64)
+end
+
+-- A float becomes an integer by truncation toward zero. A value the target cannot hold rejects when it
+-- is known and stops a run-time one, which is also what keeps a NaN from becoming some integer: a NaN
+-- compares false against every bound, so it is trapped on its own.
+function Eval:truncateToInt(ctx, ty, value, span)
+    local maxDouble, minDouble = floatBounds(ty)
+    if V.isKnown(value) then
+        -- Truncation toward zero, which is what a conversion to an integer means; `math.modf` is
+        -- that operation, while a modulo would floor toward negative infinity instead.
+        local truncated = math.modf(value.n)
+        if truncated ~= truncated or truncated < minDouble or truncated >= maxDouble then
+            D.reject("numeric-range", "Value " .. string.format("%.17g", value.n)
+                .. " does not fit in " .. S.encode(ty), span)
+        end
+        if S.isWide(ty) then return V.int64(ty, wordsOfDouble(truncated)) end
+        return V.int(ty, truncated)
+    end
+    local builder, expr = ctx.builder, self:expression(ctx, value)
+    builder:emit(ctx.body, Ir.Trap(builder:bin("Ne", expr, expr, S.Bool), "numeric-range"))
+    builder:emit(ctx.body, Ir.Trap(builder:bin("Lt", expr, builder:float(S.F64, minDouble), S.Bool),
+        "numeric-range"))
+    builder:emit(ctx.body, Ir.Trap(builder:bin("Ge", expr, builder:float(S.F64, maxDouble), S.Bool),
+        "numeric-range"))
+    return V.ir(builder:convert(expr, ty), ty)
+end
+
+-- `F64(x)` rounds an integer to the nearest double, and `U32(f)` truncates a float toward zero with
+-- the target's range checked. Both directions are explicit here even where the value would be exact,
+-- because that is what names the rounding at the point it happens.
 function Eval:applyConversion(ctx, ty, args, span)
+    if #args ~= 1 then D.reject("arity", "A conversion takes one value", span) end
+    local value = args[1]
+    if S.isF64(ty) then
+        if S.isF64(value.ty) then return value end
+        if not S.isInteger(value.ty) then
+            D.reject("type-mismatch", "F64 needs a number, found " .. S.encode(value.ty or S.Unit), span)
+        end
+        return self:roundToFloat(ctx, value, span)
+    end
+    if S.isInteger(ty) and S.isF64(value.ty) then
+        return self:truncateToInt(ctx, ty, value, span)
+    end
     if #args ~= 1 then D.reject("arity", "A conversion takes one value", span) end
     local value = args[1]
     if not S.isInteger(value.ty) then
@@ -3090,11 +3654,22 @@ function Eval:constInt(ctx, ty, high, low)
 end
 
 function Eval:evalApply(ctx, expr)
+    -- The invocation is in tail position when this call is the whole returned expression, but the
+    -- callee and the arguments never are.
+    local tail = ctx.tail
+    ctx.tail = false
     local callee = self:evalExpr(ctx, expr.callee)
+    if V.tag(callee) == "word" and callee.def.sliceOf and #callee.args == 0 and #expr.arguments == 1 then
+        return self:evalSlice(ctx, expr.arguments[1])
+    end
+    if V.tag(callee) == "word" and callee.def.ptrOf and #callee.args == 0 and #expr.arguments == 1 then
+        return self:evalPtr(ctx, expr.arguments[1])
+    end
     if V.tag(callee) == "word" and callee.def.refOf and #callee.args == 0 and #expr.arguments == 1 then
         return self:evalRef(ctx, expr.arguments[1])
     end
     local args = self:evalArguments(ctx, expr.arguments, callee)
+    ctx.tail = tail
     local tag = V.tag(callee)
     if tag == "word" then return self:apply(ctx, callee, args, expr.span) end
     if tag == "method" then return self:applyMethod(ctx, callee, args, expr.span) end
@@ -3112,7 +3687,7 @@ function Eval:evalApply(ctx, expr)
     end
     if tag == "type" then
         -- Applying an integer type converts; applying any other type is not a call.
-        if S.isInteger(callee.value) then
+        if S.isInteger(callee.value) or S.isF64(callee.value) then
             return self:applyConversion(ctx, callee.value, args, expr.span)
         end
         D.reject("callable-required", S.encode(callee.value) .. " is a type, not a callable",
@@ -3130,6 +3705,63 @@ function Eval:evalApply(ctx, expr)
         return self:makeVariant(ctx, callee, args[1], expr.span)
     end
     D.reject("callable-required", "Only words, methods and closures can be applied", expr.callee.span)
+end
+
+-- A foreign declaration is a word with no body: its requirements and its result are written down, and
+-- the host symbol it calls is the name it spells. Because there is nothing to infer from, a result that
+-- the annotation leaves open is refused rather than guessed.
+function Eval:foreignDef(def, lexical)
+    self.nextDef = self.nextDef + 1
+    return {
+        id = self.nextDef, name = def.name.text, span = def.name.span,
+        params = def.params, result = def.result, lexical = lexical,
+        foreign = true, symbol = def.name.text,
+    }
+end
+
+-- The call shape of a foreign word: every requirement is an input and the result is the declared one.
+-- It is built once per definition, because a foreign call has no specialization to key.
+function Eval:foreignInstance(def, span)
+    local existing = self.foreignInstances[def]
+    if existing then return existing end
+    local sc = scope(def.lexical)
+    local plan, types, inputs = {}, {}, {}
+    for index, param in ipairs(def.params) do
+        local ty = self:requirement(def, index, sc, span)
+        S.checkRuntime(ty, span)
+        types[#types + 1] = ty
+        inputs[#inputs + 1] = S.inValue(ty)
+        plan[#plan + 1] = { kind = "value", position = index }
+    end
+    local declared, requirements = self:declaredResult(def, sc, span)
+    if not declared or next(requirements or {}) ~= nil then
+        D.reject("result-required", "Foreign word " .. def.name
+            .. " needs a concrete result, as in `: U32`", span)
+    end
+    for _, ty in ipairs(declared) do
+        if ty == false then
+            D.reject("result-required", "Foreign word " .. def.name .. " needs a concrete result", span)
+        end
+        S.checkRuntime(ty, span)
+    end
+    -- A single `Unit` result is erased, exactly as a Wordlet result contract's Unit is: there is no
+    -- value to carry, and emitting one would declare a `void` variable.
+    if #declared == 1 and declared[1] == S.Unit then declared = {} end
+    local instance = { target = def.symbol, def = def, foreign = true, inputPlan = plan,
+        inputTypes = types, inputs = inputs, results = declared }
+    self.foreignInstances[def] = instance
+    self.foreignOrder[#self.foreignOrder + 1] = instance
+    return instance
+end
+
+-- A foreign call is an effect the compiler cannot see into, so it exists only where there is code to
+-- emit: it is never folded, and the reference interpreter has no binding to call.
+function Eval:applyForeign(ctx, def, values, span)
+    if ctx.mode ~= "residual" then
+        D.reject("foreign-effect", "A foreign call exists only in compiled code: " .. def.name
+            .. "; a constant argument does not make the host call foldable", span)
+    end
+    return self:emitCall(ctx, self:foreignInstance(def, span), values, span, nil)
 end
 
 function Eval:apply(ctx, word, args, span)
@@ -3162,13 +3794,31 @@ function Eval:apply(ctx, word, args, span)
         end
         return V.word(def, bound, span)
     end
+    if def.foreign then return self:applyForeign(ctx, def, bound, span) end
     local allKnown, allStatic = true, true
     for _, value in ipairs(bound) do
         if not V.isKnown(value) then allKnown = false end
         if not V.isStatic(value) then allStatic = false end
     end
     if allKnown and (ctx.mode == "normalize" or allStatic) then
-        return self:applyStatically(def, bound, span, nil)
+        -- Folding a known call is an optimization in residual code and a requirement in normalize
+        -- code. A body that needs runtime storage cannot be folded and must instead be compiled, so
+        -- the rejection is the signal to compile it; normalize code has no runtime code to fall
+        -- back to, so for it the same rejection is the answer.
+        if ctx.mode == "residual" then
+            -- The attempt may have nested other folds, so the depth is restored either way before
+            -- the call is compiled instead.
+            local savedDepth = self.staticDepth
+            local ok, value = pcall(self.applyStatically, self, def, bound, span, nil)
+            self.staticDepth = savedDepth
+            if ok then return value end
+            if not (D.is(value) and (value.code == "runtime-in-normalization"
+                or value.code == "static-depth" or value.code == "foreign-effect")) then
+                error(value, 0)
+            end
+        else
+            return self:applyStatically(def, bound, span, nil)
+        end
     end
     if ctx.mode ~= "residual" then
         D.reject("runtime-in-normalization", "This call needs runtime storage or values", span)
@@ -3197,7 +3847,20 @@ function Eval:applyMethod(ctx, method, args, span)
     local allKnown = true
     for _, value in ipairs(bound) do if not V.isKnown(value) then allKnown = false end end
     if allKnown and V.tag(receiver) == "record" then
-        return self:applyStatically(def, bound, span, receiver)
+        -- A method body that needs runtime storage is compiled rather than folded, for the same
+        -- reason a word call is.
+        if ctx.mode == "residual" then
+            local savedDepth = self.staticDepth
+            local ok, value = pcall(self.applyStatically, self, def, bound, span, receiver)
+            self.staticDepth = savedDepth
+            if ok then return value end
+            if not (D.is(value) and (value.code == "runtime-in-normalization"
+                or value.code == "static-depth" or value.code == "foreign-effect")) then
+                error(value, 0)
+            end
+        else
+            return self:applyStatically(def, bound, span, receiver)
+        end
     end
     if ctx.mode ~= "residual" then
         D.reject("runtime-in-normalization", "This method call needs runtime storage", span)
@@ -3245,6 +3908,7 @@ function Eval:copyArgument(value)
 end
 
 function Eval:applyStatically(def, values, span, receiver)
+    self:enterStatic(def, span)
     local sc = self:parameterScope(def, values, receiver)
     local declared, requirements = self:declaredResult(def, sc, span)
     local ctx = self:context("normalize", sc, span)
@@ -3265,6 +3929,7 @@ function Eval:applyStatically(def, values, span, receiver)
             self:requireResultSignature(actual, requirement, span)
         end
     end
+    self:leaveStatic()
     if #result == 0 then return V.unit() end
     if #result == 1 then return result[1] end
     return V.results(result)
@@ -3276,7 +3941,9 @@ function Eval:applyResidual(ctx, def, values, span)
         D.reject("recursive-result", "Recursive word " .. def.name .. " needs an explicit result annotation", span)
     end
     -- A tail call to the instance currently being built is a back edge, not a recursive call.
-    if ctx.tail and ctx.instance == instance and instance.loopTargets then
+    -- A block with a pending deferred action does not become a loop: the action runs after the call
+    -- returns and before the value leaves, which is not the order a back edge would give.
+    if ctx.tail and not ctx.deferFrame and ctx.instance == instance and instance.loopTargets then
         self:emitLoopBack(ctx, instance, values, span)
         return V.unit()
     end
@@ -3387,6 +4054,7 @@ function Eval:loopTarget(instance, position, storage, ty)
 end
 
 function Eval:buildInstance(key, def, values, span, receiver)
+    self:enterBuild(span)
     self.nextFn = self.nextFn + 1
     local instance = { key = key, def = def, target = "wordletfn_" .. self.nextFn,
         status = "building", args = values, inputPlan = {}, inputTypes = {} }
@@ -3457,7 +4125,16 @@ function Eval:buildInstance(key, def, values, span, receiver)
                     "A callable argument with no known code needs a function-pointer ABI", param.span)
             end
         else
-            S.checkRuntime(ty, param.span)
+            -- `Type` and the other compile-time descriptors have no runtime representation, so a
+            -- parameter of one has to be supplied statically; the static branch below binds it.
+            if not S.runtime(ty) then
+                if values[index] == nil or not V.isStatic(values[index]) then
+                    D.reject("static-required", "Parameter " .. param.name.text
+                        .. " needs a static argument of type " .. S.display(ty), param.span)
+                end
+            else
+                S.checkRuntime(ty, param.span)
+            end
         end
         if ty == S.Unit then
             -- Erased exactly like a Unit result: no input, no ABI slot, name bound directly.
@@ -3466,6 +4143,10 @@ function Eval:buildInstance(key, def, values, span, receiver)
         end
         do
         local supplied = values[index]
+        -- A supplied argument is checked against the requirement here whichever branch binds it. The
+        -- static branch below already did; a run-time argument used to reach the IR checker unchecked,
+        -- where a wrong type was reported as a compiler bug instead of a source error.
+        if supplied ~= nil then self:requireAgainst(supplied, ty, param.span) end
         if supplied ~= nil and V.isStatic(supplied) then
             self:requireType(supplied, ty, param.span)
             declare(sc, param.name.text, { kind = "value", name = param.name.text, value = supplied }, param.span)
@@ -3562,6 +4243,7 @@ function Eval:buildInstance(key, def, values, span, receiver)
     instance.fn = Ir.Fn(instance.target, Ir.Body, receiver and 1 or 0, S.list(inputs),
         S.list(instance.results), S.list(params), S.list(statements))
     instance.paramTypes = paramTypes
+    self:leaveBuild()
     instance.status = "done"
     return instance
 end

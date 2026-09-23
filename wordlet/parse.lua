@@ -234,6 +234,17 @@ function Parser:primary()
             return A.c.U64Literal(token.value.high, token.value.low, S(token.span))
         end
         return A.c.U32Literal(token.value, S(token.span))
+    elseif token.kind == "float" then
+        self:next()
+        return A.c.FloatLiteral(token.value, S(token.span))
+    elseif token.kind == "byte" then
+        self:next()
+        -- A byte literal is a numeric literal written readably, so it adapts to the type of the
+        -- expression it sits in exactly as `97` would.
+        return A.c.U32Literal(token.value, S(token.span))
+    elseif token.kind == "string" then
+        self:next()
+        return A.c.StringLiteral(token.value, S(token.span))
     elseif token.kind == "keyword" and (token.text == "true" or token.text == "false") then
         self:next()
         return A.c.BoolLiteral(token.text == "true", S(token.span))
@@ -369,6 +380,21 @@ end
 
 function Parser:declaration()
     local first = self:peek()
+    if first.kind == "keyword" and first.text == "extern" then
+        -- A host function has no body to infer from, so its result is required rather than optional,
+        -- and every requirement is annotated for the same reason.
+        self:next()
+        self:expect("let")
+        local name = self:expectName("a foreign name")
+        self:expect("(")
+        local params = self:parameters(")", true)
+        self:expect(")")
+        self:expect(":", "a result declaration such as `: U32`, because a foreign word has no body")
+        local result = self:resultSpec()
+        local def = A.c.ForeignDef(A.name(name), params, result)
+        return A.c.ForeignDecl(def, mergeSpan(first.span, spanOf(result) or name.span))
+    end
+    local first = self:peek()
     if first.kind == "name" and first.text == "use" then return self:useDecl() end
     local let = self:expect("let")
     local name = self:expectName("a definition name")
@@ -456,6 +482,15 @@ end
 
 function Parser:statement()
     local token = self:peek()
+    if token.kind == "keyword" and token.text == "defer" then
+        -- A deferred action is a call statement, so it needs the saturation a call statement has.
+        self:next()
+        local call = self:expression()
+        if call.kind ~= "Apply" then
+            D.reject("parse", "`defer` takes a call, such as `defer host_free(p)`", call.span)
+        end
+        return A.c.Defer(call, mergeSpan(token.span, call.span))
+    end
     if token.kind == "keyword" and token.text == "let" then
         local decl = self:declaration()
         if decl.kind == "WordDecl" then return A.c.WordStmt(decl.def, decl.span) end

@@ -344,6 +344,13 @@ Key shapes (see `ir.asdl` for the exact fields):
 
 ```
 Ir.Expr  = Const | Ref | Un | Bin | Get | Make | Owned | Addr(Place) | Convert(Expr, Ty.V)
+         | SliceLength(Expr, Ty.V)
+Ir.Place = Local | Captured | Project | Deref | Index | SliceIndex(Expr view, Expr index, Ty.V)
+`Ty.Slice(V)` is a runtime-length view: a pointer to the element and a `U32` length. `Make(Slice(T),
+{data, length})` builds one from a reference and a length, `Literal.Str` is its one literal spelling,
+`SliceLength` projects the length (pure, like a record field), and `SliceIndex` names an element place.
+The view is an expression operand rather than a place base because a view needs no storage of its own.
+It is read-only, so `SliceIndex` is reached by `Read` and never by `Store`.
 Ir.Place = Local(Storage) | Captured(Bundle, slot) | Project(Place, Field) | Deref(Place)
          | Index(Place, Expr, Ty.V)
 Ir.Arg   = ValueArg | BorrowArg | BundleArg

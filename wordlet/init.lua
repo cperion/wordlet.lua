@@ -37,7 +37,7 @@ function M.compile(options)
     local functions = {}
     for _, instance in ipairs(session.order) do functions[#functions + 1] = instance.fn end
     Check.program(functions, (compilation.modules and #compilation.modules > 0)
-        and compilation.modules or nil)
+        and compilation.modules or nil, compilation.foreigns)
     local layouts = C.close(compilation)
     return M.artifact(layouts, compilation)
 end
@@ -123,7 +123,7 @@ function M.compile_file(path, options)
     local functions = {}
     for _, instance in ipairs(engine.order) do functions[#functions + 1] = instance.fn end
     Check.program(functions, (compilation.modules and #compilation.modules > 0)
-        and compilation.modules or nil)
+        and compilation.modules or nil, compilation.foreigns)
     local layouts = C.close(compilation)
     return M.artifact(layouts, compilation)
 end
@@ -161,8 +161,17 @@ function M.interpret(options)
     end
     local args = {}
     for index, value in ipairs(options.args or {}) do
-        if type(value) == "number" then args[index] = V.u32(value)
+        -- A Lua number is a double, so a fractional one is an F64 argument and a whole one is a U32.
+        -- An entry that wants an integral F64 takes a U32 and converts it, or a test passes a
+        -- fractional value; either way the argument's type is never guessed from the parameter.
+        if type(value) == "number" then
+            if value % 1 == 0 and value >= 0 and value <= 4294967295 then
+                args[index] = V.u32(value)
+            else
+                args[index] = V.f64(value)
+            end
         elseif type(value) == "boolean" then args[index] = V.bool(value)
+        elseif type(value) == "string" then args[index] = V.string(S.String, value)
         else D.reject("interpret-arg", "Unsupported argument " .. tostring(value)) end
     end
     local span = word.span
@@ -186,6 +195,22 @@ end
 local function describe(session, value, seen, depth)
     if depth > 64 then D.resource("interpret-depth", "Interpreted value nests too deeply") end
     local tag = V.tag(value)
+    if tag == "string" then return value.bytes end
+    if tag == "slice" then
+        local items = {}
+        for index = 0, value.count - 1 do
+            items[index + 1] = describe(session, session:sliceElement(value, index), seen, depth + 1)
+        end
+        return { slice = true, length = value.count, items = items }
+    end
+    -- A 64-bit value is held as two words, so it is printed rather than returned as a Lua number.
+    -- A float is a Lua number, so it is printed with enough digits to round-trip.
+    -- An F64 is a Lua number already, and the differential harness compares it through the C return
+    -- type, so the value is handed back as one rather than as a rounded string.
+    if tag == "float" then return value.n end
+    if tag == "int" and value.high ~= nil then
+        return require("wordletkit.u64").tostring(value.high, value.low, S.isSigned(value.ty))
+    end
     if tag == "int" then return value.n end
     if tag == "bool" then return value.b end
     if tag == "unit" then return "unit" end

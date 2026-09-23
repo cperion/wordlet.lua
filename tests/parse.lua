@@ -174,10 +174,123 @@ rejects("lex-range", "let x = 18446744073709551616\nreturn { functions = {} }")
 check(#P.source("let x = 4294967296\nreturn { functions = {} }", "t.let").declarations == 1,
     "a literal above a word is a 64-bit literal")
 rejects("lex-char", "let x = $\nreturn { functions = {} }")
+-- `defer` is a statement that takes a call, so it needs the saturation a call statement needs.
+do
+    local source = "let f(): U32 = do\n  defer g(1)\n  return 1\nend\nreturn { functions = { f } }"
+    check(#P.source(source, "t.let").declarations == 1, "a deferred call parses")
+    local body = P.source(source, "t.let").declarations[1].def.body
+    check(body.kind == "Block" and body.statements[1].kind == "Defer",
+        "a deferred action is a statement of its own")
+end
+rejects("parse", "let f(): U32 = do\n  defer 1 + 2\n  return 1\nend\nreturn { functions = { f } }")
+
+-- A float literal is an F64. A point needs a digit on both sides, so `1.` stays the integer 1 followed
+-- by a `.` and a member selection never has to guess; an exponent makes a float without a point.
+do
+    local function literal(text)
+        return P.source("let x = " .. text .. "\nreturn { functions = {} }", "t.let")
+            .declarations[1].def.values[1]
+    end
+    check(literal("5.5").kind == "FloatLiteral" and literal("5.5").value == 5.5,
+        "a float literal is an F64")
+    check(literal("1e5").value == 100000, "an exponent makes a float without a point")
+    check(literal("1.5e-3").value == 0.0015, "an exponent may be signed")
+    check(literal("1_000.5").value == 1000.5, "a separator groups the integer part of a float")
+    check(literal("1").kind == "U32Literal", "a literal with no point and no exponent is an integer")
+    check(literal("0x1e5").kind == "U32Literal", "a hexadecimal literal keeps its `e` as a digit")
+end
+rejects("lex-number", "let x = 1e\nreturn { functions = {} }")
+rejects("lex-number", "let x = 1e+\nreturn { functions = {} }")
+-- A string literal is a byte sequence: escapes decode, and a bad one is named.
+do
+    local program = P.source([[let s = "a\nb\x41\"\\"
+return { functions = {} }]], "t.let")
+    local literal = program.declarations[1].def.values[1]
+    check(literal.kind == "StringLiteral" and literal.bytes == "a\nbA\"\\",
+        "a string literal decodes to its bytes")
+    check(#P.source([[let s = ""
+return { functions = {} }]], "t.let").declarations == 1, "an empty string is a literal")
+    local utf8 = P.source("let s = \"" .. "\xc3\xa9" .. "\"\nreturn { functions = {} }", "t.let")
+    check(utf8.declarations[1].def.values[1].bytes == "\xc3\xa9",
+        "a literal's bytes are the source bytes, so a multi-byte character needs no escape")
+end
+rejects("lex-string", "let s = \"abc\nreturn { functions = {} }")
+rejects("lex-string", "let s = \"a\\q\"\nreturn { functions = {} }")
+rejects("lex-string", "let s = \"a\\xZ\"\nreturn { functions = {} }")
+
+-- Numeric literals: a separator groups digits, and binary spells the bits.
+do
+    local function literal(text)
+        return P.source("let x = " .. text .. "\nreturn { functions = {} }", "t.let")
+            .declarations[1].def.values[1]
+    end
+    check(literal("1_000_000").value == 1000000, "a separator groups decimal digits")
+    check(literal("0xffff_ffff").value == 4294967295, "a separator groups hexadecimal digits too")
+    check(literal("0b1010_1010").value == 170, "a binary literal is its bits")
+    check(literal("0b1").value == 1, "a short binary literal is padded, not misread")
+    local wide = literal("0b1111_1111_1111_1111_1111_1111_1111_1111_1111_1111")
+    check(wide.kind == "U64Literal" and wide.high == 255 and wide.low == 4294967295,
+        "a binary literal above a word arrives as its two words")
+end
+rejects("lex-number", "let x = 1__2\nreturn { functions = {} }")
+rejects("lex-number", "let x = 1_\nreturn { functions = {} }")
+rejects("lex-number", "let x = 0b_1\nreturn { functions = {} }")
+rejects("lex-number", "let x = 0b2\nreturn { functions = {} }")
+rejects("lex-number", "let x = 0x\nreturn { functions = {} }")
+
+-- A byte literal is one byte written readably, and it adapts like any other numeric literal.
+do
+    local function byte(text)
+        return P.source("let x = " .. text .. "\nreturn { functions = {} }", "t.let")
+            .declarations[1].def.values[1]
+    end
+    check(byte("'a'").kind == "U32Literal" and byte("'a'").value == 97, "a byte literal is its byte")
+    local bs = string.char(92)   -- a backslash, written so the literal's own escapes stay readable
+    check(byte("'" .. bs .. "n'").value == 10, "a byte literal takes the same escapes a string does")
+    check(byte("'" .. bs .. "x41'").value == 65, "a byte literal can be written as a hex escape")
+    check(byte("'" .. bs .. "''").value == 39, "a quote can be escaped inside a byte literal")
+end
+rejects("lex-string", "let x = 'ab'\nreturn { functions = {} }")
+rejects("lex-string", "let x = '" .. "\xc3\xa9" .. "'\nreturn { functions = {} }")
+rejects("lex-string", "let x = '\nreturn { functions = {} }")
+
+-- A long string is raw, multi-line and leveled, so a body may contain a lower level's close.
+do
+    local function body(text)
+        return P.source("let x = " .. text .. "\nreturn { functions = {} }", "t.let")
+            .declarations[1].def.values[1].bytes
+    end
+    check(body("[=[a\nb]=]") == "a\nb", "a long string keeps its newlines")
+    check(body("[=[\nabc]=]") == "abc", "one newline after the opening bracket is dropped")
+    check(body("[=[a\\tb]=]") == "a\\tb", "a long string has no escapes")
+    check(body("[==[a ]=] b]==]") == "a ]=] b", "a level-two body may contain a level-one close")
+    check(body("[=[\"quoted\"]=]") == "\"quoted\"", "a long string may contain any quote")
+end
+rejects("lex-string", "let x = [=[abc\nreturn { functions = {} }")
+
+-- `[[` is still an array whose first element is an array, and a line comment that starts with a
+-- bracket after a space is still a line comment.
+check(#P.source("let x = [[1, 2], [3, 4]]\nreturn { functions = {} }", "t.let").declarations == 1,
+    "a nested array literal is not a long string")
+check(#P.source("-- [[1, 2]] is an array\nlet x = 1\nreturn { functions = {} }", "t.let").declarations == 1,
+    "a line comment beginning with a spaced bracket stays a line comment")
+
+-- A long comment is the block form, at any level.
+check(#P.source("--[[ a\nb ]]\nlet x = 1\nreturn { functions = {} }", "t.let").declarations == 1,
+    "a long comment spans lines")
+check(#P.source("--[==[ a ]=] b ]==]\nlet x = 1\nreturn { functions = {} }", "t.let").declarations == 1,
+    "a long comment may contain a lower level's close")
+rejects("lex-comment", "--[[ open\nlet x = 1\nreturn { functions = {} }")
+
+-- A multi-line literal must not move the line of whatever follows it.
+check(P.source("let s = [=[\na\nb]=]\nlet x = 1\nreturn { functions = {} }", "t.let").declarations[2].span.line == 4,
+    "a long string keeps the line count")
+check(P.source("--[[\na\nb]]\nlet x = 1\nreturn { functions = {} }", "t.let").declarations[1].span.line == 4,
+    "a long comment keeps the line count")
 rejects("parse", "let f(x: U32) = x\nreturn { functions = { f }\n")
 
 -- examples parse -----------------------------------------------------------------
-for _, example in ipairs({ "arithmetic", "receivers", "captures", "sums", "tagged", "references", "arrays", "modules", "modules_util" }) do
+for _, example in ipairs({ "arithmetic", "receivers", "captures", "sums", "tagged", "references", "arrays", "modules", "modules_util", "strings" }) do
     local path = (source:match("^(.*[/\\])") or "./") .. "../examples/" .. example .. ".let"
     local file = assert(io.open(path, "rb"))
     local text = assert(file:read("*a"))

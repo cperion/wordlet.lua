@@ -15,21 +15,29 @@ makes those changes explicit. There is no compatibility requirement with the old
 ## 1. Lexical rules and item boundaries
 
 The grammar is free-form. Newlines and indentation are whitespace. A `--` comment runs to the end
-of the line and is otherwise whitespace; there is no block comment form. Keywords and delimiters
+of the line and is otherwise whitespace. `--` immediately followed by a long bracket (below) is a
+block comment instead, so a comment may span lines and may contain anything; a `--` followed by a
+space is always the line form, so `-- [[1, 2]]` comments out a bracket. Keywords and delimiters
 determine structure. Semicolons are optional separators between complete statements/declarations, not within
 expressions. Commas separate parameters, arguments, fields and result-list items; trailing commas
 are allowed in delimited lists.
 
 Identifiers use ASCII letters or underscore followed by ASCII letters, digits or underscore. Names
 are case-sensitive; capitalization never distinguishes a type from a value or a signature from a
-lambda. Reserved keywords are `let`, `do`, `end`, `if`, `then`, `else`, `return`, `and`, `or`, `not`,
-`true`, and `false`. Primitive names U32, Bool, Unit and Type are predefined bindings, as is the
+lambda. Reserved keywords are `let`, `extern`, `do`, `defer`, `end`, `if`, `then`, `else`, `return`, `and`, `or`, `not`,
+`true`, and `false`. Primitive names U32, U8, U16, I32, U64, I64, F64, Bool, Unit and Type are
+predefined bindings, as are the type constructors `OneOf` (section 8.1), `Ref` (section 8.2), `Array`
+and `Slice` (sections 8.3 and 8.4), `Ptr` (section 8.5) and the null pointer `Null` (section 8.5).
 type constructor `OneOf` (section 8.1).
 
-Numeric literals are decimal integers or hexadecimal integers prefixed by 0x. A literal that fits a
+Numeric literals are decimal, hexadecimal prefixed by 0x, or binary prefixed by 0b. A single
+underscore may separate any two digits, so 1_000_000 and 0b1010_1010 read as they look; a separator
+that leads, trails or doubles rejects rather than being ignored into a different value. A literal
+that fits a
 word is a U32 and one that does not is a U64, so 0xFFFFFFFFFFFFFFFF can be written directly; a
 literal above 64 bits rejects rather than wrapping. A leading minus is an operator, not part of a
-literal. There are no float, string, nil or implicit tuple literals.
+literal. There are no nil or implicit tuple literals. A string literal is a byte sequence, specified
+specified in section 8.4.
 
 The integer types are `U8`, `U16`, `U32`, `I32`, `U64` and `I64`. `I32` is
 two's complement, so it wraps, its division truncates toward zero with the remainder taking the
@@ -55,11 +63,19 @@ reinterprets.
 `F64` is IEEE-754 double and follows IEEE 754 rather than the integer rules: division by zero is an
 infinity or a NaN rather than a trap, a NaN comparison is false, an integer converts to a float by
 rounding to nearest with ties to even and a float to an integer by truncation, with a value outside
-the integer's range rejected when known and stopped when not. There is no `F32`, and no float literal
-syntax in this version: a float value is produced by a conversion, such as `F64(1) / F64(3)`.
+the integer's range rejected when known and stopped when not. There is no `F32`.
+
+A float literal is written with a point, an exponent, or both, and its type is F64: `1.5`, `1e5` and
+`1.5e-3` are one value each. A point needs a digit on both sides, so `1.` is the integer 1 followed by
+a `.` rather than a float, and a member selection never has to guess which was meant. A hexadecimal
+literal keeps its `e` as a digit, so `0x1e5` is an integer. A digit separator may appear between any
+two digits of the mantissa or the exponent, and an exponent needs at least one digit. A float literal
+does not adopt another operand's type the way an integer literal does: `1.5` is F64 and stays F64.
 `true` and `false` are Bool. `Unit()` is the Unit value.
 
-Comments begin with `--` and continue to the next newline. This is the only newline-sensitive lexical
+Comments begin with `--`. `--` followed immediately by a long bracket opens a block comment that ends
+at that bracket's own closing form, so it may span lines and its body may contain anything; any other
+`--` runs to the end of the line. A line comment is the only newline-sensitive lexical
 rule. Operators use longest-token matching, so `!=`, `<<=` and `->` are single tokens.
 
 An item boundary is grammatical, not visual. In a block, `let`, `return`, statement `if`, and `end`
@@ -223,7 +239,9 @@ call statement at the end does not imply a return. Code after a definitely termi
 the same list is rejected as unreachable.
 
 Blocks may contain declarations, field assignments, compound field assignments, call statements,
-statement conditionals and returns. A call statement must be saturated; it evaluates the call and
+statement conditionals, deferred actions and returns. A call statement must be saturated; it evaluates
+the call and discards its result vector, and a deferred action is a call statement that runs when the
+block it is written in is left (section 8.8).
 discards its result vector. Discarding an incomplete word is an error, not a call for effects.
 Arbitrary unused arithmetic expressions are not statements. `do ... end` is a body form, not a
 standalone value expression or a declaration-scope statement.
@@ -332,14 +350,17 @@ Power binds tighter than unary on its left: `-x ^ 2` means `-(x ^ 2)`. Unary is 
 of power, so `x ^ -1` means `x ^ (-1)`. Here -1 is modular U32 negation, not a signed exponent. Two
 comparisons cannot chain without explicit grouping; `a < b < c` rejects.
 
-Arithmetic and bitwise operators require U32. Add/subtract/multiply/negate/power operate modulo 2^32.
+Arithmetic and bitwise operators require U32, except that `+`, `-`, `*` and `/` also apply to F64.
+Add/subtract/multiply/negate/power operate modulo 2^32.
 `0 ^ 0` is 1. Division is unsigned integer quotient; remainder is unsigned remainder. A known zero
 divisor rejects; a dynamic zero divisor aborts at runtime. Shifts are logical; an amount at least 32
 yields zero. Raw literals outside the U32 range reject before operations. No implicit Bool/integer
 conversion exists.
 
-Ordered comparison requires U32. Equality requires equal scalar types U32, Bool or Unit; Unit equals
-Unit. Record, word, type and callable equality are not added by the equality tokens.
+Ordered comparison requires U32 or F64, and equality requires equal scalar types U32, Bool, F64 or
+Unit; Unit equals
+Unit. Two `String` values compare by content, since a byte sequence has no identity a program can
+observe. Record, word, type, slice and callable equality are not added by the equality tokens.
 
 `and`, `or`, `not` require Bool and produce Bool. There is no truthiness and no operand-valued Lua
 and/or behavior. `and` and `or` short-circuit. Other binary operators evaluate operands left-to-right;
@@ -600,6 +621,219 @@ write through either name is visible through both; passing an array to a word, r
 it into a field copies it. A record field or a parameter may be of array type, and an array element may
 itself be an array, so `g[r][c]` indexes a grid.
 
+### 8.4 Slices and strings
+
+A slice is a runtime-length view of storage someone else owns. It is the one array-like type whose
+length is not part of the type, which is what lets one word accept a sequence of any extent:
+
+```
+let sum(xs: Slice(U32)) : U32 = do
+  let n = xs.length
+  let i: U32 = 0
+  let total: U32 = 0
+  return total
+end
+```
+
+`Slice(T)` is an ordinary word, like `Ref`: applied to a type it produces a type, and applied to an
+array it produces a view of that array.
+
+```
+let xs = [10, 20, 30]
+let view = Slice(xs)          -- Slice(U32); view.length is three
+let middle = view[1]          -- a run-time-checked element read
+```
+
+A view names a place, so section 8.2's lifetime rule applies to it unchanged. A view of module storage
+may be copied, stored and returned; a view of a local, or of storage that belongs to an enclosing
+activation, is tied to that activation and rejects when it escapes (`borrow-escape`). A view borrows
+storage; it never owns it, and it does not keep its target alive.
+
+A view is read-only. `xs[i] = v` writes the array; `view[i] = v` rejects (`not-a-place`), because the
+view does not own the storage it names, and the bytes of a string literal are not writable.
+
+Indexing is `view[i]` for a `U32` `i`. A known index outside the known length rejects while compiling
+(`index-range`); any other index is checked when it runs and a failure aborts, exactly as a run-time
+array index does. Reading an element copies it.
+
+
+A **string** is a slice of bytes: `String` is `Slice(U8)`. Text and bytes are therefore one mechanism
+rather than two, and a string has a runtime length like any other view. Its bytes are bytes, not
+characters: the source text is already the encoding, so a multi-byte character needs no escape and no
+decoding. `"\xff"[0]` is the byte 255.
+
+```
+let greeting = "hello"
+let count = greeting.length      -- 5
+let second = U32(greeting[1])    -- 101
+let same = "ab" == "ab"          -- true
+```
+
+A literal is written with double quotes. The escapes are `\\`, `\"`, `\n`, `\r`, `\t`, `\0` and `\xHH`,
+which stands for one byte by its two hexadecimal digits. A raw newline inside a literal rejects, as
+does an unterminated literal or an unknown escape (`lex-string`). A literal's bytes live in read-only
+storage for the life of the program, so a literal is module storage: it may be copied, returned, stored
+and compared freely, and two literals with the same bytes are one buffer.
+
+A **byte literal** is one byte written readably: `'a'` is the byte 97, and it takes the same escapes
+a string does, so `'\n'` is 10 and `'\x41'` is 65. It is a numeric literal, not a one-byte string, so
+it adapts to the width it is used at and reports `U32` where no other operand decides. A byte literal
+that is not exactly one byte rejects (`lex-string`): a multi-byte character is text, so it belongs in
+a string.
+
+A **long string** is written `[=[ ... ]=]` with any number of `=` signs, and the same number closes
+it. It is raw (no escapes at all), it may span lines, and one newline immediately after the opening
+bracket is dropped so a body can begin on the line below it. Because the level is chosen by the
+writer, a body may contain any lower level's closing form. A long string needs at least one `=`: `[[`
+is already an array whose first element is an array, and that must not become ambiguous.
+
+Equality on `String` compares content rather than identity, and costs one length test before any byte
+comparison. Ordering is not offered for `String`, and equality on any other slice type rejects: two
+views may name overlapping storage, so identity is not observable and element-wise equality is not
+offered by `==`.
+
+No slice operation allocates, grows, frees or copies storage, and no string operation builds a new
+string. Building a byte sequence writes into storage the program already has, which is what keeps a
+view a view.
+
+### 8.5 Raw pointers
+
+`Ptr(T)` is an address the compiler does not track. It is deliberately a different type from `Ref(T)`:
+a reference keeps the guarantee of section 8.2, that its target outlives every use of it, and an
+address that arrives from a host function cannot make that promise. Widening `Ref` to carry both would
+turn a checked borrow into a comment, so the two are separate types and a signature says which one it
+means.
+
+A pointer names no lifetime, so none of section 8.2's rules apply to it. It may be null, it may be
+stored in module storage, it may be captured, returned, copied and compared, and it may outlive the
+storage it points at. That is the point of the type: this is the part of the language where the
+programmer is responsible, and the compiler says so by offering no rule to break.
+
+```
+extern let host_alloc(bytes: U32) : Ptr(U8)
+extern let host_free(p: Ptr(U8)) : Unit
+
+let bytes(n: U32) : Ptr(U8) = host_alloc(n * 4)
+```
+
+`p[i]` is the element at index `i` of `p`, for a `U32` `i`, and it has no bounds check: an unchecked
+pointer does not carry a length. The element is assignable and every compound store form applies to
+it, exactly as an array's element is. For `Ptr(R)` whose `R` is a record, `p.field` selects a field and
+a store through it writes that field, on the same route a reference uses.
+
+A pointer is built in one of two ways. A foreign word may return one, and `Ptr(place)` makes one from a
+place the program already has:
+
+```
+let xs = [1, 2, 3]
+let p = Ptr(xs[0])          -- Ptr(U32); the lifetime is written off here, deliberately
+```
+
+`Ptr(place)` is the only place a lifetime is dropped, so it is the place to look for one. There is no
+other conversion in either direction: `Ref(p)` rejects, because an unchecked address must not become a
+checked borrow. Equality on two pointers of one element type compares addresses, and `Null(T)` is the
+null `Ptr(T)`.
+
+```
+let empty : Ptr(U8) = Null(U8)
+let missing = bytes(4) == empty
+```
+
+Ordering, pointer arithmetic and any conversion between a pointer and an integer are not offered.
+`p[i]` is the only arithmetic a pointer has, so one thing has one spelling. A pointer is not a
+`Slice`: a slice carries a length and a pointer does not.
+
+### 8.6 Foreign declarations
+
+A host function is declared with `extern`. It has no body, because its implementation is not written
+in this language, so its result and every one of its requirements are written down:
+
+```
+extern let host_add(a: U32, b: U32) : U32
+extern let host_scale(a: U32) : U32
+```
+
+The C symbol is exactly the name that is written. There is no alias and no `pub`, and the host
+provides that symbol with that signature and C linkage. A requirement or a result must be a type this
+language already has a C representation for, which is the same requirement an exported function's
+signature meets, so a foreign declaration cannot invent a layout and "arbitrary foreign layouts" stays
+excluded.
+
+A foreign call is an effect the compiler cannot see into. It is never folded, so a constant argument
+does not make it a compile-time value, and it exists only where there is code to emit: the reference
+interpreter has no binding to call and rejects it (`foreign-effect`). A `Unit` result is erased like
+any other, so a call to a `Unit` foreign word is a statement. There is no body to specialize, so a
+partial supply rejects rather than producing a partial word.
+
+### 8.7 Scoped resources
+
+A callable requirement may be a word, so a resource can be acquired and released around a body without
+an ownership system, a destructor or a keyword. This is the shape, not a built-in:
+
+```
+let with_region(R: Type, bytes: U32, body: (Ptr(U8)): R) : R = do
+  let region = host_alloc(bytes)
+  let result = body(region)
+  host_free(region)
+  return result
+end
+
+let sum() : U32 = with_region(U32, 8, |p: Ptr(U8)| -> do
+  p[0] = 7
+  p[1] = 35
+  return U32(p[0]) + U32(p[1])
+end)
+```
+
+When the body is known code it is specialized, which is what keeps this cheap: the body's code is
+emitted inside a per-invocation copy of the combinator, the call site is a direct call to that copy,
+and no function pointer is involved. When the combinator's own body is foldable as well -- when it
+has no effect of its own -- the whole call folds away and nothing at all is left, which is the case
+measured for a body of pure arithmetic. So a known body costs at most one direct call; what it never
+costs is a dynamic one. When the body arrives as a run-time view the combinator is an indirect call
+call and the release still runs. A `return` inside the body returns from the *body*, not from the
+combinator, so the release runs on every normal path.
+
+What this does not do is enforce anything. A pointer into the region may be returned, stored in module
+storage or captured by a closure that outlives it, and the compiler accepts that, because a `Ptr`
+carries no lifetime to check and an abort does not unwind, so a release can be skipped. `with_region`
+cleans up; it does not prevent misuse. This is the trade the design accepts, and it is the reason a
+region's memory arrives as `Ptr` and never as `Ref`: a program that needs the guarantee writes its own
+region type and keeps the pointer inside it.
+
+### 8.8 Deferred actions
+
+`defer` attaches an action to the end of the block it appears in, so a release does not depend on
+remembering it at every way out:
+
+```
+let sum() : U32 = do
+  let p = host_alloc(8)
+  defer host_free(p)
+  p[0] = 7
+  p[1] = 35
+  return U32(p[0]) + U32(p[1])
+end
+```
+
+The action is a call statement, and it is written where the bindings it uses are in scope. Its callee
+and arguments are evaluated where the `defer` is written, so the action runs with the values the
+program had at that point and not with whatever the names mean later: a mutable field read at the
+`defer` is a snapshot, exactly as every other read is. The call itself happens when control leaves the
+block, after the returned expression has been evaluated and before the value leaves, and several
+deferred actions in one block run in reverse order of their `defer` statements.
+
+Every way out of the block runs them: falling off the end, a `return`, the end of a statement
+conditional's arm inside it, and a tail self-call. A block with a deferred action therefore does not
+turn a tail self-call into a loop, because the action has to run after the call returns and before the
+value leaves, which is not the order a back edge would give.
+
+`defer` is a statement form and not a type, so it tracks nothing: it does not prevent the resource
+from being used after the action runs, it does not follow a copy of anything, and it does not run at
+all when an abort ends the process. It is section 8.7's shape, written where the resource is acquired.
+Ownership, moves and automatic destruction remain excluded; a deferred action is a release point the
+program placed, not one the compiler inferred.
+
 ## 9. Callables, captures and ownership
 
 Known executable arguments retain code identity and specialize. Unknown runtime implementations
@@ -749,8 +983,10 @@ in section 7. Semantic arity/staticness/type checks are not disguised as parser 
 
 ```
 module          := top-let* export-config EOF
-local-let       := named-definition | value-binding
+local-let       := named-definition | value-binding | foreign-declaration
 named-definition:= 'let' Name parameters result-annotation? '=' body
+-- A host function: no body, so the result is required rather than optional.
+foreign-declaration := 'extern' 'let' Name parameters ':' result-spec
 value-binding   := 'let' binder (',' binder)* '=' expression-list
 binder          := Name (':' type-expression)?
 parameters      := '(' parameter-groups? ')'
@@ -758,13 +994,20 @@ parameter-group := Name (',' Name)* ':' type-expression
 result-annotation := ':' result-spec
 result-spec     := type-expression | '(' type-list? ')'
 body            := expression | 'do' statement* 'end'
-statement       := local-let | field-store | call-statement | return-statement
+statement       := local-let | field-store | call-statement | return-statement | defer-statement
                  | 'if' expression 'then' statement* ('else' statement*)? 'end'
 return-statement:= 'return' expression-list?
+defer-statement := 'defer' call-statement
 expression-list := expression (',' expression)*
 lambda          := '|' lambda-parameters? '|' '->' body
 lambda-parameters := parameter groups, with annotations optionally supplied by context
 postfix         := atom (arguments | initializer | '.' Name)*
+string-literal  := '"' (escape | byte-except-quote-or-newline)* '"'
+float-literal   := digits ('.' digits)? exponent? | digits '.' digits exponent?
+exponent        := ('e' | 'E') ('+' | '-')? digits
+byte-literal    := "'" (escape | byte-except-quote-or-newline) "'"
+long-bracket    := '[' '='+ '[' .* ']' '='+ ']'   (same number of '=' on each side)
+long-comment    := '--' '[' '='* '[' .* ']' '='* ']'
 arguments       := '(' expression-list? ')'
 initializer     := '{' (Name '=' expression) (',' Name '=' expression)* ','? '}' | '{' '}'
 schema          := '{' schema-members? '}'
@@ -850,7 +1093,13 @@ reference, residual partial application, general tuple values, sparse or growing
 zero-length array, record-value literals without a
 schema, non-exhaustive or recursive pattern matching, implicit type parameters, arbitrary foreign
 layouts, `pub`, selective or re-exporting imports and configurable traps are implied by this syntax. A reference is a checked
-borrow of a target that outlives it, not a pointer type a program may fabricate.
+borrow of a target that outlives it, not a pointer type a program may fabricate. A `Ptr` is the type
+that may be null or outlive its target, and it is not a `Ref`; ownership, uniqueness, moves and
+automatic destruction are not offered either, so a scoped resource is released by a word that takes a
+body (section 8.7) rather than by a destructor.
+
+A slice is a view, not a container. No operation allocates, grows, frees or copies storage, so a
+zero-length *type* still rejects even though a runtime length of zero is an ordinary empty view.
 
 Required syntax/semantic tests include:
 
