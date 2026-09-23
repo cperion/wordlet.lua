@@ -28,8 +28,6 @@ function M.eachExpr(expr, fn)
         return
     elseif kind == "SliceLength" then
         M.eachExpr(expr.view, fn)
-    elseif kind == "Owned" then
-        M.eachExpr(expr.environment, fn)
     elseif kind == "Convert" then
         M.eachExpr(expr.operand, fn)
     elseif kind == "Addr" then
@@ -54,8 +52,6 @@ function M.eachStmt(statements, fn)
             if stmt.initial then M.eachExpr(stmt.initial, fn) end
         elseif kind == "Store" then
             -- places are not expressions
-        elseif kind == "BundleDef" then
-            -- bundle slots are Arg values, walked by the caller when needed
         elseif kind == "View" then
             -- view slots are Arg values, walked by the caller when needed
         elseif kind == "Call" or kind == "Indirect" then

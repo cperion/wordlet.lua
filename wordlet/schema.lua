@@ -80,7 +80,6 @@ function M.isBool(t) return t == Ty.Bool end
 function M.isUnit(t) return t == Ty.Unit end
 function M.isType(t) return t == Ty.Type end
 function M.isRecord(t) return type(t) == "table" and t.kind == "Record" end
-function M.isTuple(t) return type(t) == "table" and t.kind == "Tuple" end
 function M.isSig(t) return type(t) == "table" and t.kind == "Sig" end
 
 -- A record type is the runtime data layout: methods and static supplies live in the source

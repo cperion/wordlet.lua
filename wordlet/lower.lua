@@ -44,7 +44,6 @@ function collectExprs(expr, out)
     elseif kind == "Bin" then out[#out + 1] = expr.left; out[#out + 1] = expr.right
     elseif kind == "Get" then out[#out + 1] = expr.aggregate
     elseif kind == "Make" then for _, field in ipairs(expr.fields) do out[#out + 1] = field end
-    elseif kind == "Owned" then out[#out + 1] = expr.environment
     elseif kind == "Convert" then out[#out + 1] = expr.operand
     elseif kind == "Addr" then collectPlaceExprs(expr.place, out)
     elseif kind == "SliceLength" then out[#out + 1] = expr.view
@@ -1095,7 +1094,7 @@ local function usedStorages(fn)
             elseif kind == "Var" then expr(stmt.initial)
             elseif kind == "Read" then place(stmt.place)
             elseif kind == "Store" then place(stmt.place) expr(stmt.value)
-            elseif kind == "BundleDef" or kind == "View" then arguments(stmt.slots)
+            elseif kind == "View" then arguments(stmt.slots)
             elseif kind == "Call" then arguments(stmt.arguments)
             elseif kind == "Indirect" then expr(stmt.callable) arguments(stmt.arguments)
             elseif kind == "If" then expr(stmt.test) statements(stmt.yes) statements(stmt.no)
@@ -1150,7 +1149,7 @@ local function usedValues(fn)
             elseif kind == "Var" then expr(stmt.initial)
             elseif kind == "Read" then place(stmt.place)
             elseif kind == "Store" then place(stmt.place) expr(stmt.value)
-            elseif kind == "BundleDef" or kind == "View" then arguments(stmt.slots)
+            elseif kind == "View" then arguments(stmt.slots)
             elseif kind == "Call" then arguments(stmt.arguments)
             elseif kind == "Indirect" then expr(stmt.callable) arguments(stmt.arguments)
             elseif kind == "If" then expr(stmt.test) statements(stmt.yes) statements(stmt.no)
@@ -1237,7 +1236,7 @@ local function mutatedStorages(fn)
             elseif kind == "Var" then walkExpr(stmt.initial)
             elseif kind == "Read" then walkPlace(stmt.place)
             elseif kind == "Store" then mark(stmt.place) walkPlace(stmt.place) walkExpr(stmt.value)
-            elseif kind == "BundleDef" or kind == "View" then walkArgs(stmt.slots)
+            elseif kind == "View" then walkArgs(stmt.slots)
             elseif kind == "Call" then walkArgs(stmt.arguments)
             elseif kind == "Indirect" then walkExpr(stmt.callable) walkArgs(stmt.arguments)
             elseif kind == "If" then walkExpr(stmt.test) statements(stmt.yes) statements(stmt.no)
@@ -1287,7 +1286,7 @@ local function analyzeInlining(fn)
             elseif kind == "Var" then countExpr(stmt.initial)
             elseif kind == "Read" then defs[stmt.value.id] = stmt countPlace(stmt.place)
             elseif kind == "Store" then countPlace(stmt.place) countExpr(stmt.value)
-            elseif kind == "BundleDef" or kind == "View" then countArgs(stmt.slots)
+            elseif kind == "View" then countArgs(stmt.slots)
             elseif kind == "Call" then countArgs(stmt.arguments)
             elseif kind == "Indirect" then countExpr(stmt.callable) countArgs(stmt.arguments)
             elseif kind == "If" then countExpr(stmt.test) walk(stmt.yes) walk(stmt.no)
@@ -1344,7 +1343,7 @@ local function analyzeInlining(fn)
         elseif kind == "Var" then markExpr(stmt.initial)
         elseif kind == "Read" then markPlace(stmt.place)
         elseif kind == "Store" then markPlace(stmt.place) markExpr(stmt.value)
-        elseif kind == "BundleDef" or kind == "View" then markArgs(stmt.slots)
+        elseif kind == "View" then markArgs(stmt.slots)
         elseif kind == "Call" then markArgs(stmt.arguments)
         elseif kind == "Indirect" then markExpr(stmt.callable) markArgs(stmt.arguments)
         elseif kind == "Trap" then markExpr(stmt.failure)
@@ -1442,7 +1441,7 @@ local function analyzeSharing(fn, usedStorages, usedValues)
         elseif kind == "Var" then out[#out + 1] = stmt.initial
         elseif kind == "Read" then collectPlaceExprs(stmt.place, out)
         elseif kind == "Store" then collectPlaceExprs(stmt.place, out); out[#out + 1] = stmt.value
-        elseif kind == "BundleDef" or kind == "View" then for _, value in ipairs(stmt.slots) do arg(value) end
+        elseif kind == "View" then for _, value in ipairs(stmt.slots) do arg(value) end
         elseif kind == "Call" then for _, value in ipairs(stmt.arguments) do arg(value) end
         elseif kind == "Indirect" then
             out[#out + 1] = stmt.callable

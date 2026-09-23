@@ -84,8 +84,8 @@ function M.function_(fn, definitions, seeded)
                     checkList(case.body, copy(visible), storages, inLoop)
                 end
             elseif kind == "Loop" then
-                -- A loop body may fall through only if it never falls out; the builder always ends
-                -- it with a Return or a Next, so an empty body is the only rejected shape.
+                -- A loop never falls through, so its body is checked as a loop context and no
+                -- statement after it in this list is unreachable because of it.
                 checkList(stmt.body, copy(visible), storages, true)
             elseif kind == "Call" or kind == "Indirect" then
                 local target = definitions[stmt.target]
@@ -245,7 +245,7 @@ function M.function_(fn, definitions, seeded)
     end
     local visible = {}
     for _, param in ipairs(fn.params) do
-        if param.kind ~= "ValueParam" and param.kind ~= "PlaceParam" and param.kind ~= "BundleParam" then
+        if param.kind ~= "ValueParam" and param.kind ~= "PlaceParam" then
             D.bug("ir-param", "Unknown parameter variant " .. tostring(param.kind))
         end
         if param.kind == "ValueParam" then bind(visible, param.binding.id, param.type) end
@@ -499,7 +499,6 @@ end
 function M.arg(arg, locals, storages)
     if arg.kind == "ValueArg" then return M.expr(arg.value, locals, storages) end
     if arg.kind == "BorrowArg" then return M.place(arg.place, storages, locals) end
-    if arg.kind == "BundleArg" then return true end
     D.bug("ir-arg", "Unknown argument variant " .. tostring(arg.kind))
 end
 

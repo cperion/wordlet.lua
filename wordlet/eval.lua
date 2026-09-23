@@ -598,8 +598,6 @@ function Eval:checkNoValueCycle(ty, slot, span, seen)
     seen[ty] = true
     if S.isRecord(ty) then
         for _, field in ipairs(ty.fields) do self:checkNoValueCycle(field.type, slot, span, seen) end
-    elseif S.isTuple(ty) then
-        for _, item in ipairs(ty.fields) do self:checkNoValueCycle(item, slot, span, seen) end
     elseif S.isArray(ty) then
         -- An element is embedded by value, so a cycle that crosses an array crosses no boundary at all.
         self:checkNoValueCycle(ty.element, slot, span, seen)
@@ -854,11 +852,6 @@ end
 -- reference: module-level storage, and a place that belongs to an enclosing activation. Anything
 -- else is a local or a temporary of this activation, and the reference would outlive it.
 
-function Eval:placeRoot(place)
-    while place and place.kind == "Project" do place = place.base end
-    return place
-end
-
 -- A named cell resolves to the definition it reserved. Every other type is already its own meaning,
 -- so this is the one place recursion has to be unwound for inspection.
 function Eval:resolveType(ty, span)
@@ -907,10 +900,11 @@ function Eval:referenceTarget(value)
         return value.enclosing and "enclosing" or nil
     end
     if V.tag(value) ~= "object" then return nil end
-    -- Module storage is a named file-scope object, so it outlives every activation.
+    -- Module storage is a named file-scope object, so it outlives every activation. A borrowed
+    -- capture or a place parameter is the other legal target, and it is marked as enclosing storage
+    -- where it is bound rather than being recognised from the shape of its place.
     if value.module or (value.schema and value.schema.module) then return "module" end
-    local root = self:placeRoot(value.place)
-    if value.enclosing or (root and root.kind == "Captured") then return "enclosing" end
+    if value.enclosing then return "enclosing" end
     return nil
 end
 
@@ -1492,7 +1486,7 @@ function Eval:derefContainer(ctx, container, span)
         return { place = Ir.Deref(place, target), ty = target, container = { retaining = true } }
     end
     if container.ty and S.isRef(container.ty) then
-        local target = self:refTargetType(container.ty)
+        local target = self:pointeeType(container.ty)
         if not container.place then return container end
         return { place = Ir.Deref(container.place, target), ty = target,
             container = { retaining = true } }
@@ -2321,7 +2315,7 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
         local result
         if op == "+" then result = wrap(ty, x + y)
         elseif op == "-" then result = wrap(ty, x - y)
-        elseif op == "*" then result = exact(ty, "*", x, y)
+        elseif op == "*" then result = mulExact(ty, x, y)
         elseif op == "/" then result = S.isSigned(ty) and signedDiv(ty, x, y) or math.floor(x / y)
         elseif op == "%" then
             result = S.isSigned(ty) and signedRem(ty, x, y) or x - y * math.floor(x / y)
@@ -3651,12 +3645,11 @@ function signedRem(ty, x, y)
     return x - truncDiv(x, y) * y
 end
 
--- A product and a power can exceed what a Lua number holds exactly for a 32-bit width, so those two
--- go through the exact kernel; the narrower widths fit exactly either way.
-function exact(ty, op, x, y)
-    if ty == S.U32 then
-        if op == "*" then return U32Kernel.mul(x, y) end
-    end
+-- A product exceeds what a Lua number holds exactly at 32 bits, so that width goes through the exact
+-- kernel; every narrower width fits exactly either way. A power needs the same exactness and has its
+-- own function, because its intermediate squares are products too.
+function mulExact(ty, x, y)
+    if ty == S.U32 then return U32Kernel.mul(x, y) end
     return wrap(ty, x * y)
 end
 
@@ -3805,32 +3798,24 @@ function Eval:applyConversion(ctx, ty, args, span)
         if V.isKnown(value) then return become(value, ty, wordsOf(value)) end
         return V.ir(ctx.builder:convert(self:expression(ctx, value), ty), ty)
     end
+    -- A known value has already returned above, so a narrowing that reaches here is a run-time one:
+    -- it is refused when it is converted, not at the assignment. A bound only needs a check when the
+    -- source can go beyond it, which is a strict comparison.
     local converted = self:convert(value, ty, span)
     if converted then return converted end
-    if V.isKnown(value) then
-        local high, low = wordsOf(value)
-        if wordsFit(ty, high, low) then return become(value, ty, high, low) end
-        D.reject("numeric-range", "Value " .. describeWords(value.ty, high, low) .. " does not fit in "
-            .. S.encode(ty), span)
-    end
     local expr = self:expression(ctx, value)
-    if not reinterprets then
-        -- A run-time value that cannot fit the target is refused when it is converted. The check is
-        -- needed for a bound of the source that the target cannot hold.
-        local sourceMinHigh, sourceMinLow = S.minWordsOf(value.ty)
-        local sourceMaxHigh, sourceMaxLow = S.maxWordsOf(value.ty)
-        local minHigh, minLow = S.minWordsOf(ty)
-        local maxHigh, maxLow = S.maxWordsOf(ty)
-        -- A bound only needs a check when the source can go beyond it, which is a strict comparison.
-        local compare = (S.isSigned(value.ty) or S.isSigned(ty)) and U64Kernel.slt or U64Kernel.lt
-        if compare(sourceMinHigh, sourceMinLow, minHigh, minLow) then
-            ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Lt", expr,
-                self:constInt(ctx, value.ty, minHigh, minLow), S.Bool), "numeric-range"))
-        end
-        if compare(maxHigh, maxLow, sourceMaxHigh, sourceMaxLow) then
-            ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Gt", expr,
-                self:constInt(ctx, value.ty, maxHigh, maxLow), S.Bool), "numeric-range"))
-        end
+    local sourceMinHigh, sourceMinLow = S.minWordsOf(value.ty)
+    local sourceMaxHigh, sourceMaxLow = S.maxWordsOf(value.ty)
+    local minHigh, minLow = S.minWordsOf(ty)
+    local maxHigh, maxLow = S.maxWordsOf(ty)
+    local compare = (S.isSigned(value.ty) or S.isSigned(ty)) and U64Kernel.slt or U64Kernel.lt
+    if compare(sourceMinHigh, sourceMinLow, minHigh, minLow) then
+        ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Lt", expr,
+            self:constInt(ctx, value.ty, minHigh, minLow), S.Bool), "numeric-range"))
+    end
+    if compare(maxHigh, maxLow, sourceMaxHigh, sourceMaxLow) then
+        ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Gt", expr,
+            self:constInt(ctx, value.ty, maxHigh, maxLow), S.Bool), "numeric-range"))
     end
     return V.ir(ctx.builder:convert(expr, ty), ty)
 end
