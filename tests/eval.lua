@@ -611,6 +611,19 @@ rejects("duplicate", "let a, a = 1, 2\nlet f(): U32 = a\nreturn { functions = { 
 
 
 -- Sum types (variants) --------------------------------------------------------------------------
+-- A keyed definition attaches to a word without parentheses: `OneOf { a: U32 }` is the keyed
+-- spelling of `OneOf({ a: U32 })`, so the alternatives read as a definition rather than a call.
+do
+    local source = "let S = OneOf { a: U32, b: U32 }\n"
+        .. "let pick(s: S): U32 = s { a = |v: U32| -> v, b = |v: U32| -> v + 10 }\n"
+        .. "let via_a(x: U32): U32 = pick(S.a(x))\n"
+        .. "let via_b(x: U32): U32 = pick(S.b(x))\n"
+        .. "return { types = { S }, functions = { via_a, via_b } }"
+    check(interpret("via_a", { 7 }, source)[1] == 7, "a keyed OneOf builds a sum")
+    check(interpret("via_b", { 7 }, source)[1] == 17, "a keyed OneOf alternative carries its payload")
+    compile(source)
+end
+
 -- `OneOf(cases)` builds a sum from a keyed schema; member selection names a constructor and keyed
 -- application either constructs one alternative or matches on the tag.
 local shapes = [==[

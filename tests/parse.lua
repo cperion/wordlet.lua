@@ -115,6 +115,13 @@ check(parses("let r = Counter { value = 3 }\nreturn { functions = {} }").declara
 check(parses("let r = Counter { }\nreturn { functions = {} }").declarations[1].def.values[1].kind == "RecordSupply",
     "empty keyed supply")
 check(parses("let E = {}\nreturn { types = { E } }").declarations[1].def.values[1].kind == "SchemaExpr", "empty schema")
+-- A keyed definition may attach to a word: `OneOf { a: U32 }` is `OneOf({ a: U32 })`.
+local keyed = parses("let S = OneOf { a: U32, b: U32 }\nreturn { types = { S } }")
+local apply = keyed.declarations[1].def.values[1]
+check(apply.kind == "Apply" and apply.arguments[1].kind == "SchemaExpr",
+    "a keyed definition after a word is an application to a schema")
+check(parses("let P = { x: U32 }\nlet p = P { x = 3 }\nreturn { types = { P } }")
+    .declarations[2].def.values[1].kind == "RecordSupply", "a keyed supply stays a supply")
 check(parses("let y = r.value\nreturn { functions = {} }").declarations[1].def.values[1].kind == "FieldSelect",
     "field selection")
 

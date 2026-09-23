@@ -161,8 +161,20 @@ function Parser:postfix()
             local args = self:argumentList()
             expr = A.c.Apply(expr, args, mergeSpan(expr.span, spanOf(args)))
         elseif self:at("{") then
-            local fields = self:fieldSupplies()
-            expr = A.c.RecordSupply(expr, fields, mergeSpan(expr.span, spanOf(fields)))
+            -- A keyed definition -- `name: Type`, or a method -- is a schema, and attaching it to a
+            -- word supplies that word's keyed requirement: `OneOf { circle: Circle }` is
+            -- `OneOf({ circle: Circle })`. `name = value` is a keyed supply, which constructs or
+            -- specializes. The entry separator decides which, so the two forms never mix.
+            local first, after = self:peek(1), self:peek(2)
+            if first.kind == "name" and (after.text == ":" or after.text == "(") then
+                local schema = self:schema()
+                local list = asList({ schema })
+                list.span = schema.span
+                expr = A.c.Apply(expr, list, mergeSpan(expr.span, schema.span))
+            else
+                local fields = self:fieldSupplies()
+                expr = A.c.RecordSupply(expr, fields, mergeSpan(expr.span, spanOf(fields)))
+            end
         elseif self:at("[") then
             self:next()
             local index = self:expression()

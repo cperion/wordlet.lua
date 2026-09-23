@@ -936,10 +936,10 @@ The handler keys are the alternatives of a sum, and the match is exhaustive
 (`syntax.md` §8.1). A complete shape makes the connection visible:
 
 ```text
-let Outcome = OneOf({
+let Outcome = OneOf {
     processing_completed: Completed,
     validation_failed: ValidationError,
-})
+}
 
 let run(input: Input): U32 =
     process(input) {
@@ -1058,10 +1058,10 @@ foreign result or mutable storage.
 Wordlet's `OneOf` builds sum types from keyed alternatives:
 
 ```text
-let Shape = OneOf({
+let Shape = OneOf {
     circle: Circle,
     rectangle: Rectangle,
-})
+}
 ```
 
 Matching is itself keyed application:

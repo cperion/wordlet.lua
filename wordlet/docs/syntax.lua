@@ -448,7 +448,16 @@ let Shape = OneOf({ circle: Circle, rect: Rect })
 
 `OneOf(cases)` takes one keyed schema and produces a type value. Alternative order is canonical, not
 written order, so two spellings of the same alternatives are the same type. `OneOf` requires a schema
-with at least one named alternative; an empty schema, or a non-schema argument, rejects.
+with at least one named alternative; an empty schema, or a non-schema argument, rejects. The schema
+may also be written directly after the word,
+
+```
+let Shape = OneOf { circle: Circle, rect: Rect }
+```
+
+which is the keyed spelling of `OneOf({ circle: Circle, rect: Rect })`. A word's keyed requirement is
+attached with braces, exactly as `Point { x = 3 }` attaches a keyed supply, and the entry separator
+decides which: `name: Type` defines, `name = value` supplies.
 
 Member selection on a sum type names a constructor for one alternative:
 
