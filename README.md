@@ -118,6 +118,7 @@ host compiler.
 - [ASDL.md](ASDL.md): the actual vendored API, limitations and integration rules.
 - [VALIDATION.md](VALIDATION.md): executable checks and the remaining compiler obligations.
 - [THIRD_PARTY.md](THIRD_PARTY.md): verified Terra origins, local changes and MIT attribution.
+- [editor/README.md](editor/README.md): the Neovim syntax support shipped under `editor/nvim/`, and how each Wordlet role maps to a Vim highlight group.
 - [LICENSE](LICENSE) and [vendor/LICENSE](vendor/LICENSE): project and upstream MIT notices.
 - [AGENTS.md](AGENTS.md): local implementation and validation instructions for coding agents.
 
