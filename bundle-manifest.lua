@@ -3,6 +3,7 @@ return {
     entry = "wordlet",
     cli = "wordlet.cli",
     output = "dist/wordlet.lua",
+    syntax = "syntax.md", -- the language reference, written as a leading comment block
     licenses = {"LICENSE", "vendor/LICENSE"},
     modules = {
         ["wordlet"] = "wordlet/init.lua",

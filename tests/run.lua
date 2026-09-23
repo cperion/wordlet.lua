@@ -85,6 +85,10 @@ local ok, err = xpcall(function()
     assert(first == read(bundle), "bundle must be deterministic")
     assert(first:find("MIT License", 1, true) and first:find("Stanford University", 1, true),
         "bundle must embed the project and vendored license notices")
+    assert(first:find("Wordlet syntax and semantic contract, bundled from syntax.md", 1, true),
+        "bundle must embed the syntax document")
+    assert(first:find("Wordlet syntax and semantic contract", 1, true) < first:find("local host_require", 1, true),
+        "the syntax document must lead the generated file")
     write(temp .. "/isolated.lua", first)
     -- The shipped bundle is the compiler itself: compile and interpret a program with no source tree.
     local program = [==[let affine(a, b, x: U32) : U32 = a * x + b

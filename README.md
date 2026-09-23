@@ -125,6 +125,8 @@ The `wordlet` namespace is the compiler. `wordletkit` remains the bootstrap tool
 the U32 reference kernel) and is not the compiler. `wordlet.syntax` is the language reference text,
 generated from [syntax.md](syntax.md) into `wordlet/docs/syntax.lua` by `tools/embed.lua` and listed
 in the bundle manifest, so a host that loads only `dist/wordlet.lua` can still show the language.
+`tools/bundle.lua` also writes that same reference as a leading comment block, so the generated file
+is readable on its own without loading it as a module.
 
 `wordlet.jit` is the LuaJIT FFI front end. `wordlet.jit.loadstring(code)` compiles `.let` code with
 the C backend, builds a shared object with the system `cc`, loads it, and returns the exported words
@@ -177,6 +179,7 @@ embeds them, so single-file distribution keeps the attribution.
 return {
     entry = "wordlet",                 -- required module whose value the bundle returns
     output = "dist/wordlet.lua",       -- default output, relative to manifest
+    syntax = "syntax.md",             -- optional; written verbatim as a leading comment block
     licenses = {"LICENSE", "vendor/LICENSE"}, -- embedded as comments in the bundle
     modules = {
         wordlet = "wordlet/init.lua",  -- every bundled module is explicitly listed
@@ -203,8 +206,10 @@ luajit tools/bundle.lua path/to/manifest.lua path/to/output.lua
 An explicit output argument is relative to the caller's cwd (or absolute). The default manifest output
 is relative to the manifest. Parent directories are created with safely quoted POSIX mkdir. Module
 syntax and assembled syntax are checked before output is written. License notices are validated and
-embedded as comments. A failed write reports nonzero; output replacement is not promised atomic.
-Manifests and module source are trusted build inputs.
+embedded as comments. The optional `syntax` field names one relative document that is written
+verbatim as a leading comment block, so the generated file opens with the language it implements; it
+must stay inside the manifest directory, like every other path. A failed write reports nonzero;
+output replacement is not promised atomic. Manifests and module source are trusted build inputs.
 
 Factories receive local `require`, local `package` with a private `loaded` table, and the module name
 as `...`. Modules should return their API. Legacy `package.loaded[...] = value` is supported inside
