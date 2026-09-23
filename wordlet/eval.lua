@@ -15,6 +15,12 @@ local Eval = require("wordlet.session")
 
 local Ir = S.Ir
 local U64Kernel = require("wordletkit.u64")
+local Machine = require("wordlet.machine")
+
+-- The terminal continuation every converted method ends on: a `nil` continuation ends the chain, and
+-- the value it carries is what the direct-style caller that entered the machine sees. It is declared
+-- here, before any router that closes over it -- a later `local` would leave that closing over a global.
+local function done(_, value) return nil, value end
 
 -- A 64-bit integer is held as two words, because a Lua number cannot hold it. These helpers keep that
 -- representation at the edge of the evaluator: the rest works with plain numbers, and a value only
@@ -1908,7 +1914,10 @@ function Eval:evalExpr(ctx, expr)
     elseif kind == "BoolLiteral" then return V.bool(expr.value)
     elseif kind == "UnitLiteral" then return V.unit()
     elseif kind == "Reference" then return self:evalReference(ctx, expr)
-    elseif kind == "UnaryExpr" then return self:evalUnary(ctx, expr)
+    elseif kind == "UnaryExpr" then
+        return self:onMachine(ctx, function(machine)
+            return self:evalUnary(machine, ctx, expr, done)
+        end)
     elseif kind == "BinaryExpr" then return self:evalBinary(ctx, expr)
     elseif kind == "Condition" then ctx.tail = tail; return self:evalCondition(ctx, expr, nil)
     elseif kind == "Apply" then ctx.tail = tail; return self:evalApply(ctx, expr)
@@ -2040,13 +2049,36 @@ function Eval:floatOp(ctx, op, left, right, leftSpan, rightSpan, span)
     return V.runtime(ctx.builder:bin(irOp, self:expression(ctx, left), self:expression(ctx, right), ty), ty)
 end
 
-function Eval:evalUnary(ctx, expr)
+-- The terminal continuation is `done`, declared with the machine require above.
+
+
+-- A direct-style caller enters a converted method here. The chain runs on the session's machine -- one
+-- per session, so a builtin that re-enters evaluation gets a second stack instead of corrupting this
+-- one -- and answers a value. The host frame this costs is one per *boundary*, not one per step, so it
+-- shrinks as the conversion proceeds and disappears with the last unconverted caller.
+function Eval:onMachine(ctx, entry)
+    local machine = ctx.session.machine
+    if not machine then
+        machine = Machine.new(ctx.session)
+        ctx.session.machine = machine
+    end
+    return machine:call(entry)
+end
+
+-- Unary (`-x`, `not x`, `~x`). Its only child is the operand, so the CPS shape is one continuation
+-- that applies the operator -- the shape every other expression family follows:
+--
+--     return evalExprCPS(machine, ctx, child, function(m, value) ... return k(m, result) end)
+--
+-- During the migration the child still comes from the direct walker below, which costs host frames for
+-- the operand's own nesting (bounded by the source expression) and none on the machine's path.
+function Eval:evalUnary(machine, ctx, expr, k)
     local value = self:evalExpr(ctx, expr.operand)
     local op = expr.operator
     if op == "not" then
         self:requireType(value, S.Bool, expr.operand.span)
-        if V.tag(value) == "bool" then return V.bool(not value.b) end
-        return V.runtime(ctx.builder:un("Not", self:expression(ctx, value), S.Bool), S.Bool)
+        if V.tag(value) == "bool" then return k(machine, V.bool(not value.b)) end
+        return k(machine, V.runtime(ctx.builder:un("Not", self:expression(ctx, value), S.Bool), S.Bool))
     end
     if value.ty:isF64() then
         -- Only negation applies to a float; complement and shift are integer operations.
@@ -2054,8 +2086,8 @@ function Eval:evalUnary(ctx, expr)
             D.reject("type-mismatch", "Negation is the only unary operator F64 has, not " .. op,
                 expr.operand.span)
         end
-        if V.isKnown(value) then return V.f64(-value.n) end
-        return V.runtime(ctx.builder:un("Neg", self:expression(ctx, value), S.F64), S.F64)
+        if V.isKnown(value) then return k(machine, V.f64(-value.n)) end
+        return k(machine, V.runtime(ctx.builder:un("Neg", self:expression(ctx, value), S.F64), S.F64))
     end
     if not value.ty:isInteger() then
         D.reject("type-mismatch", "Expected an integer but found " .. S.encode(value.ty), expr.operand.span)
@@ -2064,13 +2096,14 @@ function Eval:evalUnary(ctx, expr)
     if V.isInteger(value) then
         if ty:isWide() then
             local high, low = wordsOf(value)
-            if op == "-" then return V.int64(ty, U64Kernel.neg(high, low)) end
-            return V.int64(ty, U64Kernel.bnot(high, low))
+            if op == "-" then return k(machine, V.int64(ty, U64Kernel.neg(high, low))) end
+            return k(machine, V.int64(ty, U64Kernel.bnot(high, low)))
         end
         local n = op == "-" and wrap(ty, -value.n) or wrap(ty, bit.bnot(value.n))
-        return V.int(ty, n)
+        return k(machine, V.int(ty, n))
     end
-    return V.runtime(ctx.builder:un(op == "-" and "Neg" or "BitNot", self:expression(ctx, value), ty), ty)
+    return k(machine, V.runtime(ctx.builder:un(op == "-" and "Neg" or "BitNot",
+        self:expression(ctx, value), ty), ty))
 end
 
 function Eval:evalBinary(ctx, expr)

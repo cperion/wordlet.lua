@@ -101,5 +101,12 @@ function Machine:rewrite(descriptor, bindings)
     return descriptor
 end
 
+-- Run a CPS entry to a value. A converted method takes one more argument than it used to -- the
+-- continuation -- so a caller that is not converted yet needs exactly this: one host frame at the
+-- boundary, and none per step. It is a migration device and it disappears with the last such caller.
+function Machine:call(entry)
+    return self:run(entry, nil)
+end
+
 M.Machine = Machine
 return M

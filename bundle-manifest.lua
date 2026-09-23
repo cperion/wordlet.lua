@@ -23,6 +23,7 @@ return {
         ["wordlet.ir"] = "wordlet/ir.lua",
         ["wordlet.resolve"] = "wordlet/resolve.lua",
         ["wordlet.analysis"] = "wordlet/analysis.lua",
+        ["wordlet.machine"] = "wordlet/machine.lua",
         ["wordlet.session"] = "wordlet/session.lua",
         ["wordlet.eval"] = "wordlet/eval.lua",
         ["wordlet.check"] = "wordlet/check.lua",
