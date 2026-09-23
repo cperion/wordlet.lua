@@ -7,82 +7,103 @@ local M = {}
 local Ir = S.Ir
 M.Ir = Ir
 
--- Exhaustive expression walker. Not a reflective field walk: adding an Ir.Expr variant must
--- extend this function, which is the point.
-function M.eachExpr(expr, fn)
-    fn(expr)
-    local kind = expr.kind
-    if kind == "Const" then
-        return
-    elseif kind == "Ref" then
-        return
-    elseif kind == "Un" then
-        M.eachExpr(expr.operand, fn)
-    elseif kind == "Bin" then
-        M.eachExpr(expr.left, fn); M.eachExpr(expr.right, fn)
-    elseif kind == "Get" then
-        M.eachExpr(expr.aggregate, fn)
-    elseif kind == "Make" then
-        for _, field in ipairs(expr.fields) do M.eachExpr(field, fn) end
-    elseif kind == "Null" then
-        return
-    elseif kind == "SliceLength" then
-        M.eachExpr(expr.view, fn)
-    elseif kind == "Convert" then
-        M.eachExpr(expr.operand, fn)
-    elseif kind == "Addr" then
-        -- An address is a pure computation over a place, which is a root plus field names; there is
-        -- no sub-expression to walk and nothing is read.
-        return
-    else
-        D.bug("ir-expr", "Unknown expression variant: " .. tostring(kind))
-    end
+-- Structural traversal. These are the schema's own structural questions, so they live on the
+-- classes: `Ir.Expr:each(fn)` calls `fn` on the expression operands of a node, `Ir.Place:each`
+-- and `Ir.Arg:each` on the expressions a place or an argument names, and `Ir.Stmt:each(fn)` on a
+-- statement's child statements. `fn` therefore always receives an `Ir.Expr` from the first three,
+-- and an `Ir.Stmt` from the last. Nothing semantic moves here: control completion, effects and
+-- purity stay in the passes that own them (`check.lua`'s explicit visitor), because `ASDL.md`
+-- says reflection answers structure, not semantics (structure.md §0.3).
+--
+-- Install order is a correctness condition, not style. A class's metatable propagates the FIRST
+-- write of a key to every member of the sum, so a parent default installed after the arms would
+-- overwrite all of them. The four defaults therefore come first, and every arm is installed here
+-- and nowhere else: no pass module may assign to a class (structure.md §0.2).
+function Ir.Expr:each(fn)
+    D.bug("ir-expr", "Ir.Expr variant has no :each method: " .. tostring(self.kind))
+end
+function Ir.Stmt:each(fn)
+    D.bug("ir-stmt", "Ir.Stmt variant has no :each method: " .. tostring(self.kind))
+end
+function Ir.Place:each(fn)
+    D.bug("ir-place", "Ir.Place variant has no :each method: " .. tostring(self.kind))
+end
+function Ir.Arg:each(fn)
+    D.bug("ir-arg", "Ir.Arg variant has no :each method: " .. tostring(self.kind))
 end
 
--- Exhaustive statement walker over one list, in order. Nested lists are visited recursively.
-function M.eachStmt(statements, fn)
-    for _, stmt in ipairs(statements) do
-        fn(stmt)
-        local kind = stmt.kind
-        if kind == "Let" then
-            M.eachExpr(stmt.expr, fn)
-        elseif kind == "Read" then
-            -- reads a Place, not an expression
-        elseif kind == "Var" then
-            if stmt.initial then M.eachExpr(stmt.initial, fn) end
-        elseif kind == "Store" then
-            -- places are not expressions
-        elseif kind == "View" then
-            -- view slots are Arg values, walked by the caller when needed
-        elseif kind == "Call" or kind == "Indirect" then
-            for _, arg in ipairs(stmt.arguments) do
-                if arg.kind == "ValueArg" then M.eachExpr(arg.value, fn) end
-            end
-            if stmt.kind == "Indirect" then M.eachExpr(stmt.callable, fn) end
-        elseif kind == "If" then
-            M.eachExpr(stmt.test, fn)
-            M.eachStmt(stmt.yes, fn); M.eachStmt(stmt.no, fn)
-        elseif kind == "Switch" then
-            for _, case in ipairs(stmt.cases) do M.eachStmt(case.body, fn) end
-        elseif kind == "Loop" then
-            M.eachStmt(stmt.body, fn)
-        elseif kind == "Trap" then
-            M.eachExpr(stmt.failure, fn)
-        elseif kind == "ConstructVariant" then
-            if stmt.payload then M.eachExpr(stmt.payload, fn) end
-        elseif kind == "VariantMatches" then
-            -- operands are values, not expressions
-        elseif kind == "VariantPayload" then
-            -- operand is a value, not an expression
-        elseif kind == "Return" then
-            for _, value in ipairs(stmt.values) do M.eachExpr(value, fn) end
-        elseif kind == "Next" then
-            -- no operands
-        else
-            D.bug("ir-stmt", "Unknown statement variant: " .. tostring(kind))
-        end
-    end
+-- The child statements of one statement list, in order.
+local function eachStatement(list, fn)
+    for _, statement in ipairs(list) do fn(statement) end
 end
+
+-- An `Ir.Expr` hands over its operand expressions. A frozen operand (a constant, a value reference,
+-- a null) has none, and a place operand contributes the expressions the place itself names.
+function Ir.Const:each(fn) end
+function Ir.Ref:each(fn) end
+function Ir.Null:each(fn) end
+function Ir.Un:each(fn) fn(self.operand) end
+function Ir.Bin:each(fn)
+    fn(self.left)
+    fn(self.right)
+end
+function Ir.Get:each(fn) fn(self.aggregate) end
+function Ir.Make:each(fn)
+    for _, field in ipairs(self.fields) do fn(field) end
+end
+function Ir.Convert:each(fn) fn(self.operand) end
+function Ir.Addr:each(fn) self.place:each(fn) end
+function Ir.SliceLength:each(fn) fn(self.view) end
+
+-- An `Ir.Place` hands over the expressions reaching it: its base is a place rather than an
+-- expression, so the base chain is followed and its index or view expressions are the operands.
+function Ir.Local:each(fn) end
+function Ir.Project:each(fn) self.base:each(fn) end
+function Ir.Deref:each(fn) self.base:each(fn) end
+function Ir.Index:each(fn)
+    self.base:each(fn)
+    fn(self.index)
+end
+function Ir.SliceIndex:each(fn)
+    fn(self.view)
+    fn(self.index)
+end
+function Ir.PtrIndex:each(fn)
+    fn(self.view)
+    fn(self.index)
+end
+
+-- An `Ir.Arg` hands over the expressions of the value or place it carries.
+function Ir.ValueArg:each(fn) fn(self.value) end
+function Ir.BorrowArg:each(fn) self.place:each(fn) end
+
+-- An `Ir.Stmt` hands over the statements nested in it, one level at a time: the arms of an `If`,
+-- the body of a `Loop`, and the body of every `Switch` case. A statement with no nested list has
+-- no child statements, and the effects it carries are the pass visitor's business, not this one.
+function Ir.Let:each(fn) end
+function Ir.Var:each(fn) end
+function Ir.Read:each(fn) end
+function Ir.Store:each(fn) end
+function Ir.View:each(fn) end
+function Ir.Call:each(fn) end
+function Ir.Indirect:each(fn) end
+function Ir.If:each(fn)
+    eachStatement(self.yes, fn)
+    eachStatement(self.no, fn)
+end
+function Ir.Switch:each(fn)
+    for _, case in ipairs(self.cases) do eachStatement(case.body, fn) end
+end
+function Ir.Loop:each(fn) eachStatement(self.body, fn) end
+-- A fieldless variant is a single value, and `Ir.Next` names that value rather than a class, so
+-- this arm is installed on the value. Its class keeps the propagated default, which is what a
+-- forgotten arm on a future fieldless variant would report.
+function Ir.Next:each(fn) end
+function Ir.Trap:each(fn) end
+function Ir.ConstructVariant:each(fn) end
+function Ir.VariantMatches:each(fn) end
+function Ir.VariantPayload:each(fn) end
+function Ir.Return:each(fn) end
 
 -- Builder: one per Ir.Fn under construction.
 local Builder = {}

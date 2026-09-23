@@ -28,15 +28,15 @@ local function liveInstances(compilation)
     -- Every export and the module initialiser is a root; a callable's code is named by a Call or a
     -- View, and an adapter is generated only for a View that reached emission.
     for _, entry in ipairs(compilation.functions or {}) do mark(entry.instance.target) end
+    -- A `Call` or a `View` names the code it reaches; the nested statements of an `If`, a `Switch`
+    -- or a `Loop` are visited by `Ir.Stmt:each` on the way.
+    local function visit(stmt)
+        if stmt.kind == "Call" then mark(stmt.target)
+        elseif stmt.kind == "View" then mark(stmt.entry) end
+        stmt:each(visit)
+    end
     local function walk(list)
-        for _, stmt in ipairs(list) do
-            if stmt.kind == "Call" then mark(stmt.target)
-            elseif stmt.kind == "View" then mark(stmt.entry)
-            elseif stmt.kind == "If" then walk(stmt.yes) walk(stmt.no)
-            elseif stmt.kind == "Switch" then for _, case in ipairs(stmt.cases) do walk(case.body) end
-            elseif stmt.kind == "Loop" then walk(stmt.body)
-            end
-        end
+        for _, stmt in ipairs(list) do visit(stmt) end
     end
     local index = 1
     while index <= #queue do

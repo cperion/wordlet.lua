@@ -20,36 +20,16 @@ local BINARY_OP = {
 }
 local UNARY_OP = { Neg = "-", BitNot = "~" }
 
-local collectExprs, collectPlaceExprs
-
--- The `Expr` operands of an expression. A place can carry an index expression, so `Addr` and a
--- place's `Index` are followed here too.
-function collectPlaceExprs(place, out)
+-- The expression operands of an expression, and the expressions a place names. The traversal
+-- itself is `Ir.Expr:each`/`Ir.Place:each`, so a pass cannot disagree with a node about what
+-- it contains.
+local function collectPlaceExprs(place, out)
     if not place then return end
-    local kind = place.kind
-    if kind == "Project" or kind == "Deref" then collectPlaceExprs(place.base, out)
-    elseif kind == "Index" then collectPlaceExprs(place.base, out); out[#out + 1] = place.index
-    elseif kind == "PtrIndex" then
-        -- A pointer element names the pointer value it addresses, so that value is an operand.
-        out[#out + 1] = place.view; out[#out + 1] = place.index
-    elseif kind == "SliceIndex" then
-        -- A slice element names the view value it indexes, so the view is an expression operand.
-        out[#out + 1] = place.view; out[#out + 1] = place.index
-    end
+    place:each(function(expr) out[#out + 1] = expr end)
 end
 
-function collectExprs(expr, out)
-    local kind = expr.kind
-    if kind == "Un" then out[#out + 1] = expr.operand
-    elseif kind == "Bin" then out[#out + 1] = expr.left; out[#out + 1] = expr.right
-    elseif kind == "Get" then out[#out + 1] = expr.aggregate
-    elseif kind == "Make" then for _, field in ipairs(expr.fields) do out[#out + 1] = field end
-    elseif kind == "Convert" then out[#out + 1] = expr.operand
-    elseif kind == "Addr" then collectPlaceExprs(expr.place, out)
-    elseif kind == "SliceLength" then out[#out + 1] = expr.view
-    elseif kind == "Null" then
-        -- A null pointer has no operand to walk.
-    end
+local function collectExprs(expr, out)
+    expr:each(function(operand) out[#out + 1] = operand end)
 end
 
 -- A double written so C reads exactly the same value: `%.17g` round-trips, and a decimal point or an
