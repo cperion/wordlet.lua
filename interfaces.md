@@ -201,6 +201,42 @@ The reversal (`architecture.md` §6.3) is ordinary `Call` + `Return`. No separat
 analysis is needed, since tail position is already resolved. When the instance has no loop-carried
 storage (all parameters unchanged) the rewrite is a plain `Next`.
 
+### 4.3 The evaluator's machine protocol
+
+`wordlet/eval.lua` is written in continuation-passing style and driven by `wordlet/machine.lua`. The
+reason is depth: Lua guarantees proper tail calls, so an edge written `return self:fooCPS(m, ..., k)`
+reuses its host frame, while `local a = eval(left) ... eval(right)` cannot. Every recursive edge in the
+evaluator is now of the first shape, so an interpreted fold costs heap (one closure per pending step)
+rather than host stack. The measured effect: `g(1023)` folds, `g(1025)` is refused with `static-depth`,
+and the host's stack limit is never the reason anything fails.
+
+The conventions:
+
+- **A step is a pair.** A continuation is called as `k(machine, ...)` and answers with the next pair
+  `(continuation, values...)`, or with `nil` as the continuation to mean "these are the final values".
+  The value channel is a *vector*: a value definition produces one value per binder, `storeTarget`
+  produces a slot and a place, and `declaredResult` produces the types and the signature requirements.
+- **Closures are the stack; descriptors are its shadow.** Only the frames that must be counted,
+  reported or unwound through become descriptors: a static fold, a `Build`, a `demand`, a call. A
+  diagnostic needs no unwinding -- the pending chain is simply not called -- but it must find the
+  nearest *handler*, which is what `Machine:popToHandler` walks. The floor it stops at is the descriptor
+  depth the current `run` started at, so a nested run can never resume a chain that entered it.
+- **Depth is counted, not inherited.** `Machine:checkDepth(kind, ...)` bounds the descriptors: a static
+  fold is bounded by `maxStaticDepth` (or `maxInterpretDepth` in a reference-interpreter run) and
+  refuses with `static-depth`, a build by `maxBuildDepth` and refuses with `depth`. A refused fold in
+  residual code is not fatal: `foldOrBuild` pushes a handler, and the handler compiles an instance
+  instead. That handler is what the direct evaluator spelled as `pcall` -- and it is why the evaluator
+  no longer has one.
+- **One boundary starts the loop.** `Eval:drive(ctx, entry)` is the only place outside the evaluator
+  where the machine's loop is started, and the `*Top` entries (`supplyTop`, `exportedTop`,
+  `initializeModule`, `resolveExportItem`, `compile`) are its only callers. Nothing inside the
+  evaluator uses it; a converted method is called by name, with its continuation.
+
+`tools/cpslint.lua` checks the two ways the protocol breaks silently: a converted method that returns a
+bare value (the driver treats the value as the next continuation) and one that falls off the end without
+answering. `tests/machine.lua` covers the core: constant host stack over a 100 000-step chain, handler
+unwinding, counted depth, and the boundary.
+
 ## 5. Instances, keys and module storage
 
 ```lua

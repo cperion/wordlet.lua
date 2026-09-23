@@ -36,7 +36,7 @@ end
 
 -- A diagnostic abandons the pending chain (nothing to unwind: the closures are simply not called) and
 -- hands the diagnostic to the nearest handler descriptor, whose answer resumes the machine. This is
--- what replaces the `pcall` that `withNesting` wraps around every fold attempt today.
+-- what replaces the `pcall` the direct evaluator wrapped around every fold attempt.
 do
     local sawCode, sawSpan
     local function swallow(_, diagnostic)
@@ -89,7 +89,7 @@ do
 end
 
 
--- The migration boundary (`Eval:onMachine`): a direct-style caller gets a value out of a CPS chain.
+-- The migration boundary (`Eval:drive`): a direct-style caller gets a value out of a CPS chain.
 -- One machine per session, so a builtin that re-enters evaluation gets a second stack rather than
 -- corrupting this one; the descriptors a chain pushed are gone when it answers; and a diagnostic
 -- crosses the boundary as a Diagnostic, which is what lets the direct-style code above keep treating
@@ -103,16 +103,16 @@ do
     local function finish(_, value) return nil, value end
     local function start() return finish, 41 end
 
-    check(session:onMachine(ctx, start) == 41, "a CPS chain answers its value to the caller")
+    check(session:drive(ctx, start) == 41, "a CPS chain answers its value to the caller")
     check(session.machine ~= nil, "the machine is kept on the session for the next boundary")
     check(session.machine.depth == 0, "no descriptor survives a finished chain")
 
     local function bad()
         return function() D.reject("t-machine", "raised inside a step", nil) end, nil
     end
-    local ok, err = pcall(function() return session:onMachine(ctx, bad) end)
+    local ok, err = pcall(function() return session:drive(ctx, bad) end)
     check(not ok and D.is(err) and err.code == "t-machine", "a diagnostic crosses the boundary as one")
-    check(session:onMachine(ctx, start) == 41, "the machine is usable again after a diagnostic")
+    check(session:drive(ctx, start) == 41, "the machine is usable again after a diagnostic")
     check(session.machine.session == session, "the machine belongs to one session, never to a global")
 end
 

@@ -20,7 +20,10 @@ local Machine = require("wordlet.machine")
 -- The terminal continuation every converted method ends on: a `nil` continuation ends the chain, and
 -- the value it carries is what the direct-style caller that entered the machine sees. It is declared
 -- here, before any router that closes over it -- a later `local` would leave that closing over a global.
-local function done(_, value) return nil, value end
+-- The boundary answer. It forwards *every* value, because two converted methods answer with more
+-- than one: `storeTarget` hands back a slot and a place, and a future `joinCallables` hands back
+-- a type with two arm values.
+local function done(_, ...) return nil, ... end
 
 -- A 64-bit integer is held as two words, because a Lua number cannot hold it. These helpers keep that
 -- representation at the edge of the evaluator: the rest works with plain numbers, and a value only
@@ -332,51 +335,76 @@ end
 
 -- Compiles one module. A `use`d module is loaded first by the caller, which passes its own top so
 -- this module's names resolve there.
-function Eval:compile(program, loadedTop)
+-- The harness's compile driver: load, initialise, resolve the exports, then build an instance for
+-- every exported function and run the module initialiser.
+function Eval:compileCPS(machine, program, loadedTop, k)
     local top = loadedTop or self:load(program)
     self.top = top
     -- Initialization is explicit and ordered, not an accident of which binding residual code reads first.
-    self:initializeModule(program, top)
-    local exports = { functions = {}, types = {} }
-    local resolve = function(item) return self:resolveExportItem(item, top) end
-
-    for _, item in ipairs(program.export.functions) do
-        local value = resolve(item)
-        if V.tag(value) ~= "word" then
-            D.reject("function-required", "Exported function " .. item.name.text .. " is not a word", item.name.span)
+    return self:initializeModuleCPS(machine, program, top, function(m)
+        local exports = { functions = {}, types = {} }
+        local function overTypes(index)
+            if index > #program.export.types then
+                local compilation = { session = self, exports = exports, functions = {},
+                    types = exports.types, foreigns = self.foreigns.order, modules = self.modules }
+                local function overInstances(position)
+                    if position > #exports.functions then
+                        if not (compilation.modules and #compilation.modules > 0) then
+                            return k(m, compilation)
+                        end
+                        return self:moduleInitialiserCPS(m, compilation.modules, program.span,
+                            function(m2, initialiser)
+                                compilation.modules.initialiser = initialiser
+                                compilation.functions[#compilation.functions + 1] = {
+                                    name = "init", instance = initialiser, span = program.span,
+                                }
+                                return k(m2, compilation)
+                            end)
+                    end
+                    local export = exports.functions[position]
+                    return self:instanceForCPS(m, export.word.def, export.span, export.word.args, nil,
+                        function(m2, instance)
+                            compilation.functions[#compilation.functions + 1] = { name = export.name,
+                                instance = instance, span = export.span }
+                            return overInstances(position + 1)
+                        end)
+                end
+                return overInstances(1)
+            end
+            local item = program.export.types[index]
+            return self:resolveExportItemCPS(m, item, top, function(m2, value)
+                local ty = self:asType(value, item.name.span)
+                -- Records and sums are both named structures with a C layout a host may need to build.
+                if not ty or not (ty:isRecord() or ty:isSum()) then
+                    D.reject("type-required", "Exported type " .. item.name.text
+                        .. " is not a record or a sum type", item.name.span)
+                end
+                exports.types[#exports.types + 1] = { name = item.name.text, type = ty, span = item.span }
+                return overTypes(index + 1)
+            end)
         end
-        exports.functions[#exports.functions + 1] = { name = item.name.text, word = value, span = item.name.span }
-    end
-    for _, item in ipairs(program.export.types) do
-        local value = resolve(item)
-        local ty = self:asType(value, item.name.span)
-        -- Records and sums are both named structures with a C layout a host may need to build.
-        if not ty or not (ty:isRecord() or ty:isSum()) then
-            D.reject("type-required", "Exported type " .. item.name.text
-                .. " is not a record or a sum type", item.name.span)
+        local function overFunctions(index)
+            if index > #program.export.functions then return overTypes(1) end
+            local item = program.export.functions[index]
+            return self:resolveExportItemCPS(m, item, top, function(m2, value)
+                if V.tag(value) ~= "word" then
+                    D.reject("function-required", "Exported function " .. item.name.text
+                        .. " is not a word", item.name.span)
+                end
+                exports.functions[#exports.functions + 1] = { name = item.name.text, word = value,
+                    span = item.name.span }
+                return overFunctions(index + 1)
+            end)
         end
-        exports.types[#exports.types + 1] = { name = item.name.text, type = ty, span = item.span }
-    end
-
-    local compilation = { session = self, exports = exports, functions = {}, types = exports.types,
-        foreigns = self.foreigns.order,
-        modules = self.modules }
-    for _, export in ipairs(exports.functions) do
-        local instance = self:instanceFor(export.word.def, export.span, export.word.args)
-        compilation.functions[#compilation.functions + 1] = { name = export.name, instance = instance, span = export.span }
-    end
-    if compilation.modules and #compilation.modules > 0 then
-        compilation.modules.initialiser = self:moduleInitialiser(compilation.modules, program.span)
-        compilation.functions[#compilation.functions + 1] = {
-            name = "init", instance = compilation.modules.initialiser, span = program.span,
-        }
-    end
-    return compilation
+        return overFunctions(1)
+    end)
 end
-
 -- One entry point that assigns every module-level object its starting value. The host calls it
 -- before any exported function; it is never called implicitly.
-function Eval:moduleInitialiser(modules, span)
+
+-- The module initialiser body: one store per module, in first-demand order, so the generated
+-- `wordletinit` writes each module's storage from its concrete initial value.
+function Eval:moduleInitialiserCPS(machine, modules, span, k)
     local target = "wordletinit"
     local builder = IR.builder()
     local body = {}
@@ -384,36 +412,60 @@ function Eval:moduleInitialiser(modules, span)
         body = body }
     local ctx = self:residualFrame(self.top, span)
     ctx.builder, ctx.body, ctx.fn = builder, body, fn
-    for _, module in ipairs(modules) do
-        local fields = {}
-        if module.type:isArray() then
-            for index, item in ipairs(module.initial.items or {}) do
-                fields[index] = self:expression(ctx, item, module.type.element)
-            end
-        else
-            for index, field in ipairs(module.type.fields) do
-                fields[index] = self:expression(ctx, module.initial.fields[field.name], field.type)
-            end
+    local function moduleAt(index)
+        if index > #modules then
+            builder:emit(body, Ir.Return(S.list({})))
+            local instance = { key = "module-init", def = nil, target = target, status = "done",
+                results = {}, inputTypes = {}, inputPlan = {}, fn = fn }
+            self.instances[instance.key] = instance
+            self.order[#self.order + 1] = instance
+            return k(machine, instance)
         end
-        builder:store(body, Ir.Local(module.storage), builder:make(module.type, fields))
+        local module = modules[index]
+        local fields = {}
+        local function done()
+            builder:store(body, Ir.Local(module.storage), builder:make(module.type, fields))
+            return moduleAt(index + 1)
+        end
+        if module.type:isArray() then
+            local list = module.initial.items or {}
+            local function item(position)
+                if position > #list then return done() end
+                return self:expressionCPS(machine, ctx, list[position], module.type.element,
+                    function(m, value)
+                        fields[position] = value
+                        return item(position + 1)
+                    end)
+            end
+            return item(1)
+        end
+        local list = module.type.fields
+        local function field(position)
+            if position > #list then return done() end
+            local named = list[position]
+            return self:expressionCPS(machine, ctx, module.initial.fields[named.name], named.type,
+                function(m, value)
+                    fields[position] = value
+                    return field(position + 1)
+                end)
+        end
+        return field(1)
     end
-    builder:emit(body, Ir.Return(S.list({})))
-    local instance = { key = "module-init", def = nil, target = target, status = "done",
-        results = {}, inputTypes = {}, inputPlan = {}, fn = fn }
-    self.instances[instance.key] = instance
-    self.order[#self.order + 1] = instance
-    return instance
+    return moduleAt(1)
 end
 
-function Eval:resolveExportItem(item, top)
+-- One exported item: an alias is the value of its expression, a name is a word or a demanded binding.
+function Eval:resolveExportItemCPS(machine, item, top, k)
     if item.kind == "ExportAlias" then
-        return self:evalExpr(self:staticFrame(top, item.span), item.value)
+        return self:evalExprCPS(machine, self:staticFrame(top, item.span), item.value, k)
     end
     local name = item.name.text
     local slot = lookup(top, name)
     if not slot then D.reject("unknown-name", "Unknown exported name: " .. name, item.name.span) end
-    if slot.kind == "word" then return V.word(slot.def, {}, item.span) end
-    return self:demand(slot, item.span).value
+    if slot.kind == "word" then return k(machine, V.word(slot.def, {}, item.span)) end
+    return self:demandCPS(machine, slot, item.span, function(m, demanded)
+        return k(m, demanded.value)
+    end)
 end
 
 -- A module-level mutable record that runtime code refers to gets a named storage of its own. The
@@ -454,13 +506,15 @@ function Eval:declareNamespace(top, name, value, span)
     return declare(top, name, { kind = "value", name = name, value = value }, span)
 end
 
-function Eval:exportedValue(program, name, top)
+-- One exported function by name, for a caller that holds no export list.
+function Eval:exportedValueCPS(machine, program, name, top, k)
     for _, item in ipairs(program.export.functions) do
-        if item.name.text == name then return self:resolveExportItem(item, top) end
+        if item.name.text == name then
+            return self:resolveExportItemCPS(machine, item, top, k)
+        end
     end
     D.reject("unknown-name", "Unknown exported function: " .. tostring(name))
 end
-
 -- A builtin word whose terminal is compiler code rather than a source body. It receives the
 -- supplied arguments and returns frontend values; it never runs a source terminal.
 function Eval:builtin(name, parameters, intrinsic)
@@ -494,8 +548,13 @@ end
 
 -- Lazy top-level value bindings ----------------------------------------------------------------
 
-function Eval:demand(slot, span)
-    if slot.kind ~= "value" or slot.value ~= nil then return slot end
+-- Demand the value of a binding that no other path has computed yet. The eagerness is what makes a
+-- top-level initializer compile-time execution over concrete values, so `demanding` stays set for the
+-- nested demands and the outermost one restores it. A failure has to restore that state and the
+-- siblings' flags before it propagates, which is what the pushed handler is for: it replaces the
+-- `pcall` the direct version needed, and re-raises so an enclosing demand sees the same diagnostic.
+function Eval:demandCPS(machine, slot, span, k)
+    if slot.kind ~= "value" or slot.value ~= nil then return k(machine, slot) end
     local siblings = slot.binders or { slot }
     if slot.demanding then D.reject("initializer-cycle", "Eager value cycle through " .. slot.name, span) end
     for _, sibling in ipairs(siblings) do
@@ -514,36 +573,50 @@ function Eval:demand(slot, span)
     -- demands keep the flag set and the outermost demand restores it.
     local savedDemand = self.demanding
     self.demanding = true
-    local ok, result = pcall(self.evalValueDef, self, ctx, slot.decl.def)
-    self.demanding = savedDemand
-    for _, sibling in ipairs(siblings) do
-        sibling.demanding = nil
-        sibling.open = false
+    local function settled()
+        self.demanding = savedDemand
+        for _, sibling in ipairs(siblings) do
+            sibling.demanding = nil
+            sibling.open = false
+        end
     end
-    if not ok then error(result, 0) end
-    -- Several binders produce a result vector; distribute it as a local result-list binding does,
-    -- filling a missing value with Unit.
-    local values = self:expand(result)
-    for index, sibling in ipairs(siblings) do
-        sibling.value = values[index] or V.unit()
-    end
-    for _, sibling in ipairs(siblings) do self:sealCell(sibling, span) end
-    return slot
+    machine:push("demand", span, slot.name, function(_, diagnostic)
+        settled()
+        error(diagnostic, 0)
+    end)
+    return self:evalValueDefCPS(machine, ctx, slot.decl.def, function(m, result)
+        machine:pop()
+        settled()
+        -- Several binders produce a result vector; distribute it as a local result-list binding does,
+        -- filling a missing value with Unit.
+        local values = self:expand(result)
+        for index, sibling in ipairs(siblings) do
+            sibling.value = values[index] or V.unit()
+        end
+        for _, sibling in ipairs(siblings) do self:sealCell(sibling, span) end
+        return k(m, slot)
+    end)
 end
-
 -- Top-level initialization runs once, eagerly, in declaration order. The reference interpreter and
 -- the compiler both call this, so they observe the same sequence of reads and mutations, and a
 -- mutating initializer cannot depend on which binding happened to be referenced first.
-function Eval:initializeModule(program, top)
-    for _, decl in ipairs(program.declarations) do
-        if decl.kind == "ValueDecl" then
-            local binder = decl.def.binders[1]
-            local slot = binder and lookup(top, binder.name.text)
-            if slot and slot.atTop then self:demand(slot, decl.span) end
-        end
-    end
-end
 
+-- Module initialization: every top-level binding is demanded in source order, so the initial state is
+-- what the program wrote rather than what some later reader happened to force.
+function Eval:initializeModuleCPS(machine, program, top, k)
+    local function declaration(index)
+        if index > #program.declarations then return k(machine) end
+        local decl = program.declarations[index]
+        if decl.kind ~= "ValueDecl" then return declaration(index + 1) end
+        local binder = decl.def.binders[1]
+        local slot = binder and lookup(top, binder.name.text)
+        if not (slot and slot.atTop) then return declaration(index + 1) end
+        return self:demandCPS(machine, slot, decl.span, function(m)
+            return declaration(index + 1)
+        end)
+    end
+    return declaration(1)
+end
 -- Seals a reserved cell with the type the binding computed. A cell that nothing referred to needs no
 -- definition, and a definition that mentions its own cell by value rather than through a reference
 -- has no finite layout.
@@ -588,34 +661,49 @@ function Eval:expand(value)
     if V.tag(value) == "results" then return value.values end
     return { value }
 end
-function Eval:evalList(ctx, exprs)
+
+-- A returned value list. Each expression is a step, and the last one may produce a result vector,
+-- which is spliced in place exactly as the direct version did.
+function Eval:evalListCPS(machine, ctx, exprs, k)
     local values = {}
-    for index, expr in ipairs(exprs) do
-        local value = self:evalExpected(ctx, expr, ctx.expectedResult)
-        if index < #exprs then
-            values[#values + 1] = self:first(value)
-        else
-            for _, item in ipairs(self:expand(value)) do values[#values + 1] = item end
-        end
+    local function item(index)
+        if index > #exprs then return k(machine, values) end
+        return self:evalExpectedCPS(machine, ctx, exprs[index], ctx.expectedResult, function(m, value)
+            if index < #exprs then
+                values[#values + 1] = self:first(value)
+            else
+                for _, part in ipairs(self:expand(value)) do values[#values + 1] = part end
+            end
+            return item(index + 1)
+        end)
     end
-    return values
+    return item(1)
 end
 
 -- Materialisation -------------------------------------------------------------------------------
 
 -- A record value or object becomes an immutable Make of its fields.
-function Eval:recordExpr(ctx, value)
+
+-- A record's construction expression. A record that has not demanded a place is already its Make, so
+-- crossing a boundary copies that immutable expression instead of reading each field back.
+-- A record's construction expression. A record that has not demanded a place is already its Make, so
+-- crossing a boundary copies that immutable expression instead of reading each field back.
+function Eval:recordExprCPS(machine, ctx, value, k)
     -- A record that has not demanded a place is already its construction expression, so crossing a
     -- boundary copies that immutable Make instead of reading each field back and rebuilding it.
-    if value.expr then return value.expr end
+    if value.expr then return k(machine, value.expr) end
     local ty = value.ty
     local fields = {}
-    for index, field in ipairs(ty.fields) do
-        fields[index] = self:fieldExpr(ctx, value, field.name)
+    local function field(index)
+        if index > #ty.fields then return k(machine, ctx.builder:make(ty, fields)) end
+        local named = ty.fields[index]
+        return self:fieldExprCPS(machine, ctx, value, named.name, function(m, expr)
+            fields[index] = expr
+            return field(index + 1)
+        end)
     end
-    return ctx.builder:make(ty, fields)
+    return field(1)
 end
-
 -- A returned value must not refer to storage that dies with this activation.
 function Eval:checkReturn(values, span)
     for _, value in ipairs(values) do
@@ -628,74 +716,92 @@ function Eval:checkReturn(values, span)
     end
 end
 
-function Eval:fieldExpr(ctx, value, name)
-    if V.tag(value) == "record" then return self:expression(ctx, value.fields[name]) end
+-- One field as an expression: a projection of the Make, or a read of storage.
+function Eval:fieldExprCPS(machine, ctx, value, name, k)
+    if V.tag(value) == "record" then
+        return self:expressionCPS(machine, ctx, value.fields[name], nil, k)
+    end
     local ty = S.field(value.ty, name)
     -- A field of an unmaterialised record is a pure projection of its construction expression; once a
     -- demand clears that expression, and for a spilled SSA value, storage is read instead.
-    if value.expr then return V.runtime(ctx.builder:get(value.expr, name, ty), ty) end
+    if value.expr then return k(machine, V.runtime(ctx.builder:get(value.expr, name, ty), ty)) end
     local place = Ir.Project(value.place, Ir.Field(name))
     local read = ctx.builder:read(ctx.body, ty, place)
-    return ctx.builder:ref(read, ty)
+    return k(machine, ctx.builder:ref(read, ty))
 end
 
 -- Wraps a payload in its alternative. Under the interpreter the payload is a value; in residual
 -- code it becomes ConstructVariant, which the backend lowers to a tag plus a union member.
-function Eval:makeVariant(ctx, ctor, payload, span)
+
+-- A variant value, tagged and (in residual code) constructed.
+function Eval:makeVariantCPS(machine, ctx, ctor, payload, span, k)
     -- A Unit alternative carries no payload, but the frontend value still holds the Unit value so
     -- that knownness and matching treat it like any other alternative.
     local unit = ctor.caseType == S.Unit and payload == nil
     local value = payload or V.unit()
     if not ctx.residual then
-        return V.variant(ctor.sum, ctor.case, value)
+        return k(machine, V.variant(ctor.sum, ctor.case, value))
     end
     local id = ctx.builder:valueId()
-    local payloadExpr
-    if not unit then payloadExpr = self:expression(ctx, payload, ctor.caseType) end
-    ctx.builder:emit(ctx.body, Ir.ConstructVariant(id, ctor.sum, ctor.case, payloadExpr))
-    return V.variant(ctor.sum, ctor.case, value, ctx.builder:ref(id, ctor.sum))
+    local function emit(payloadExpr)
+        ctx.builder:emit(ctx.body, Ir.ConstructVariant(id, ctor.sum, ctor.case, payloadExpr))
+        return k(machine, V.variant(ctor.sum, ctor.case, value, ctx.builder:ref(id, ctor.sum)))
+    end
+    if unit then return emit(nil) end
+    return self:expressionCPS(machine, ctx, payload, ctor.caseType, function(m, payloadExpr)
+        return emit(payloadExpr)
+    end)
 end
 
 -- `value { case = handler, ... }`: every alternative must be covered. A value whose tag is known
 -- selects one handler; an opaque variant tests the tag and joins the arms.
-function Eval:evalMatch(ctx, base, expr, span)
+
+-- A sum match. The handlers are evaluated in written order, one CPS step each, and only a *known* tag
+-- evaluates a handler at all -- the tag decides, which is why the handlers are values here rather than
+-- expressions. `supply` and `matchResidual` are still direct, so their answers are one frame each.
+function Eval:evalMatchCPS(machine, ctx, base, expr, span, k)
     span = span or expr.span
     local handlers, order = {}, {}
-    for _, field in ipairs(expr.fields) do
-        local name = field.name.text
+    local function handler(index)
+        if index > #expr.fields then
+            for _, name in ipairs(S.casesOf(base.ty)) do
+                if handlers[name] == nil then
+                    D.reject("variant-match", "Matching must handle every alternative, including " .. name,
+                        expr.span)
+                end
+            end
+            for _, name in ipairs(order) do
+                if not (V.tag(handlers[name]) == "word" or V.tag(handlers[name]) == "closure"
+                    or V.tag(handlers[name]) == "method") then
+                    D.reject("callable-required", "A match handler must be callable", expr.span)
+                end
+            end
+            if V.tag(base) == "variant" then
+                -- The tag is known here, so the other alternatives are not evaluated at all.
+                local payload = base.payload
+                if payload == nil then payload = V.unit() end
+                return self:supplyCPS(machine, ctx, handlers[base.case], { payload }, span, k)
+            end
+            if not ctx.residual then
+                D.reject("runtime-in-normalization", "Matching an opaque variant needs runtime code", span)
+            end
+            return self:matchResidualCPS(machine, ctx, base, handlers, span, k)
+        end
+        local entry = expr.fields[index]
+        local name = entry.name.text
         if not S.caseOf(base.ty, name) then
-            D.reject("unknown-member", "Sum type has no alternative " .. name, field.name.span)
+            D.reject("unknown-member", "Sum type has no alternative " .. name, entry.name.span)
         end
         if handlers[name] ~= nil then
-            D.reject("duplicate", "Alternative " .. name .. " is handled twice", field.name.span)
+            D.reject("duplicate", "Alternative " .. name .. " is handled twice", entry.name.span)
         end
-        handlers[name] = self:evalExpr(ctx, field.value)
-        order[#order + 1] = name
+        return self:evalExprCPS(machine, ctx, entry.value, function(m, value)
+            handlers[name] = value
+            order[#order + 1] = name
+            return handler(index + 1)
+        end)
     end
-    for _, name in ipairs(S.casesOf(base.ty)) do
-        if handlers[name] == nil then
-            D.reject("variant-match", "Matching must handle every alternative, including " .. name,
-                expr.span)
-        end
-    end
-    for _, name in ipairs(order) do
-        if not (V.tag(handlers[name]) == "word" or V.tag(handlers[name]) == "closure"
-            or V.tag(handlers[name]) == "method") then
-            D.reject("callable-required", "A match handler must be callable", expr.span)
-        end
-    end
-
-    if V.tag(base) == "variant" then
-        -- The tag is known here, so the other alternatives are not evaluated at all.
-        local payload = base.payload
-        if payload == nil then payload = V.unit() end
-        return self:supply(ctx, handlers[base.case], { payload }, span)
-    end
-
-    if not ctx.residual then
-        D.reject("runtime-in-normalization", "Matching an opaque variant needs runtime code", span)
-    end
-    return self:matchResidual(ctx, base, handlers, span)
+    return handler(1)
 end
 
 
@@ -717,12 +823,57 @@ function Eval:sameKnownScalar(a, b)
     return false
 end
 
-function Eval:matchResidual(ctx, base, handlers, span)
+-- The residual form of a match: one arm list per alternative, one slot per result, one switch on the
+-- tag. Each arm's handler is called on the machine, and the arm statements wait for all of them, so the
+-- stores are a driver over a flattened (piece, position) list rather than nested loops.
+function Eval:matchResidualCPS(machine, ctx, base, handlers, span, k)
     local builder = ctx.builder
     local variant = sumValueId(base)
     local names = S.casesOf(base.ty)
     local pieces, resultTypes = {}, nil
-    for _, name in ipairs(names) do
+    local function finish()
+        -- One slot per result, so a match may yield a result vector rather than only one value.
+        local places = {}
+        for index, ty in ipairs(resultTypes) do
+            places[index] = Ir.Local(builder:var(ctx.body, ty, nil))
+        end
+        local pending = {}
+        for _, piece in ipairs(pieces) do
+            if not piece.terminated then
+                for position, value in ipairs(piece.values) do
+                    pending[#pending + 1] = { piece = piece, position = position, value = value }
+                end
+            end
+        end
+        local function store(index)
+            if index > #pending then
+                -- One switch on the tag. The last alternative carries the fallback flag and is emitted
+                -- as C's `default`, so the branch is total and a dense alternative set lowers to a jump
+                -- table rather than a chain of compares.
+                local cases = {}
+                for position, piece in ipairs(pieces) do
+                    cases[position] = Ir.Case(piece.name, position == #pieces, S.list(piece.list))
+                end
+                builder:emit(ctx.body, Ir.Switch(variant, base.ty, S.list(cases)))
+                local out = {}
+                for position, ty in ipairs(resultTypes) do
+                    out[position] = V.runtime(builder:ref(builder:read(ctx.body, ty, places[position]), ty), ty)
+                end
+                if #out == 1 then return k(machine, out[1]) end
+                return k(machine, V.results(out))
+            end
+            local item = pending[index]
+            return self:expressionCPS(machine, item.piece.ctx, item.value, resultTypes[item.position],
+                function(m, expr)
+                    builder:store(item.piece.list, places[item.position], expr)
+                    return store(index + 1)
+                end)
+        end
+        return store(1)
+    end
+    local function armAt(index)
+        if index > #names then return finish() end
+        local name = names[index]
         local arm = {}
         local armCtx = ctx:arm(arm)
         local caseType = S.caseOf(base.ty, name)
@@ -737,53 +888,29 @@ function Eval:matchResidual(ctx, base, handlers, span)
             args = { V.runtime(builder:ref(id, caseType), caseType) }
         end
         -- A handler is a callable, so it may return a result vector; the match forwards it.
-        local values = self:expand(self:supply(armCtx, handlers[name], args, span))
-        if resultTypes == nil then
-            resultTypes = {}
-            for index, value in ipairs(values) do resultTypes[index] = value.ty end
-        elseif #values ~= #resultTypes then
-            D.reject("branch-result", "Every arm of a match must produce the same number of results: "
-                .. #resultTypes .. " and " .. #values, span)
-        else
-            for index, value in ipairs(values) do
-                if value.ty ~= resultTypes[index] then
-                    D.reject("branch-result", "Every arm of a match must produce the same type: "
-                        .. S.encode(resultTypes[index]) .. " and " .. S.encode(value.ty), span)
+        return self:supplyCPS(machine, armCtx, handlers[name], args, span, function(m, produced)
+            local values = self:expand(produced)
+            if resultTypes == nil then
+                resultTypes = {}
+                for position, value in ipairs(values) do resultTypes[position] = value.ty end
+            elseif #values ~= #resultTypes then
+                D.reject("branch-result", "Every arm of a match must produce the same number of results: "
+                    .. #resultTypes .. " and " .. #values, span)
+            else
+                for position, value in ipairs(values) do
+                    if value.ty ~= resultTypes[position] then
+                        D.reject("branch-result", "Every arm of a match must produce the same type: "
+                            .. S.encode(resultTypes[position]) .. " and " .. S.encode(value.ty), span)
+                    end
                 end
             end
-        end
-        pieces[#pieces + 1] = { name = name, list = arm, ctx = armCtx, values = values,
-            terminated = armCtx.terminated }
+            pieces[#pieces + 1] = { name = name, list = arm, ctx = armCtx, values = values,
+                terminated = armCtx.terminated }
+            return armAt(index + 1)
+        end)
     end
-    -- One slot per result, so a match may yield a result vector rather than only one value.
-    local places = {}
-    for index, ty in ipairs(resultTypes) do
-        places[index] = Ir.Local(builder:var(ctx.body, ty, nil))
-    end
-    for _, piece in ipairs(pieces) do
-        if not piece.terminated then
-            for index, value in ipairs(piece.values) do
-                builder:store(piece.list, places[index],
-                    self:expression(piece.ctx, value, resultTypes[index]))
-            end
-        end
-    end
-    -- One switch on the tag. The last alternative carries the fallback flag and is emitted as C's
-    -- `default`, so the branch is total and a dense alternative set lowers to a jump table rather
-    -- than a chain of compares.
-    local cases = {}
-    for index, piece in ipairs(pieces) do
-        cases[index] = Ir.Case(piece.name, index == #pieces, S.list(piece.list))
-    end
-    builder:emit(ctx.body, Ir.Switch(variant, base.ty, S.list(cases)))
-    local out = {}
-    for index, ty in ipairs(resultTypes) do
-        out[index] = V.runtime(builder:ref(builder:read(ctx.body, ty, places[index]), ty), ty)
-    end
-    if #out == 1 then return out[1] end
-    return V.results(out)
+    return armAt(1)
 end
-
 function sumValueId(value)
     if value.expr and value.expr.kind == "Ref" then return value.expr.value end
     D.bug("sum-value", "An opaque sum value must be an SSA reference")
@@ -884,17 +1011,21 @@ end
 
 -- The place a reference value names, spilling a reference that only exists as an SSA value into
 -- storage so it has an address to go through.
-function Eval:derefPlace(ctx, value, span)
+
+-- One dereference of an address.
+function Eval:derefPlaceCPS(machine, ctx, value, span, k)
     -- An address is a pointer; `value.place` is where that pointer lives, so the target is
     -- one dereference further on. The pointee type travels with the place, like every other typed
     -- IR node, so the verifier needs no type-cell table to check it.
     local pointee = S.environmentOf(self:pointeeType(value.ty))
-    if value.place then return Ir.Deref(value.place, pointee) end
+    if value.place then return k(machine, Ir.Deref(value.place, pointee)) end
     if not ctx.residual then
         D.reject("runtime-in-normalization", "A runtime reference needs runtime code", span)
     end
-    local storage = ctx.builder:var(ctx.body, value.ty, self:expression(ctx, value, value.ty))
-    return Ir.Deref(Ir.Local(storage), pointee)
+    return self:expressionCPS(machine, ctx, value, value.ty, function(m, expr)
+        local storage = ctx.builder:var(ctx.body, value.ty, expr)
+        return k(m, Ir.Deref(Ir.Local(storage), pointee))
+    end)
 end
 
 -- `Ref(x)`: a reference to the place `x` names. A file-scope binding is module storage, which the
@@ -934,32 +1065,88 @@ end
 
 -- Where a place expression's storage comes from: "module" for a file-scope binding, "enclosing" for
 -- storage that belongs to an enclosing activation, and nil for storage this activation owns.
-function Eval:placeOrigin(ctx, expr)
+
+-- Where a place's storage comes from: module storage, the enclosing activation, or nowhere in
+-- particular. The walk down a selection chain is a tail call, so a long chain costs one frame.
+-- Where a place's storage comes from: module storage, the enclosing activation, or nowhere in
+-- particular. The walk down a selection chain is a tail call, so a long chain costs one frame.
+function Eval:placeOriginCPS(machine, ctx, expr, k)
     if expr.kind == "Reference" then
         local slot = lookup(ctx.scope, expr.name.text)
-        if not slot then return nil end
+        if not slot then return k(machine, nil) end
         if slot.atTop then
             -- A type or a scalar binding has no storage to name.
-            local held = self:demand(slot, expr.span).value
-            if held and (V.tag(held) == "record" or V.tag(held) == "array") then return "module" end
-            return nil
+            return self:demandCPS(machine, slot, expr.span, function(m, demanded)
+                local held = demanded.value
+                if held and (V.tag(held) == "record" or V.tag(held) == "array") then
+                    return k(m, "module")
+                end
+                return k(m, nil)
+            end)
         end
-        if slot.kind == "param" then return "enclosing" end
+        if slot.kind == "param" then return k(machine, "enclosing") end
         local record = slot.record
-        if record and record.module then return "module" end
-        if record and record.enclosing then return "enclosing" end
-        return nil
+        if record and record.module then return k(machine, "module") end
+        if record and record.enclosing then return k(machine, "enclosing") end
+        return k(machine, nil)
     end
     if expr.kind == "FieldSelect" or expr.kind == "IndexExpr" then
-        return self:placeOrigin(ctx, expr.base)
+        return self:placeOriginCPS(machine, ctx, expr.base, k)
     end
-    return nil
+    return k(machine, nil)
 end
-
 -- `Ptr(place)` takes the address of a place and writes off its lifetime. Unlike a reference there is no
 -- target rule to check, and that is the point: from here the program is responsible, so the one place
 -- a lifetime is dropped is spelled rather than inferred.
-function Eval:evalPtr(ctx, expr)
+
+-- `Ptr(x)`: a pointer type when `x` is a type, an address when it is a place. Two of the branches need
+-- a child value, so each is a continuation; the address itself is one answered through `k`.
+-- `Ptr(x)`: a pointer type when `x` is a type, an address when it is a place. The place is probed
+-- first -- asking is not an error -- and only when it declines is the expression evaluated to find an
+-- instance to spill, which is what the alias case needs.
+-- `Ptr(x)`: a pointer type when `x` is a type, an address when it is a place. The place is probed
+-- first -- asking is not an error -- and only when it declines is the expression evaluated to find an
+-- instance to spill, which is what the alias case needs.
+function Eval:evalPtrCPS(machine, ctx, expr, k)
+    local function afterSlot(m)
+        -- Only a non-place expression can be a type, and evaluating a place would read it: taking an
+        -- address must not also load what it addresses.
+        if expr.kind ~= "Reference" and expr.kind ~= "FieldSelect" and expr.kind ~= "IndexExpr" then
+            return self:evalExprCPS(m, ctx, expr, function(m2, value)
+                local asType = self:asType(value, expr.span)
+                if asType then return k(m2, V.type(S.ptr(self:canonicalize(asType)))) end
+                D.reject("type-required", "Ptr needs an element type or a place to address", expr.span)
+            end)
+        end
+        if not ctx.residual then
+            D.reject("runtime-in-normalization", "A raw pointer exists only in compiled code", expr.span)
+        end
+        -- A place expression names storage directly, so the address is that place and nothing is read.
+        return self:placeOfOrNilCPS(m, ctx, expr, expr.span, function(m2, reached)
+            local function answer(m3, place)
+                local target = self:canonicalize(place.ty)
+                local pointer = S.ptr(target)
+                return k(m3, V.runtime(ctx.builder:addr(place.place, pointer), pointer))
+            end
+            if reached and reached.place then return answer(m2, reached) end
+            -- A local binding to an instance is an alias, so its storage is what the address names;
+            -- that storage is created here when the instance only exists as a value so far.
+            return self:evalExprCPS(m2, ctx, expr, function(m3, held)
+                local tag = V.tag(held)
+                if tag == "record" then
+                    return self:recordPlaceCPS(m3, ctx, held, expr.span, function(m4, place)
+                        return answer(m4, { place = place, ty = held.ty })
+                    end)
+                end
+                if tag == "array" then
+                    return self:arrayPlaceCPS(m3, ctx, held, expr.span, function(m4, place)
+                        return answer(m4, { place = place, ty = held.ty })
+                    end)
+                end
+                D.reject("not-a-place", "Ptr needs a place to address", expr.span)
+            end)
+        end)
+    end
     if expr.kind == "Reference" then
         local slot = lookup(ctx.scope, expr.name.text)
         -- `Ptr(Node)` inside Node's own definition must not demand Node's layout: a pointer is an
@@ -967,44 +1154,28 @@ function Eval:evalPtr(ctx, expr)
         -- reserved and the recursion stays finite.
         if slot and slot.open and slot.value == nil and slot.cell and self:isTypeDefinition(slot) then
             self.types.referenced[slot.cell] = true
-            return V.type(S.ptr(S.named(slot.cell)))
+            return k(machine, V.type(S.ptr(S.named(slot.cell))))
         end
-        local value = slot and self:demand(slot, expr.span).value or nil
-        local held = value and self:asType(value, expr.span) or nil
-        if held then return V.type(S.ptr(self:canonicalize(held))) end
-    end
-    -- Only a non-place expression can be a type, and evaluating a place would read it: taking an
-    -- address must not also load what it addresses.
-    if expr.kind ~= "Reference" and expr.kind ~= "FieldSelect" and expr.kind ~= "IndexExpr" then
-        local asType = self:asType(self:evalExpr(ctx, expr), expr.span)
-        if asType then return V.type(S.ptr(self:canonicalize(asType))) end
-        D.reject("type-required", "Ptr needs an element type or a place to address", expr.span)
-    end
-    if not ctx.residual then
-        D.reject("runtime-in-normalization", "A raw pointer exists only in compiled code", expr.span)
-    end
-    -- A place expression names storage directly, so the address is that place and nothing is read.
-    local ok, reached = pcall(function() return self:placeOf(ctx, expr, expr.span) end)
-    if not (ok and reached.place) then
-        -- A local binding to an instance is an alias, so its storage is what the address names; that
-        -- storage is created here when the instance only exists as a value so far.
-        local held = self:evalExpr(ctx, expr)
-        local tag = V.tag(held)
-        if tag == "record" then
-            reached = { place = self:recordPlace(ctx, held, expr.span), ty = held.ty }
-        elseif tag == "array" then
-            reached = { place = self:arrayPlace(ctx, held, expr.span), ty = held.ty }
+        if slot then
+            return self:demandCPS(machine, slot, expr.span, function(m, demanded)
+                local held = demanded.value and self:asType(demanded.value, expr.span) or nil
+                if held then return k(m, V.type(S.ptr(self:canonicalize(held)))) end
+                return afterSlot(m)
+            end)
         end
     end
-    if not reached.place then
-        D.reject("not-a-place", "Ptr needs a place to address", expr.span)
-    end
-    local target = self:canonicalize(reached.ty)
-    local pointer = S.ptr(target)
-    return V.runtime(ctx.builder:addr(reached.place, pointer), pointer)
+    return afterSlot(machine)
 end
-
-function Eval:evalRef(ctx, expr)
+-- `Ref(x)`: a type when `x` is one, a reference to storage otherwise. The place classification below
+-- is the direct walker (`placeOrigin`/`placeOf`/`asType`), which is why only the fallback evaluation
+-- is a continuation.
+-- `Ref(x)`: a type when `x` is one, a reference to storage otherwise. The place is probed first, and
+-- the fallback -- evaluate the expression, then reference a named or local object -- is shared by every
+-- path that does not settle as a place.
+-- `Ref(x)`: a type when `x` is one, a reference to storage otherwise. The place is probed first, and
+-- the fallback -- evaluate the expression, then reference a named or local object -- is shared by every
+-- path that does not settle as a place.
+function Eval:evalRefCPS(machine, ctx, expr, k)
     local slot
     if expr.kind == "Reference" then
         slot = lookup(ctx.scope, expr.name.text)
@@ -1012,55 +1183,65 @@ function Eval:evalRef(ctx, expr)
         -- cell that definition reserved, which is what makes the recursion finite.
         if slot and slot.open and slot.value == nil and slot.cell and self:isTypeDefinition(slot) then
             self.types.referenced[slot.cell] = true
-            return V.type(S.ref(S.named(slot.cell)))
+            return k(machine, V.type(S.ref(S.named(slot.cell))))
         end
     end
-    -- A place expression names storage directly, so the reference is that place.
-    if expr.kind == "Reference" or expr.kind == "FieldSelect" or expr.kind == "IndexExpr" then
-        local held = slot and self:demand(slot, expr.span).value or nil
-        local heldType = held and self:asType(held, expr.span) or nil
-        if heldType then return V.type(S.ref(self:canonicalize(heldType))) end
-        local origin = self:placeOrigin(ctx, expr)
-        -- What the place turned out to be decides as much as the route the name spells. A place
-        -- reached through a reference to module storage is module storage, and a caller holding its own
-        -- reference to one does not change that; the route alone says nothing, so the place is asked.
-        local ok, reached = pcall(function() return self:placeOf(ctx, expr, expr.span) end)
-        if ok and not reached.place and reached.concrete ~= nil then
-            -- The place exists as a compile-time value with no storage of its own, which is how the
-            -- interpreter holds a module array's element. Taking an address needs an address, and only
-            -- compiled code gives one, so say that rather than blaming the target's lifetime.
-            D.reject("runtime-in-normalization",
-                "A reference needs storage here, and this place has none while interpreting; compiling"
-                .. " the program gives it one", expr.span)
-        end
-        if ok and reached.place then
-            local container = reached.container
-            local isModule = origin == "module" or (container ~= nil and container.module == true)
-            -- A container whose provenance is not known here is treated as enclosing, which is the
-            -- conservative reading: it cannot be proven to be module storage, so it must not escape.
-            local isEnclosing = origin == "enclosing"
-                or (container ~= nil and (container.enclosing == true or container.retaining == true))
-            if isModule or isEnclosing then
-                local made = V.ref(S.ref(self:canonicalize(reached.ty)), reached.place, nil,
-                    isEnclosing, reached.value)
-                -- Building the reference is just an address, which is how a recursive structure is
-                -- built; reading or writing through it is what runtime code does.
-                made.module = isModule
-                return made
+    local function fallback(m)
+        return self:evalExprCPS(m, ctx, expr, function(m2, value)
+            local ty = self:asType(value, expr.span)
+            if ty then return k(m2, V.type(S.ref(self:canonicalize(ty)))) end
+            if slot and slot.atTop and V.tag(value) == "record" then
+                -- A file-scope binding has an identity that outlives every activation, so a reference to
+                -- it is a reference to named module storage whichever mode built it.
+                return self:makeReferenceCPS(m2, ctx, self:moduleObject(slot, expr.span), expr.span, k)
             end
+            return self:makeReferenceCPS(m2, ctx, value, expr.span, k)
+        end)
+    end
+    local function afterHeldType(m)
+        -- A place expression names storage directly, so the reference is that place.
+        if expr.kind ~= "Reference" and expr.kind ~= "FieldSelect" and expr.kind ~= "IndexExpr" then
+            return fallback(m)
         end
+        return self:placeOriginCPS(m, ctx, expr, function(m2, origin)
+            return self:placeOfOrNilCPS(m2, ctx, expr, expr.span, function(m3, reached)
+                if reached and not reached.place and reached.concrete ~= nil then
+                    -- The place exists as a compile-time value with no storage of its own, which is how
+                    -- the interpreter holds a module array's element. Taking an address needs an
+                    -- address, and only compiled code gives one, so say that rather than blaming the
+                    -- target's lifetime.
+                    D.reject("runtime-in-normalization",
+                        "A reference needs storage here, and this place has none while interpreting; "
+                        .. "compiling the program gives it one", expr.span)
+                end
+                if reached and reached.place then
+                    local container = reached.container
+                    local isModule = origin == "module" or (container ~= nil and container.module == true)
+                    -- A container whose provenance is not known here is treated as enclosing, which is
+                    -- the conservative reading: it cannot be proven to be module storage, so it must not
+                    -- escape.
+                    local isEnclosing = origin == "enclosing"
+                        or (container ~= nil and (container.enclosing == true or container.retaining == true))
+                    if isModule or isEnclosing then
+                        local made = V.ref(S.ref(self:canonicalize(reached.ty)), reached.place, nil,
+                            isEnclosing, reached.value)
+                        -- Building the reference is just an address, which is how a recursive structure is
+                        -- built; reading or writing through it is what runtime code does.
+                        made.module = isModule
+                        return k(m3, made)
+                    end
+                end
+                return fallback(m3)
+            end)
+        end)
     end
-    local value = self:evalExpr(ctx, expr)
-    local ty = self:asType(value, expr.span)
-    if ty then return V.type(S.ref(self:canonicalize(ty))) end
-    if slot and slot.atTop and V.tag(value) == "record" then
-        -- A file-scope binding has an identity that outlives every activation, so a reference to it
-        -- is a reference to named module storage whichever mode built it.
-        return self:makeReference(ctx, self:moduleObject(slot, expr.span), expr.span)
-    end
-    return self:makeReference(ctx, value, expr.span)
+    if not slot then return afterHeldType(machine) end
+    return self:demandCPS(machine, slot, expr.span, function(m, demanded)
+        local heldType = demanded.value and self:asType(demanded.value, expr.span) or nil
+        if heldType then return k(m, V.type(S.ref(self:canonicalize(heldType)))) end
+        return afterHeldType(m)
+    end)
 end
-
 -- A reference to an enclosing owner cannot outlive that activation, so it and anything holding it
 -- stay inside.
 function Eval:refEscapeMessage()
@@ -1068,7 +1249,9 @@ function Eval:refEscapeMessage()
         .. "place is still live, or name module storage instead"
 end
 
-function Eval:makeReference(ctx, target, span)
+
+-- A reference to named storage. No evaluation happens here, so this is one answer through `k`.
+function Eval:makeReferenceCPS(machine, ctx, target, span, k)
     if V.tag(target) == "ref" then
         D.reject("ref-target",
             "A reference is not itself a place to reference: the second reference would need the "
@@ -1083,8 +1266,8 @@ function Eval:makeReference(ctx, target, span)
     -- A reference also carries the frontend value it names, when there is one: normalize code reads
     -- and writes that directly, and residual code uses the place.
     local held = V.tag(target) == "record" and target or target.backing
-    return V.ref(S.ref(self:canonicalize(target.ty)), target.place, target.schema,
-        kind == "enclosing", held)
+    return k(machine, V.ref(S.ref(self:canonicalize(target.ty)), target.place, target.schema,
+        kind == "enclosing", held))
 end
 
 -- Arrays -----------------------------------------------------------------------------------------
@@ -1092,9 +1275,31 @@ end
 -- which is what an empty literal needs. A residual array owns fresh local storage, so its elements
 -- are writable and a read goes to that storage rather than to the values it was built from.
 
-function Eval:evalArray(ctx, expr, expected)
-    local items = {}
-    for index, item in ipairs(expr.items) do items[index] = self:evalExpr(ctx, item) end
+-- An array literal: every element is evaluated on the machine, in written order, so a long literal
+-- is tail calls rather than one host frame per element.
+function Eval:evalArrayCPS(machine, ctx, expr, expected, k)
+    return self:evalArrayElementsCPS(machine, ctx, expr, expected, {}, 1, k)
+end
+
+-- One element per step. The recursive call is a method like any other, and it is named `*CPS`
+-- because it follows the protocol: it answers a pair through `k` in tail position, which is what
+-- `tools/cpslint.lua` checks for by name.
+function Eval:evalArrayElementsCPS(machine, ctx, expr, expected, items, index, k)
+    if index > #expr.items then
+        return self:finishArrayCPS(machine, ctx, expr, expected, items, k)
+    end
+    return self:evalExprCPS(machine, ctx, expr.items[index], function(m, value)
+        items[index] = value
+        return self:evalArrayElementsCPS(m, ctx, expr, expected, items, index + 1, k)
+    end)
+end
+
+-- The type checks and the residual spill, once every element is known. Split out so the element walk
+-- above is one small recursive step per element.
+
+-- An array literal once its elements are evaluated: the annotation supplies the type, or the elements
+-- do, and a residual literal becomes a Make that storage can later spill.
+function Eval:finishArrayCPS(machine, ctx, expr, expected, items, k)
     -- An array literal consumes an annotation only when the annotation is an array type, and there
     -- is usually none: `evalExpr` reaches this with no expectation at all.
     local ty = expected and expected:isArray() and expected or nil
@@ -1118,22 +1323,38 @@ function Eval:evalArray(ctx, expr, expected)
             .. tostring(ty.length) .. " elements", expr.span)
     end
     for _, item in ipairs(items) do self:requireType(item, ty.element, expr.span) end
-    if not ctx.residual then return V.array(ty, items) end
+    if not ctx.residual then return k(machine, V.array(ty, items)) end
     local exprs, borrowed = {}, false
-    for index, item in ipairs(items) do
-        exprs[index] = self:expression(ctx, item, ty.element)
-        if self:isBorrowed(item) then borrowed = true end
+    local function element(index)
+        if index > #items then
+            -- The Make is the value until an element is addressed (an index or a view). `body` is where
+            -- that spill goes, so a demand from inside an arm still reaches storage from the outer scope.
+            return k(machine, V.array(ty, nil, nil, borrowed, ctx.builder:make(ty, exprs), ctx.body))
+        end
+        local item = items[index]
+        return self:expressionCPS(machine, ctx, item, ty.element, function(m, value)
+            exprs[index] = value
+            if self:isBorrowed(item) then borrowed = true end
+            return element(index + 1)
+        end)
     end
-    -- The Make is the value until an element is addressed (an index or a view). `body` is where that
-    -- spill goes, so a demand from inside an arm still reaches storage from the outer scope.
-    return V.array(ty, nil, nil, borrowed, ctx.builder:make(ty, exprs), ctx.body)
+    return element(1)
 end
+-- The shim for `evalExpected`, which is still direct: one boundary frame when an array literal is in
+-- an annotated position, and it goes when that family converts.
 
 -- The place an array value's elements live at. A value that only exists as an SSA value is spilled
 -- into storage once, which is what lets a parameter or a call result be indexed.
 -- `Slice(array)` is a runtime-length view of an array: the address of its first element and its
 -- length. The view borrows the storage it names, so the lifetime rules of a reference apply to it.
-function Eval:evalSlice(ctx, expr)
+-- `Slice(T)` is a type and `Slice(x)` a view, and neither child is recursive: everything below is
+-- the direct walker, so each answer is a value through `k` and nothing nests. Its caller is still
+-- `evalApply`, which is why the direct name stays as a shim for one boundary frame.
+-- `Slice(array)` is a runtime-length view of an array: the address of its first element and its
+-- length. The view borrows the storage it names, so the lifetime rules of a reference apply to it.
+-- `Slice(T)` is a type and `Slice(x)` a view, and everything below is the direct walker, so each answer
+-- is a value through `k`.
+function Eval:evalSliceCPS(machine, ctx, expr, k)
     -- `Slice(Node)` inside Node's own definition must not demand Node's layout: a slice is a pointer
     -- and a length, so its size does not depend on its element either. It names the cell the
     -- definition reserved, exactly as a pointer or a reference does.
@@ -1141,52 +1362,54 @@ function Eval:evalSlice(ctx, expr)
         local slot = lookup(ctx.scope, expr.name.text)
         if slot and slot.open and slot.value == nil and slot.cell and self:isTypeDefinition(slot) then
             self.types.referenced[slot.cell] = true
-            return V.type(S.slice(S.named(slot.cell)))
+            return k(machine, V.type(S.slice(S.named(slot.cell))))
         end
     end
-    local container = self:containerOf(ctx, expr, expr.span)
-    -- `Slice(T)` is a type, exactly as `Ref(T)` is; only a non-type argument names a view.
-    local element = self:asType(container.value, expr.span)
-    if element then
-        S.checkRuntime(element, expr.span)
-        return V.type(S.slice(self:canonicalize(element)))
-    end
-    local ty = container.ty
-    if not ty:isArray() then
-        D.reject("type-mismatch", "Slice needs an array, found " .. S.encode(ty or S.Unit), expr.span)
-    end
-    -- A reference to module storage may leave the activation; a view of anything else may not.
-    local tied = not (container.container and container.container.module)
-    if not ctx.residual then
-        local held = container.value
-        if not (V.tag(held) == "array" and held.items) then
-            D.reject("runtime-in-normalization", "A runtime slice must be built in runtime code", expr.span)
+    return self:containerOfCPS(machine, ctx, expr, expr.span, function(m, container)
+        -- `Slice(T)` is a type, exactly as `Ref(T)` is; only a non-type argument names a view.
+        local element = self:asType(container.value, expr.span)
+        if element then
+            S.checkRuntime(element, expr.span)
+            return k(m, V.type(S.slice(self:canonicalize(element))))
         end
-        -- A view names storage rather than being storage, so a view of module storage is not a
-        -- compile-time constant: folding it would bake the read into the output. Module
-        -- initialization and the reference interpreter execute over that storage, so for them it
-        -- is the value; elsewhere the call is compiled instead.
-        if container.container and container.container.module
-            and not (ctx.session.run or ctx.session.demanding) then
-            D.reject("runtime-in-normalization",
-                "A view of module storage is built where it is used, not folded while compiling",
-                expr.span)
+        local ty = container.ty
+        if not ty:isArray() then
+            D.reject("type-mismatch", "Slice needs an array, found " .. S.encode(ty or S.Unit), expr.span)
         end
-        return V.slice(S.slice(ty.element), held, 0, ty.length, tied)
-    end
-    if not container.place then
+        -- A reference to module storage may leave the activation; a view of anything else may not.
+        local tied = not (container.container and container.container.module)
+        if not ctx.residual then
+            local held = container.value
+            if not (V.tag(held) == "array" and held.items) then
+                D.reject("runtime-in-normalization", "A runtime slice must be built in runtime code",
+                    expr.span)
+            end
+            -- A view names storage rather than being storage, so a view of module storage is not a
+            -- compile-time constant: folding it would bake the read into the output. Module
+            -- initialization and the reference interpreter execute over that storage, so for them it
+            -- is the value; elsewhere the call is compiled instead.
+            if container.container and container.container.module
+                and not (ctx.session.run or ctx.session.demanding) then
+                D.reject("runtime-in-normalization",
+                    "A view of module storage is built where it is used, not folded while compiling",
+                    expr.span)
+            end
+            return k(m, V.slice(S.slice(ty.element), held, 0, ty.length, tied))
+        end
+        local function withPlace(m2, place)
+            -- Both halves of a view are pure: an address and a length need no storage of their own.
+            local data = ctx.builder:addr(Ir.Index(place, ctx.builder:u32(0), ty.element),
+                S.ref(ty.element))
+            local view = ctx.builder:make(S.slice(ty.element), { data, ctx.builder:u32(ty.length) })
+            return k(m2, V.runtime(view, S.slice(ty.element), tied, place))
+        end
+        if container.place then return withPlace(m, container.place) end
         if not container.value then
             D.reject("not-a-place", "Slice needs an array with storage", expr.span)
         end
-        container.place = self:arrayPlace(ctx, container.value, expr.span)
-    end
-    -- Both halves of a view are pure: an address and a length need no storage of their own.
-    local data = ctx.builder:addr(Ir.Index(container.place, ctx.builder:u32(0), ty.element),
-        S.ref(ty.element))
-    local view = ctx.builder:make(S.slice(ty.element), { data, ctx.builder:u32(ty.length) })
-    return V.runtime(view, S.slice(ty.element), tied, container.place)
+        return self:arrayPlaceCPS(m, ctx, container.value, expr.span, withPlace)
+    end)
 end
-
 -- The length of a slice value, when the compiler knows it.
 function Eval:sliceCount(value)
     if V.tag(value) == "string" then return #value.bytes end
@@ -1205,36 +1428,40 @@ function Eval:sliceElement(value, index)
     return nil
 end
 
-function Eval:arrayPlace(ctx, value, span)
+-- The place of an array, spilling it when it only exists as an SSA value.
+function Eval:arrayPlaceCPS(machine, ctx, value, span, k)
     if value.place then
         -- A demand for a place invalidates the construction expression; storage is authoritative.
         value.expr = nil
-        return value.place
+        return k(machine, value.place)
     end
     if not ctx.residual then
         D.reject("runtime-in-normalization", "A runtime array needs runtime code", span)
     end
     -- The spill goes into the list the value was built in, so it dominates every use even when the
     -- demand comes from inside an arm.
-    local storage = ctx.builder:var(value.body or ctx.body, value.ty,
-        self:expression(ctx, value, value.ty))
-    local place = Ir.Local(storage)
-    -- A compile-time value is shared and immutable, so it never remembers a spill: another mode or
-    -- capture reading the same value must not see a `place` a residual compilation gave it.
-    if not value.items then value.place = place end
-    value.expr = nil
-    return place
+    return self:expressionCPS(machine, ctx, value, value.ty, function(m, init)
+        local storage = ctx.builder:var(value.body or ctx.body, value.ty, init)
+        local place = Ir.Local(storage)
+        -- A compile-time value is shared and immutable, so it never remembers a spill: another mode or
+        -- capture reading the same value must not see a `place` a residual compilation gave it.
+        if not value.items then value.place = place end
+        value.expr = nil
+        return k(m, place)
+    end)
 end
 
 -- The place a record value's fields live at. A record that only exists as an SSA value is spilled
 -- into storage once, which is what lets a call result be written through its fields.
-function Eval:recordPlace(ctx, value, span)
+
+-- The place of a record, spilling it when it only exists as an SSA value.
+function Eval:recordPlaceCPS(machine, ctx, value, span, k)
     if value.place then
         -- A demand for a place invalidates the construction expression: storage is authoritative
         -- from here on, so a later store must be visible to every read. A spilled `ir` keeps its SSA
         -- expression as its representation.
         if V.tag(value) == "object" then value.expr = nil end
-        return value.place
+        return k(machine, value.place)
     end
     if not ctx.residual then
         D.reject("runtime-in-normalization", "A runtime record needs runtime code", span)
@@ -1242,31 +1469,41 @@ function Eval:recordPlace(ctx, value, span)
     -- A value that only exists as an SSA value is spilled once; the place is initialized from its
     -- expression and storage is authoritative afterwards. The spill goes into the list the value was
     -- built in, so it dominates every use even when the demand comes from inside an arm.
-    local storage = ctx.builder:var(value.body or ctx.body, value.ty,
-        self:expression(ctx, value, value.ty))
-    local place = Ir.Local(storage)
-    -- A compile-time record is shared and immutable, so it never remembers a spill: another mode or
-    -- capture reading the same value must not see a `place` a residual compilation gave it.
-    if not value.fields then value.place = place end
-    if V.tag(value) == "object" then value.expr = nil end
-    return place
+    return self:expressionCPS(machine, ctx, value, value.ty, function(m, init)
+        local storage = ctx.builder:var(value.body or ctx.body, value.ty, init)
+        local place = Ir.Local(storage)
+        -- A compile-time record is shared and immutable, so it never remembers a spill: another mode or
+        -- capture reading the same value must not see a `place` a residual compilation gave it.
+        if not value.fields then value.place = place end
+        if V.tag(value) == "object" then value.expr = nil end
+        return k(m, place)
+    end)
 end
 
 -- An array expression. A value backed by storage is read whole, which is a struct copy in C; a
 -- compile-time array is built from its elements.
-function Eval:arrayExpr(ctx, value)
+
+-- An array's construction expression, element by element.
+-- An array's construction expression, element by element.
+function Eval:arrayExprCPS(machine, ctx, value, k)
     -- A residual literal that has not demanded a place is already its construction expression.
-    if value.expr then return value.expr end
+    if value.expr then return k(machine, value.expr) end
     if not value.items then
         D.bug("array-value", "An array with neither storage nor elements has no representation")
     end
     local exprs = {}
-    for index, item in ipairs(value.items) do
-        exprs[index] = self:expression(ctx, item, value.ty.element)
+    local function element(index)
+        if index > #value.items then
+            return k(machine, ctx.builder:make(value.ty, exprs))
+        end
+        return self:expressionCPS(machine, ctx, value.items[index], value.ty.element,
+            function(m, expr)
+                exprs[index] = expr
+                return element(index + 1)
+            end)
     end
-    return ctx.builder:make(value.ty, exprs)
+    return element(1)
 end
-
 -- A name no binding declares. There is no "known but unimplemented" state: a name is either bound
 -- or it is not.
 function Eval:unknownName(name, span)
@@ -1280,169 +1517,238 @@ end
 --   { concrete = "field", record = <value>, name = <field>, ty = <ty> }
 --   { concrete = "index", array = <value>, index = <n>, ty = <ty> }
 --   { place = <Ir.Place>, ty = <ty> }
-function Eval:placeOf(ctx, expr, span)
+-- The shim: `evalRef`, `evalPtr`, `containerOf`, `derefContainer` and the statement path all reach
+-- this by name.
+
+-- The place an expression names, or a rejection. The three index cases each evaluate the index before
+-- they can name storage, so each is a continuation; the slice and array cases are separate
+-- continuations because the container's type decides which route applies.
+-- The place walk. Each branch names storage from the base selection inward, so the base is a
+-- continuation and the emission order of the original is kept exactly: an index is materialised, the
+-- guard is emitted, and only then is storage named -- a spill emitted before the guard would reorder
+-- the C.
+function Eval:placeOfCPS(machine, ctx, expr, span, k)
     if expr.kind == "Reference" then
         local slot = lookup(ctx.scope, expr.name.text)
         if not slot then self:unknownName(expr.name.text, expr.name.span) end
         if slot.atTop then
             -- The binding is demanded first: its named storage is built from the value it computes.
-            local demanded = self:demand(slot, expr.name.span)
-            local held = demanded.value
-            if not held or (V.tag(held) ~= "record" and V.tag(held) ~= "array") then
-                D.reject("not-a-place", "Only a record or an array instance is storage: "
-                    .. expr.name.text, expr.name.span)
-            end
-            local object = self:moduleObject(demanded, expr.name.span)
-            -- `backing` is the value the storage stands for, which is what normalize code reads;
-            -- `container` is the object whose storage holds the selection, which is what the borrow
-            -- rules inspect.
-            return { place = object.place, ty = object.ty, concrete = object.backing,
-                value = object.backing, container = object }
+            return self:demandCPS(machine, slot, expr.name.span, function(m, demanded)
+                local held = demanded.value
+                if not held or (V.tag(held) ~= "record" and V.tag(held) ~= "array") then
+                    D.reject("not-a-place", "Only a record or an array instance is storage: "
+                        .. expr.name.text, expr.name.span)
+                end
+                local object = self:moduleObject(demanded, expr.name.span)
+                -- `backing` is the value the storage stands for, which is what normalize code reads;
+                -- `container` is the object whose storage holds the selection, which is what the borrow
+                -- rules inspect.
+                return k(m, { place = object.place, ty = object.ty, concrete = object.backing,
+                    value = object.backing, container = object })
+            end)
         end
         if slot.kind == "concrete-field" then
-            return { concrete = "field", record = slot.record, name = slot.name, ty = slot.ty }
+            return k(machine, { concrete = "field", record = slot.record, name = slot.name, ty = slot.ty })
         end
         if slot.kind == "concrete-index" then
-            return { concrete = "index", array = slot.array, index = slot.index, ty = slot.ty }
+            return k(machine, { concrete = "index", array = slot.array, index = slot.index, ty = slot.ty })
         end
-        if slot.kind == "field" then return { place = slot.place, ty = slot.ty } end
-        if slot.kind == "param" then return { place = Ir.Local(slot.storage), ty = slot.ty } end
+        if slot.kind == "field" then return k(machine, { place = slot.place, ty = slot.ty }) end
+        if slot.kind == "param" then return k(machine, { place = Ir.Local(slot.storage), ty = slot.ty }) end
         D.reject("not-a-place", "Only storage can be a place: " .. expr.name.text, expr.name.span)
     end
     if expr.kind == "FieldSelect" then
-        local container = self:derefContainer(ctx, self:containerOf(ctx, expr.base, expr.base.span),
-            expr.span)
-        local name = expr.field.text
-        local target = self:resolveType(S.environmentOf(container.ty))
-        local ty = S.field(target, name)
-        if not ty then D.reject("unknown-member", "Record has no field " .. name, expr.field.span) end
-        local base = container.place
-        if ctx.residual and container.value
-            and (not base or (V.tag(container.value) == "object" and container.value.expr)) then
-            base = self:recordPlace(ctx, container.value, expr.span)
-        end
-        local place = base and Ir.Project(base, Ir.Field(name)) or nil
-        local held = container.concrete
-        if type(held) == "table" and held.tag == "record" and held.fields then
-            return { concrete = "field", record = held, name = name, ty = ty,
-                place = place, value = held.fields[name], container = container.container }
-        end
-        if not place or not ctx.residual then
-            D.reject("runtime-in-normalization",
-                "A field of run-time storage is only reachable from runtime code", expr.span)
-        end
-        return { place = place, ty = ty, container = container.container }
+        return self:containerOfCPS(machine, ctx, expr.base, expr.base.span, function(m, selected)
+            return self:derefContainerCPS(m, ctx, selected, expr.span, function(m2, container)
+                local name = expr.field.text
+                local target = self:resolveType(S.environmentOf(container.ty))
+                local ty = S.field(target, name)
+                if not ty then D.reject("unknown-member", "Record has no field " .. name, expr.field.span) end
+                local function withBase(m3, basePlace)
+                    local place = basePlace and Ir.Project(basePlace, Ir.Field(name)) or nil
+                    local held = container.concrete
+                    if type(held) == "table" and held.tag == "record" and held.fields then
+                        return k(m3, { concrete = "field", record = held, name = name, ty = ty,
+                            place = place, value = held.fields[name], container = container.container })
+                    end
+                    if not place or not ctx.residual then
+                        D.reject("runtime-in-normalization",
+                            "A field of run-time storage is only reachable from runtime code", expr.span)
+                    end
+                    return k(m3, { place = place, ty = ty, container = container.container })
+                end
+                local base = container.place
+                if ctx.residual and container.value
+                    and (not base or (V.tag(container.value) == "object" and container.value.expr)) then
+                    return self:recordPlaceCPS(m2, ctx, container.value, expr.span, function(m3, place)
+                        return withBase(m3, place)
+                    end)
+                end
+                return withBase(m2, base)
+            end)
+        end)
     end
     if expr.kind == "IndexExpr" then
-        local base = self:containerOf(ctx, expr.base, expr.base.span)
-        -- An unchecked pointer is indexed by address, before any dereference: `p[i]` is the element at
-        -- `p + i`, so the pointer's target is that element rather than a container to index into.
-        -- Dereferencing first, the way a reference is handled, would read the element and then try to
-        -- index it.
-        if base.ty and base.ty:isPtr() then
-            local element = self:pointeeType(base.ty)
-            local index = self:evalExpr(ctx, expr.index)
-            self:requireType(index, S.U32, expr.index.span)
-            if not ctx.residual then
-                D.reject("runtime-in-normalization", "A pointer element needs runtime code", expr.span)
+        return self:containerOfCPS(machine, ctx, expr.base, expr.base.span, function(m, base)
+            -- An unchecked pointer is indexed by address, before any dereference: `p[i]` is the element
+            -- at `p + i`, so the pointer's target is that element rather than a container to index into.
+            -- Dereferencing first, the way a reference is handled, would read the element and then try to
+            -- index it.
+            if base.ty and base.ty:isPtr() then
+                local element = self:pointeeType(base.ty)
+                return self:evalExprCPS(m, ctx, expr.index, function(m2, index)
+                    self:requireType(index, S.U32, expr.index.span)
+                    if not ctx.residual then
+                        D.reject("runtime-in-normalization", "A pointer element needs runtime code", expr.span)
+                    end
+                    return self:containerExprCPS(m2, ctx, base, function(m3, view)
+                        return self:expressionCPS(m3, ctx, index, S.U32, function(m4, indexExpr)
+                            -- No length and so no guard: that is the whole difference from the slice
+                            -- index below.
+                            return k(m4, { place = ctx.builder:ptrIndex(view, indexExpr, element),
+                                ty = element })
+                        end)
+                    end)
+                end)
             end
-            local view = self:containerExpr(ctx, base)
-            local indexExpr = self:expression(ctx, index, S.U32)
-            -- No length and so no guard: that is the whole difference from the slice index below.
-            return { place = ctx.builder:ptrIndex(view, indexExpr, element), ty = element }
-        end
-        local container = self:derefContainer(ctx, base, expr.span)
-        if container.ty:isSlice() then
-            local element = container.ty.element
-            local index = self:evalExpr(ctx, expr.index)
-            self:requireType(index, S.U32, expr.index.span)
-            local count = self:sliceCount(container.value)
-            if V.isKnown(index) and V.isInteger(index) and count then
-                if index.n >= count then
-                    D.reject("index-range", "Index " .. tostring(index.n) .. " is outside a slice of "
-                        .. "length " .. tostring(count), expr.span)
+            return self:derefContainerCPS(m, ctx, base, expr.span, function(m2, container)
+                if container.ty:isSlice() then
+                    local element = container.ty.element
+                    return self:evalExprCPS(m2, ctx, expr.index, function(m3, index)
+                        self:requireType(index, S.U32, expr.index.span)
+                        local count = self:sliceCount(container.value)
+                        if V.isKnown(index) and V.isInteger(index) and count then
+                            if index.n >= count then
+                                D.reject("index-range", "Index " .. tostring(index.n) .. " is outside a slice "
+                                    .. "of length " .. tostring(count), expr.span)
+                            end
+                            local held = self:sliceElement(container.value, index.n)
+                            if held and not ctx.residual then
+                                return k(m3, { concrete = "element", value = held, ty = element,
+                                    readonly = true })
+                            end
+                        end
+                        if not ctx.residual then
+                            D.reject("runtime-in-normalization",
+                                "A run-time slice index needs runtime code", expr.span)
+                        end
+                        return self:containerExprCPS(m3, ctx, container, function(m4, view)
+                            return self:expressionCPS(m4, ctx, index, S.U32, function(m5, indexExpr)
+                                -- A run-time index is checked before it is used, exactly as an array's is.
+                                ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Ge", indexExpr,
+                                    ctx.builder:sliceLength(view, S.U32), S.Bool), "index-range"))
+                                return k(m5, { place = ctx.builder:sliceIndex(view, indexExpr, element),
+                                    ty = element, readonly = true })
+                            end)
+                        end)
+                    end)
                 end
-                local held = self:sliceElement(container.value, index.n)
-                if held and not ctx.residual then
-                    return { concrete = "element", value = held, ty = element, readonly = true }
+                if not container.ty:isArray() then
+                    D.reject("type-mismatch",
+                        "Expected an array but found " .. S.encode(container.ty or S.Unit), expr.span)
                 end
-            end
-            if not ctx.residual then
-                D.reject("runtime-in-normalization", "A run-time slice index needs runtime code", expr.span)
-            end
-            local view = self:containerExpr(ctx, container)
-            local indexExpr = self:expression(ctx, index, S.U32)
-            -- A run-time index is checked before it is used, exactly as an array's is.
-            ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Ge", indexExpr,
-                ctx.builder:sliceLength(view, S.U32), S.Bool), "index-range"))
-            return { place = ctx.builder:sliceIndex(view, indexExpr, element), ty = element,
-                readonly = true }
-        end
-        if not container.ty:isArray() then
-            D.reject("type-mismatch",
-                "Expected an array but found " .. S.encode(container.ty or S.Unit), expr.span)
-        end
-        local index = self:evalExpr(ctx, expr.index)
-        -- A narrower integer index widens, which is free.
-        self:requireType(index, S.U32, expr.index.span)
-        local length, element = container.ty.length, container.ty.element
-        if V.isKnown(index) and V.isInteger(index) then
-            if index.n >= length then
-                D.reject("index-range", "Index " .. tostring(index.n) .. " is outside an array of "
-                    .. "length " .. tostring(length), expr.span)
-            end
-            -- A place needs a builder, so only residual code builds one; normalize code either uses
-            -- the value it names or reports that this storage is runtime-only.
-            local base = container.place
-            if ctx.residual and container.value
-                and (not base or (V.tag(container.value) == "array" and container.value.expr)) then
-                base = self:arrayPlace(ctx, container.value, expr.span)
-            end
-            local place = (base and ctx.residual)
-                and Ir.Index(base, ctx.builder:u32(index.n), element) or nil
-            local held = container.concrete
-            if type(held) == "table" and held.tag == "array" and held.items then
-                return { concrete = "index", array = held, index = index.n, ty = element,
-                    place = place, value = held.items[index.n + 1], container = container.container }
-            end
-            if not place or not ctx.residual then
-                D.reject("runtime-in-normalization",
-                    "An element of run-time storage is only reachable from runtime code", expr.span)
-            end
-            return { place = place, ty = element, container = container.container }
-        end
-        if not ctx.residual then
-            D.reject("runtime-in-normalization", "A run-time index needs runtime code", expr.span)
-        end
-        -- A run-time index is checked before it is used, exactly as a run-time divisor is.
-        local indexExpr = self:expression(ctx, index, S.U32)
-        ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Ge", indexExpr,
-            ctx.builder:u32(length), S.Bool), "index-range"))
-        local place = container.place or self:arrayPlace(ctx, container.value, expr.span)
-        -- The container travels too: `Ref(r[i])` has to be able to see that the element it names is
-        -- in module storage, even when the route to it is a run-time index.
-        return { place = Ir.Index(place, indexExpr, element), ty = element,
-            container = container.container }
+                local length, element = container.ty.length, container.ty.element
+                return self:evalExprCPS(m2, ctx, expr.index, function(m3, index)
+                    -- A narrower integer index widens, which is free.
+                    self:requireType(index, S.U32, expr.index.span)
+                    if V.isKnown(index) and V.isInteger(index) then
+                        if index.n >= length then
+                            D.reject("index-range", "Index " .. tostring(index.n) .. " is outside an array of "
+                                .. "length " .. tostring(length), expr.span)
+                        end
+                        -- A place needs a builder, so only residual code builds one; normalize code
+                        -- either uses the value it names or reports that this storage is runtime-only.
+                        local function withBase(m4, basePlace)
+                            local place = (basePlace and ctx.residual)
+                                and Ir.Index(basePlace, ctx.builder:u32(index.n), element) or nil
+                            local held = container.concrete
+                            if type(held) == "table" and held.tag == "array" and held.items then
+                                return k(m4, { concrete = "index", array = held, index = index.n,
+                                    ty = element, place = place, value = held.items[index.n + 1],
+                                    container = container.container })
+                            end
+                            if not place or not ctx.residual then
+                                D.reject("runtime-in-normalization",
+                                    "An element of run-time storage is only reachable from runtime code",
+                                    expr.span)
+                            end
+                            return k(m4, { place = place, ty = element, container = container.container })
+                        end
+                        local base = container.place
+                        if ctx.residual and container.value
+                            and (not base or (V.tag(container.value) == "array" and container.value.expr)) then
+                            return self:arrayPlaceCPS(m3, ctx, container.value, expr.span,
+                                function(m4, place)
+                                    return withBase(m4, place)
+                                end)
+                        end
+                        return withBase(m3, base)
+                    end
+                    if not ctx.residual then
+                        D.reject("runtime-in-normalization", "A run-time index needs runtime code", expr.span)
+                    end
+                    -- A run-time index is checked before it is used, exactly as a run-time divisor is.
+                    return self:expressionCPS(m3, ctx, index, S.U32, function(m4, indexExpr)
+                        ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Ge", indexExpr,
+                            ctx.builder:u32(length), S.Bool), "index-range"))
+                        local function answer(m5, place)
+                            -- The container travels too: `Ref(r[i])` has to be able to see that the element
+                            -- it names is in module storage, even when the route to it is a run-time index.
+                            return k(m5, { place = Ir.Index(place, indexExpr, element), ty = element,
+                                container = container.container })
+                        end
+                        if container.place then return answer(m4, container.place) end
+                        return self:arrayPlaceCPS(m4, ctx, container.value, expr.span, answer)
+                    end)
+                end)
+            end)
+        end)
     end
     D.reject("not-a-place", "This expression does not name storage", span or expr.span)
+end
+
+-- The place walk as a *probe*: `pcall(function() return self:placeOf(...) end)` asked whether an
+-- expression names storage without treating a refusal as an error. A pushed handler that answers `nil`
+-- is the same question, so the three probes in `evalPtrCPS`, `evalRefCPS` and `containerOfCPS` share
+-- this.
+function Eval:placeOfOrNilCPS(machine, ctx, expr, span, k)
+    machine:push("place-probe", span, nil, function(m, diagnostic)
+        if not D.is(diagnostic) then error(diagnostic, 0) end
+        return k(m, nil)
+    end)
+    return self:placeOfCPS(machine, ctx, expr, span, function(m, reached)
+        machine:pop()
+        return k(m, reached)
+    end)
 end
 
 -- A selection whose container is a reference selects through it: the reference names the instance,
 -- so the container becomes that instance. A runtime reference is a pointer, so its place is one
 -- dereference further on, and it is conservatively retaining because the storage it points at is not
 -- known here.
-function Eval:derefContainer(ctx, container, span)
+
+-- A selection off a reference or a pointer: the container's place holds the pointer, so the target is
+-- one dereference further on. A frontend reference already names the target place, which is why that
+-- case is settled before the pointer cases are tried.
+-- A selection off a reference or a pointer: the container's place holds the pointer, so the target is
+-- one dereference further on. A frontend reference already names the target place, which is why that
+-- case is settled before the pointer cases are tried.
+function Eval:derefContainerCPS(machine, ctx, container, span, k)
     local held = container.value
     if type(held) == "table" and V.tag(held) == "ref" then
         local object = self:placeObject(held)
-        if not object then return container end
-        return { concrete = object.backing, value = object.backing, place = object.place,
-            ty = object.ty, container = object }
+        if not object then return k(machine, container) end
+        return k(machine, { concrete = object.backing, value = object.backing, place = object.place,
+            ty = object.ty, container = object })
     end
     if held and held.ty and held.ty:isRef() and V.tag(held) == "runtime" then
         local target = self:pointeeType(held.ty)
-        local place = ctx.residual and self:derefPlace(ctx, held, span) or nil
-        return { place = place, ty = target, container = { retaining = true } }
+        if not ctx.residual then
+            return k(machine, { place = nil, ty = target, container = { retaining = true } })
+        end
+        return self:derefPlaceCPS(machine, ctx, held, span, function(m, place)
+            return k(m, { place = place, ty = target, container = { retaining = true } })
+        end)
     end
     -- A selection directly off a reference field or a runtime reference: the place holds the
     -- pointer, so the target is one dereference further on. This is checked after the value cases,
@@ -1454,84 +1760,115 @@ function Eval:derefContainer(ctx, container, span)
         if not ctx.residual then
             D.reject("runtime-in-normalization", "A pointer field needs runtime code", span)
         end
-        local place = container.place
-        if not place then
-            local storage = ctx.builder:var(ctx.body, container.ty,
-                self:containerExpr(ctx, container))
-            place = Ir.Local(storage)
+        if container.place then
+            return k(machine, { place = Ir.Deref(container.place, target), ty = target,
+                container = { retaining = true } })
         end
-        return { place = Ir.Deref(place, target), ty = target, container = { retaining = true } }
+        return self:containerExprCPS(machine, ctx, container, function(m, expr)
+            local storage = ctx.builder:var(ctx.body, container.ty, expr)
+            return k(m, { place = Ir.Deref(Ir.Local(storage), target), ty = target,
+                container = { retaining = true } })
+        end)
     end
     if container.ty and container.ty:isRef() then
         local target = self:pointeeType(container.ty)
-        if not container.place then return container end
-        return { place = Ir.Deref(container.place, target), ty = target,
-            container = { retaining = true } }
+        if not container.place then return k(machine, container) end
+        return k(machine, { place = Ir.Deref(container.place, target), ty = target,
+            container = { retaining = true } })
     end
-    return container
+    return k(machine, container)
 end
-
 -- The container an element or field selection starts from: a compile-time value, or a place with the
 -- type it refers to. A selection over a selection does not read the intermediate value.
 -- The value a resolved container stands for, as an IR expression: the value it carries when there is
 -- one, and otherwise a read of the place it was resolved to. A container that came from `placeOf` has
 -- no value attached, so a consumer that needs the expression must be able to read one; assuming a value
 -- is there is what turned `Slice(Ptr(U8))` into an internal Lua error rather than a diagnostic.
-function Eval:containerExpr(ctx, container)
-    if container.value then return self:expression(ctx, container.value, container.ty) end
+
+-- Either the value the container holds or a read of its place.
+-- Either the value the container holds or a read of its place.
+function Eval:containerExprCPS(machine, ctx, container, k)
+    if container.value then
+        return self:expressionCPS(machine, ctx, container.value, container.ty, k)
+    end
     if container.place then
         local read = ctx.builder:read(ctx.body, container.ty, container.place)
-        return ctx.builder:ref(read, container.ty)
+        return k(machine, ctx.builder:ref(read, container.ty))
     end
     D.bug("container-value", "A container has neither a value nor a place")
 end
 
-function Eval:containerOf(ctx, expr, span)
-    if expr.kind == "Reference" or expr.kind == "FieldSelect" or expr.kind == "IndexExpr" then
-        local ok, reached = pcall(function() return self:placeOf(ctx, expr, span) end)
-        if ok then
-            -- The value the selection names travels too, so a reference in it can be dereferenced.
-            if reached.concrete == "field" then
-                local held = reached.record.fields[reached.name]
-                return { concrete = held, value = held, ty = reached.ty, place = reached.place,
-                    container = reached.container }
+-- What a selection names: its place, the value it holds, or both. The place walk is asked first, and
+-- only when it declines is the expression evaluated -- which is why that evaluation is the one
+-- continuation here.
+-- What a selection names: its place, the value it holds, or both. The place walk is asked first, and
+-- only when it declines is the expression evaluated -- which is the shared fallback here.
+function Eval:containerOfCPS(machine, ctx, expr, span, k)
+    local function fallback(m)
+        return self:evalExprCPS(m, ctx, expr, function(m2, value)
+            if value.place then
+                return k(m2, { value = value, place = value.place, ty = value.ty })
             end
-            if reached.concrete == "index" then
-                local held = reached.array.items[reached.index + 1]
-                return { concrete = held, value = held, ty = reached.ty, place = reached.place,
-                    container = reached.container }
-            end
-            -- A container that has both keeps both: a read uses the value and a reference uses the
-            -- place, so a chain of selections does not have to choose here.
-            return { place = reached.place, ty = reached.ty, concrete = reached.concrete,
-                value = reached.value, container = reached.container or reached.value }
+            return k(m2, { concrete = value, value = value, ty = value.ty })
+        end)
+    end
+    if expr.kind ~= "Reference" and expr.kind ~= "FieldSelect" and expr.kind ~= "IndexExpr" then
+        return fallback(machine)
+    end
+    return self:placeOfOrNilCPS(machine, ctx, expr, span, function(m, reached)
+        if not reached then return fallback(m) end
+        -- The value the selection names travels too, so a reference in it can be dereferenced.
+        if reached.concrete == "field" then
+            local held = reached.record.fields[reached.name]
+            return k(m, { concrete = held, value = held, ty = reached.ty, place = reached.place,
+                container = reached.container })
         end
-    end
-    local value = self:evalExpr(ctx, expr)
-    if value.place then return { value = value, place = value.place, ty = value.ty } end
-    return { concrete = value, value = value, ty = value.ty }
+        if reached.concrete == "index" then
+            local held = reached.array.items[reached.index + 1]
+            return k(m, { concrete = held, value = held, ty = reached.ty, place = reached.place,
+                container = reached.container })
+        end
+        -- A container that has both keeps both: a read uses the value and a reference uses the
+        -- place, so a chain of selections does not have to choose here.
+        return k(m, { place = reached.place, ty = reached.ty, concrete = reached.concrete,
+            value = reached.value, container = reached.container or reached.value })
+    end)
 end
-
 -- `a[i]`: an element read, through the place it names.
-function Eval:evalIndex(ctx, expr)
-    local reached = self:placeOf(ctx, expr, expr.span)
-    -- Residual code reads the storage it names; normalize code reads the value directly. Residual
-    -- specialization must not bake a snapshot of module storage, but the reference interpreter
-    -- (`session.run`) and a top-level initializer demand (`session.moduleDemand`) both execute over
-    -- concrete state, so they read it directly.
-    if not ctx.residual and (ctx.session.run or ctx.session.demanding
-        or self:placeOrigin(ctx, expr) ~= "module") then
-        if reached.concrete == "element" then return reached.value end
-        if reached.concrete == "index" then return reached.array.items[reached.index + 1] end
-        if reached.concrete == "field" then return reached.record.fields[reached.name] or V.unit() end
-    end
-    if not ctx.residual then
-        D.reject("runtime-in-normalization", "Element is runtime storage", expr.span)
-    end
-    local read = ctx.builder:read(ctx.body, reached.ty, reached.place)
-    return V.runtime(ctx.builder:ref(read, reached.ty), reached.ty, nil, reached.place)
+-- An index reaches storage through `placeOf`, which is the direct walker for now, so every answer
+-- here is a value through `k` rather than a nested chain.
+-- An element read. Residual code reads the storage it names; normalize code reads the value directly.
+-- Residual specialization must not bake a snapshot of module storage, but the reference interpreter
+-- (`session.run`) and a top-level initializer demand (`session.demanding`) both execute over concrete
+-- state, so they read it directly.
+function Eval:evalIndexCPS(machine, ctx, expr, k)
+    return self:placeOfCPS(machine, ctx, expr, expr.span, function(m, reached)
+        local function answer(m2, origin)
+            if not ctx.residual and (ctx.session.run or ctx.session.demanding or origin ~= "module") then
+                if reached.concrete == "element" then return k(m2, reached.value) end
+                if reached.concrete == "index" then
+                    return k(m2, reached.array.items[reached.index + 1])
+                end
+                if reached.concrete == "field" then
+                    return k(m2, reached.record.fields[reached.name] or V.unit())
+                end
+            end
+            if not ctx.residual then
+                D.reject("runtime-in-normalization", "Element is runtime storage", expr.span)
+            end
+            local read = ctx.builder:read(ctx.body, reached.ty, reached.place)
+            return k(m2, V.runtime(ctx.builder:ref(read, reached.ty), reached.ty, nil, reached.place))
+        end
+        -- The route is only asked when nothing else has decided: `or` short-circuiting in the original
+        -- is why an interpreter run never asks.
+        if ctx.residual or ctx.session.run or ctx.session.demanding then
+            return answer(m, nil)
+        end
+        return self:placeOriginCPS(m, ctx, expr, function(m2, origin)
+            return answer(m2, origin)
+        end)
+    end)
 end
-
 -- Callable arms of a tagged callable -----------------------------------------------------------
 -- A conditional whose arms are two different callable code identities joins into one tagged
 -- callable: the tag names the code to run and the payload is that code's environment. Each arm is
@@ -1545,28 +1882,38 @@ end
 
 -- The identity, environment type and visible signature of one callable arm. A word needs a fully
 -- declared signature, because its call site has no annotation to fall back on.
-function Eval:callableArm(value, span)
+
+-- The arm descriptor of one callable, plus the key that identifies it and the signature the two arms
+-- share. Three values travel back, which is why the machine's value channel is a vector.
+function Eval:callableArmCPS(machine, value, span, k)
     if V.tag(value) == "word" then
         local def, bound = value.def, value.args or {}
         local sc = scope(def.lexical)
         local inputs = {}
-        for index = 1, #def.params do
-            local ty = self:requirement(def, index, sc, span)
-            S.checkRuntime(ty, span)
-            inputs[index] = S.inValue(ty)
+        local function parameter(index)
+            if index > #def.params then
+                return self:declaredResultCPS(machine, def, sc, span, function(m, results)
+                    if not results then
+                        D.reject("callable-branch", "Word " .. tostring(def.name)
+                            .. " needs declared result types to be selected at run time", span)
+                    end
+                    for _, item in ipairs(results) do S.checkRuntime(item, span) end
+                    local key = V.encode(value)
+                    if not key then
+                        D.reject("callable-branch", "A word selected at run time needs static arguments",
+                            span)
+                    end
+                    self.arms[key] = { kind = "word", def = def, bound = bound }
+                    return k(m, key, S.Unit, S.sig(inputs, results))
+                end)
+            end
+            return self:requirementCPS(machine, def, index, sc, span, function(m, ty)
+                S.checkRuntime(ty, span)
+                inputs[index] = S.inValue(ty)
+                return parameter(index + 1)
+            end)
         end
-        local results = self:declaredResult(def, sc, span)
-        if not results then
-            D.reject("callable-branch", "Word " .. tostring(def.name)
-                .. " needs declared result types to be selected at run time", span)
-        end
-        for _, item in ipairs(results) do S.checkRuntime(item, span) end
-        local key = V.encode(value)
-        if not key then
-            D.reject("callable-branch", "A word selected at run time needs static arguments", span)
-        end
-        self.arms[key] = { kind = "word", def = def, bound = bound }
-        return key, S.Unit, S.sig(inputs, results)
+        return parameter(1)
     end
     local plan = value.plan
     if #(plan.borrowedOrder or {}) > 0 then
@@ -1585,9 +1932,8 @@ function Eval:callableArm(value, span)
     end
     local key = table.concat(parts, "|")
     self.arms[key] = { kind = "closure", plan = plan, bound = value.bound or {} }
-    return key, plan.envTy, plan.sig
+    return k(machine, key, plan.envTy, plan.sig)
 end
-
 -- The tagged representation of one arm: the tag names the code, the payload is its environment.
 function Eval:taggedArmValue(ty, key, value, span)
     local envTy = S.caseOf(ty, key)
@@ -1604,21 +1950,29 @@ function Eval:taggedArmValue(ty, key, value, span)
 end
 
 -- Joins two callable arms, rejecting a shape mismatch rather than inventing a representation.
-function Eval:joinCallables(yesValue, noValue, span)
-    local keyA, envA, sigA = self:callableArm(yesValue, span)
-    local keyB, envB, sigB = self:callableArm(noValue, span)
-    -- Two signatures are one interned `Ty.Sig` value when they are the same shape.
-    if sigA ~= sigB then
-        D.reject("callable-branch", "Both arms must be callable the same way: "
-            .. S.encode(sigA) .. " and " .. S.encode(sigB), span)
-    end
-    local ty = S.tagged(sigA, { [keyA] = envA, [keyB] = envB })
-    return ty, self:taggedArmValue(ty, keyA, yesValue, span), self:taggedArmValue(ty, keyB, noValue, span)
-end
 
+-- Two callable arms joined into one tagged callable. Both arms must be callable the same way, which is
+-- what the shared signature checks.
+function Eval:joinCallablesCPS(machine, yesValue, noValue, span, k)
+    return self:callableArmCPS(machine, yesValue, span, function(m, keyA, envA, sigA)
+        return self:callableArmCPS(m, noValue, span, function(m2, keyB, envB, sigB)
+            -- Two signatures are one interned `Ty.Sig` value when they are the same shape.
+            if sigA ~= sigB then
+                D.reject("callable-branch", "Both arms must be callable the same way: "
+                    .. S.encode(sigA) .. " and " .. S.encode(sigB), span)
+            end
+            local ty = S.tagged(sigA, { [keyA] = envA, [keyB] = envB })
+            return k(m2, ty, self:taggedArmValue(ty, keyA, yesValue, span),
+                self:taggedArmValue(ty, keyB, noValue, span))
+        end)
+    end)
+end
 -- Calls one arm. A residual tagged value projects that arm's environment out of the payload; the
 -- arm's own code then runs as an ordinary direct call, exactly as a non-tagged callable would.
-function Eval:callTaggedArm(ctx, name, variantId, taggedTy, args, span)
+
+-- One arm of a tagged callable. A word arm calls an instance; a closure arm rebuilds the environment
+-- out of the variant payload and calls the closure, which is why the arm descriptor is keyed.
+function Eval:callTaggedArmCPS(machine, ctx, name, variantId, taggedTy, args, span, k)
     local descriptor = self.arms[name]
     if not descriptor then D.bug("tagged-arm", "Tagged callable has no arm " .. name) end
     local envTy = S.caseOf(taggedTy, name)
@@ -1627,7 +1981,7 @@ function Eval:callTaggedArm(ctx, name, variantId, taggedTy, args, span)
         local values = {}
         for _, item in ipairs(descriptor.bound) do values[#values + 1] = item end
         for _, item in ipairs(args) do values[#values + 1] = item end
-        return self:callInstance(ctx, descriptor.def, values, span, nil)
+        return self:callInstanceCPS(machine, ctx, descriptor.def, values, span, nil, k)
     end
     local plan = descriptor.plan
     local merged = {}
@@ -1644,14 +1998,19 @@ function Eval:callTaggedArm(ctx, name, variantId, taggedTy, args, span)
             envExprs[#envExprs + 1] = ctx.builder:get(payload, envName, envTys[envName])
         end
     end
-    return self:invokeClosure(ctx, plan, envExprs, merged, span, nil)
+    return self:invokeClosureCPS(machine, ctx, plan, envExprs, merged, span, nil, k)
 end
-
 
 -- Materialises a value for a runtime position. `want` is the destination type when the context
 -- knows it, which is what lets an unrepresentable callable be rejected with a source diagnostic
 -- instead of building mistyped IR.
-function Eval:expression(ctx, value, want)
+-- The shim: `recordExpr`, `arrayExpr`, `constructRecord`, the place walk and the call spine all
+-- reach this by name, so it is the single most-called scaffold site during the stretch.
+
+-- A value as a runtime expression. Most of the work is one builder call, so nearly every answer is
+-- direct; the nested `expression` calls (a variant payload, a closure environment) go through the shim
+-- because the value's own nesting, not the program's recursion, bounds them.
+function Eval:expressionCPS(machine, ctx, value, want, k)
     local tag = V.tag(value)
     if want and (want:isSig() or want:isView()) and value.ty and value.ty:isTagged() then
         self:rejectTaggedErase(ctx.span)
@@ -1661,38 +2020,38 @@ function Eval:expression(ctx, value, want)
         if not ctx.residual then
             D.reject("runtime-in-normalization", "A view needs runtime code", ctx.span)
         end
-        return self:makeView(ctx, value, want:isView() and want.visible or want)
+        return self:makeViewCPS(machine, ctx, value, want:isView() and want.visible or want, k)
     end
     if tag == "runtime" then
         if value.cast then
             value.cast = nil
             value.expr = ctx.builder:convert(value.expr, value.ty)
         end
-        return value.expr
+        return k(machine, value.expr)
     end
-    if tag == "string" then return ctx.builder:const(value.ty, Ir.Str(value.bytes)) end
-    if tag == "float" then return ctx.builder:float(value.ty, value.n) end
+    if tag == "string" then return k(machine, ctx.builder:const(value.ty, Ir.Str(value.bytes))) end
+    if tag == "float" then return k(machine, ctx.builder:float(value.ty, value.n)) end
     if tag == "slice" then
-        if value.expr then return value.expr end
+        if value.expr then return k(machine, value.expr) end
         D.reject("runtime-in-normalization", "A compile-time slice has no runtime representation", ctx.span)
     end
     if tag == "int" then
-        if value.high then return ctx.builder:int64(value.ty, value.high, value.low) end
-        return ctx.builder:int(value.ty, value.n)
+        if value.high then return k(machine, ctx.builder:int64(value.ty, value.high, value.low)) end
+        return k(machine, ctx.builder:int(value.ty, value.n))
     end
-    if tag == "bool" then return ctx.builder:bool(value.b) end
-    if tag == "record" or tag == "object" then return self:recordExpr(ctx, value) end
+    if tag == "bool" then return k(machine, ctx.builder:bool(value.b)) end
+    if tag == "record" or tag == "object" then return self:recordExprCPS(machine, ctx, value, k) end
     if tag == "array" then
-        if value.expr then return value.expr end
+        if value.expr then return k(machine, value.expr) end
         if value.place then
             -- Storage is authoritative, so reading the array whole copies its current elements.
             local read = ctx.builder:read(ctx.body, value.ty, value.place)
-            return ctx.builder:ref(read, value.ty)
+            return k(machine, ctx.builder:ref(read, value.ty))
         end
         if not ctx.residual then
             D.reject("runtime-in-normalization", "An array needs runtime code", ctx.span)
         end
-        return self:arrayExpr(ctx, value)
+        return self:arrayExprCPS(machine, ctx, value, k)
     end
     if tag == "ref" then
         if value.place == nil then
@@ -1702,20 +2061,24 @@ function Eval:expression(ctx, value, want)
         if not ctx.residual then
             D.reject("runtime-in-normalization", "A reference needs runtime code", ctx.span)
         end
-        return ctx.builder:addr(value.place, value.ty)
+        return k(machine, ctx.builder:addr(value.place, value.ty))
     end
     if tag == "variant" then
         -- A variant already emitted under runtime code refers to its own instruction.
-        if value.expr then return value.expr end
+        if value.expr then return k(machine, value.expr) end
         if not ctx.residual then
             D.reject("runtime-in-normalization", "A sum value needs runtime code", ctx.span)
         end
         local caseType = S.caseOf(value.ty, value.case)
         local id = ctx.builder:valueId()
-        local payload
-        if caseType ~= S.Unit then payload = self:expression(ctx, value.payload, caseType) end
-        ctx.builder:emit(ctx.body, Ir.ConstructVariant(id, value.ty, value.case, payload))
-        return ctx.builder:ref(id, value.ty)
+        local function emit(payload)
+            ctx.builder:emit(ctx.body, Ir.ConstructVariant(id, value.ty, value.case, payload))
+            return k(machine, ctx.builder:ref(id, value.ty))
+        end
+        if caseType == S.Unit then return emit(nil) end
+        return self:expressionCPS(machine, ctx, value.payload, caseType, function(m, payload)
+            return emit(payload)
+        end)
     end
     if tag == "closure" then
         local plan = value.plan
@@ -1728,17 +2091,26 @@ function Eval:expression(ctx, value, want)
             -- Pure code: nothing to retain, so the representation is an invocation pointer with no
             -- environment. Its type stays the callable type, so a call in this compilation is still
             -- direct; only a value that crosses a boundary goes through the pointer.
-            local entry = self:callableInstance({ plan = plan }, value.bound or {}, ctx.span).target
-            local id = ctx.builder:valueId()
-            ctx.builder:emit(ctx.body, Ir.View(id, plan.ty, entry, S.list({})))
-            return ctx.builder:ref(id, plan.ty)
+            return self:callableInstanceCPS(machine, { plan = plan }, value.bound or {}, ctx.span,
+                function(m, instance)
+                    local id = ctx.builder:valueId()
+                    ctx.builder:emit(ctx.body, Ir.View(id, plan.ty, instance.target, S.list({})))
+                    return k(m, ctx.builder:ref(id, plan.ty))
+                end)
         end
         -- The value's type is the callable type; its representation is the environment record.
         local fields = {}
-        for index, name in ipairs(plan.runtimeOrder) do
-            fields[index] = self:expression(ctx, plan.runtime[name])
+        local function field(index)
+            if index > #plan.runtimeOrder then
+                return k(machine, ctx.builder:make(plan.ty, fields))
+            end
+            return self:expressionCPS(machine, ctx, plan.runtime[plan.runtimeOrder[index]], nil,
+                function(m, expr)
+                    fields[index] = expr
+                    return field(index + 1)
+                end)
         end
-        return ctx.builder:make(plan.ty, fields)
+        return field(1)
     end
     D.reject("residual-value", "A " .. S.encode(value.ty or S.Unit) .. " value cannot cross into runtime storage",
         ctx.span)
@@ -1892,7 +2264,10 @@ end
 
 -- Expressions ---------------------------------------------------------------------------------
 
-function Eval:evalExpr(ctx, expr)
+-- The converted router: every arm either answers through `k` or tail-calls a converted family, so the
+-- dispatch itself costs no host frame. An unconverted family answers with a value, which is one host
+-- frame per family *call* rather than per step, and that line becomes a tail call as it converts.
+function Eval:evalExprCPS(machine, ctx, expr, k)
     self:step(expr.span)
     -- Tail position belongs to this node alone, so it is taken here and handed back only to a construct
     -- whose child really is the returned expression: a call that is the whole expression, and the arms
@@ -1905,82 +2280,111 @@ function Eval:evalExpr(ctx, expr)
         -- A literal adapts to another operand's type when it fits, which is decided from the syntax.
         local literal = V.u32(expr.value)
         literal.literal = true
-        return literal
+        return k(machine, literal)
     elseif kind == "U64Literal" then
         -- A literal that does not fit a word is a 64-bit literal, held as its two words.
         local literal = V.int64(S.U64, expr.high, expr.low)
         literal.literal = true
-        return literal
-    elseif kind == "BoolLiteral" then return V.bool(expr.value)
-    elseif kind == "UnitLiteral" then return V.unit()
-    elseif kind == "Reference" then return self:evalReference(ctx, expr)
-    elseif kind == "UnaryExpr" then
-        return self:onMachine(ctx, function(machine)
-            return self:evalUnary(machine, ctx, expr, done)
-        end)
-    elseif kind == "BinaryExpr" then return self:evalBinary(ctx, expr)
-    elseif kind == "Condition" then ctx.tail = tail; return self:evalCondition(ctx, expr, nil)
-    elseif kind == "Apply" then ctx.tail = tail; return self:evalApply(ctx, expr)
-    elseif kind == "SchemaExpr" then return self:evalSchema(ctx, expr)
-    elseif kind == "StringLiteral" then return V.string(S.String, expr.bytes)
-    elseif kind == "FloatLiteral" then return V.f64(expr.value)
-    elseif kind == "ArrayExpr" then return self:evalArray(ctx, expr, nil)
-    elseif kind == "IndexExpr" then return self:evalIndex(ctx, expr)
-    elseif kind == "RecordSupply" then ctx.tail = tail; return self:evalSupply(ctx, expr)
-    elseif kind == "FieldSelect" then return self:evalFieldSelect(ctx, expr)
-    elseif kind == "Lambda" then return self:evalLambda(ctx, expr, nil)
-    elseif kind == "SignatureExpr" then return self:evalSignature(ctx, expr)
+        return k(machine, literal)
+    elseif kind == "BoolLiteral" then return k(machine, V.bool(expr.value))
+    elseif kind == "UnitLiteral" then return k(machine, V.unit())
+    elseif kind == "Reference" then return self:evalReferenceCPS(machine, ctx, expr, k)
+    elseif kind == "UnaryExpr" then return self:evalUnary(machine, ctx, expr, k)
+    elseif kind == "BinaryExpr" then return self:evalBinaryCPS(machine, ctx, expr, k)
+    elseif kind == "Condition" then
+        ctx.tail = tail
+        return self:evalConditionCPS(machine, ctx, expr, nil, k)
+    elseif kind == "Apply" then
+        ctx.tail = tail
+        return self:evalApplyCPS(machine, ctx, expr, k)
+    elseif kind == "SchemaExpr" then return self:evalSchemaCPS(machine, ctx, expr, k)
+    elseif kind == "StringLiteral" then return k(machine, V.string(S.String, expr.bytes))
+    elseif kind == "FloatLiteral" then return k(machine, V.f64(expr.value))
+    elseif kind == "ArrayExpr" then return self:evalArrayCPS(machine, ctx, expr, nil, k)
+    elseif kind == "IndexExpr" then return self:evalIndexCPS(machine, ctx, expr, k)
+    elseif kind == "RecordSupply" then
+        ctx.tail = tail
+        return self:evalSupplyCPS(machine, ctx, expr, k)
+    elseif kind == "FieldSelect" then return self:evalFieldSelectCPS(machine, ctx, expr, k)
+    elseif kind == "Lambda" then return self:evalLambdaCPS(machine, ctx, expr, nil, k)
+    elseif kind == "SignatureExpr" then return self:evalSignatureCPS(machine, ctx, expr, k)
     end
     D.todo("expression", "Unsupported expression form: " .. tostring(kind), expr.span)
 end
 
 -- A signature is a static value: a calling requirement, never runtime data.
-function Eval:evalSignature(ctx, expr)
+-- A signature is a static value built from its annotations; `typeOf` is still the direct walker, so
+-- each of these calls is one frame for the whole signature, not one per input.
+-- A signature expression. An input carries the value/place distinction, so each becomes an InValue;
+-- the result list is a single type or a list of them, and both are resolved on the type path.
+function Eval:evalSignatureCPS(machine, ctx, expr, k)
     -- A signature's inputs carry the value/place distinction, so each becomes an InValue here.
     local inputs = {}
-    for index, item in ipairs(expr.inputs) do
-        inputs[index] = S.inValue(self:typeOf(item, ctx.scope, expr.span))
+    local function input(index)
+        if index > #expr.inputs then
+            local results = {}
+            if expr.results.kind == "Single" then
+                return self:typeOfCPS(machine, expr.results.type, ctx.scope, expr.span, function(m, ty)
+                    return k(m, V.type(S.sig(inputs, { ty })))
+                end)
+            end
+            local function result(position)
+                if position > #expr.results.types then
+                    return k(machine, V.type(S.sig(inputs, results)))
+                end
+                return self:typeOfCPS(machine, expr.results.types[position], ctx.scope, expr.span,
+                    function(m, ty)
+                        results[position] = ty
+                        return result(position + 1)
+                    end)
+            end
+            return result(1)
+        end
+        return self:typeOfCPS(machine, expr.inputs[index], ctx.scope, expr.span, function(m, ty)
+            inputs[index] = S.inValue(ty)
+            return input(index + 1)
+        end)
     end
-    local results = {}
-    if expr.results.kind == "Single" then
-        results[1] = self:typeOf(expr.results.type, ctx.scope, expr.span)
-    else
-        for index, item in ipairs(expr.results.types) do results[index] = self:typeOf(item, ctx.scope, expr.span) end
-    end
-    return V.type(S.sig(inputs, results))
+    return input(1)
 end
-
-function Eval:evalReference(ctx, expr)
+-- A name used as a value. A top-level binding is demanded on the way; in residual code an aggregate
+-- file-scope binding is reached through its named storage instead.
+function Eval:evalReferenceCPS(machine, ctx, expr, k)
     local name = expr.name.text
     local slot = lookup(ctx.scope, name)
     if not slot then self:unknownName(name, expr.name.span) end
     if slot.kind == "value" then
-        local demanded = self:demand(slot, expr.name.span)
-        if slot.atTop and ctx.residual
-            and (V.tag(demanded.value) == "record"
-                or (V.tag(demanded.value) == "array" and demanded.value.place == nil)) then
-            -- Runtime code reaches a *file-scope* binding through its named storage. A local
-            -- aggregate keeps its value and spills to local storage only when demanded. Normalize
-            -- code keeps the value itself, so it can still specialise a call that reads one.
-            return self:moduleObject(demanded, expr.name.span)
-        end
-        return demanded.value
-    elseif slot.kind == "word" then
-        return V.word(slot.def, {}, expr.name.span)
-    elseif slot.kind == "field" then
-        return self:readFieldValue(ctx, slot, expr.name.span)
-    elseif slot.kind == "concrete-field" then
-        return slot.record.fields[slot.name] or V.unit()
-    elseif slot.kind == "param" then
+        return self:demandCPS(machine, slot, expr.name.span, function(m, demanded)
+            if slot.atTop and ctx.residual
+                and (V.tag(demanded.value) == "record"
+                    or (V.tag(demanded.value) == "array" and demanded.value.place == nil)) then
+                -- Runtime code reaches a *file-scope* binding through its named storage. A local
+                -- aggregate keeps its value and spills to local storage only when demanded. Normalize
+                -- code keeps the value itself, so it can still specialise a call that reads one.
+                return k(m, self:moduleObject(demanded, expr.name.span))
+            end
+            return k(m, demanded.value)
+        end)
+    end
+    if slot.kind == "word" then
+        return k(machine, V.word(slot.def, {}, expr.name.span))
+    end
+    if slot.kind == "field" then
+        return k(machine, self:readFieldValue(ctx, slot, expr.name.span))
+    end
+    if slot.kind == "concrete-field" then
+        return k(machine, slot.record.fields[slot.name] or V.unit())
+    end
+    if slot.kind == "param" then
         if not ctx.residual then
-            D.reject("runtime-in-normalization", "Parameter " .. slot.name .. " is runtime storage", expr.name.span)
+            D.reject("runtime-in-normalization", "Parameter " .. slot.name .. " is runtime storage",
+                expr.name.span)
         end
         local read = ctx.builder:read(ctx.body, slot.ty, Ir.Local(slot.storage))
-        return V.runtime(ctx.builder:ref(read, slot.ty), slot.ty)
+        return k(machine, V.runtime(ctx.builder:ref(read, slot.ty), slot.ty))
     end
     D.bug("binding", "Unknown binding kind " .. tostring(slot.kind))
 end
-
 -- Reads an implicit receiver field (or a bound local field place).
 function Eval:readFieldValue(ctx, slot, span)
     if slot.static then return slot.static end
@@ -2012,7 +2416,10 @@ end
 -- other side's type, exactly as an integer operation needs one width: an integer that is not a literal
 -- needs an explicit conversion, because rounding it may lose a value. IEEE decides the rest, so a
 -- division by zero is an infinity or a NaN rather than a trap and a NaN comparison is false.
-function Eval:floatOp(ctx, op, left, right, leftSpan, rightSpan, span)
+
+-- An F64 operation: known operands fold here, runtime ones become one IR operation over two
+-- materialised operands.
+function Eval:floatOpCPS(machine, ctx, op, left, right, leftSpan, rightSpan, span, k)
     for _, side in ipairs({ { left, leftSpan }, { right, rightSpan } }) do
         local value, where = side[1], side[2]
         if value.ty ~= S.F64 then
@@ -2032,10 +2439,10 @@ function Eval:floatOp(ctx, op, left, right, leftSpan, rightSpan, span)
     end
     if V.isKnown(left) and V.isKnown(right) then
         local a, b = left.n, right.n
-        if op == "+" then return V.f64(a + b) end
-        if op == "-" then return V.f64(a - b) end
-        if op == "*" then return V.f64(a * b) end
-        if op == "/" then return V.f64(a / b) end
+        if op == "+" then return k(machine, V.f64(a + b)) end
+        if op == "-" then return k(machine, V.f64(a - b)) end
+        if op == "*" then return k(machine, V.f64(a * b)) end
+        if op == "/" then return k(machine, V.f64(a / b)) end
         local result
         if op == "==" then result = a == b
         elseif op == "!=" then result = a ~= b
@@ -2043,12 +2450,15 @@ function Eval:floatOp(ctx, op, left, right, leftSpan, rightSpan, span)
         elseif op == "<=" then result = a <= b
         elseif op == ">" then result = a > b
         else result = a >= b end
-        return V.bool(result)
+        return k(machine, V.bool(result))
     end
     local ty = COMPARE[op] and S.Bool or S.F64
-    return V.runtime(ctx.builder:bin(irOp, self:expression(ctx, left), self:expression(ctx, right), ty), ty)
+    return self:expressionCPS(machine, ctx, left, nil, function(m, leftExpr)
+        return self:expressionCPS(m, ctx, right, nil, function(m2, rightExpr)
+            return k(m2, V.runtime(ctx.builder:bin(irOp, leftExpr, rightExpr, ty), ty))
+        end)
+    end)
 end
-
 -- The terminal continuation is `done`, declared with the machine require above.
 
 
@@ -2056,13 +2466,57 @@ end
 -- per session, so a builtin that re-enters evaluation gets a second stack instead of corrupting this
 -- one -- and answers a value. The host frame this costs is one per *boundary*, not one per step, so it
 -- shrinks as the conversion proceeds and disappears with the last unconverted caller.
-function Eval:onMachine(ctx, entry)
+function Eval:drive(ctx, entry)
     local machine = ctx.session.machine
     if not machine then
         machine = Machine.new(ctx.session)
         ctx.session.machine = machine
     end
     return machine:call(entry)
+end
+
+
+-- The module-initialization entry, which the reference interpreter uses. It drives the converted walk
+-- once, so the harness never needs the machine's protocol.
+function Eval:initializeModule(program, top)
+    return self:drive(self:staticFrame(top, nil), function(machine)
+        return self:initializeModuleCPS(machine, program, top, done)
+    end)
+end
+
+-- The export-resolution entry, which the loader uses for one exported item at a time.
+function Eval:resolveExportItem(item, top)
+    return self:drive(self:staticFrame(top, item.span), function(machine)
+        return self:resolveExportItemCPS(machine, item, top, done)
+    end)
+end
+
+-- The compile entry, which the harness and the tests call. It is not called from inside the
+-- evaluator: it starts the machine's loop once and hands back the compilation.
+function Eval:compile(program, loadedTop)
+    return self:drive(self:staticFrame(nil, nil), function(machine)
+        return self:compileCPS(machine, program, loadedTop, done)
+    end)
+end
+
+-- The harness's compile driver: load, initialise, resolve the exports, then build an instance for
+
+-- The harness's entry into a word: `interpret` supplies an exported word with concrete arguments and
+-- gets a value back. It is deliberately *not* one of the scaffold shims -- nothing inside the evaluator
+-- calls it -- so it outlives them, and it is the one place outside the evaluator where the machine's
+-- loop is started.
+-- The harness's other entry: the exported word a name refers to. Like `supplyTop` it exists for
+-- callers outside the evaluator and is not called from inside it.
+function Eval:exportedTop(program, name, top)
+    return self:drive(self:staticFrame(top, nil), function(machine)
+        return self:exportedValueCPS(machine, program, name, top, done)
+    end)
+end
+
+function Eval:supplyTop(ctx, callee, args, span)
+    return self:drive(ctx, function(machine)
+        return self:supplyCPS(machine, ctx, callee, args, span, done)
+    end)
 end
 
 -- Unary (`-x`, `not x`, `~x`). Its only child is the operand, so the CPS shape is one continuation
@@ -2072,50 +2526,77 @@ end
 --
 -- During the migration the child still comes from the direct walker below, which costs host frames for
 -- the operand's own nesting (bounded by the source expression) and none on the machine's path.
+-- A unary operator. The operand is one step, and the three cases that need it as IR each materialise
+-- it in their own continuation, so the operator itself costs a step and no frames.
 function Eval:evalUnary(machine, ctx, expr, k)
-    local value = self:evalExpr(ctx, expr.operand)
-    local op = expr.operator
-    if op == "not" then
-        self:requireType(value, S.Bool, expr.operand.span)
-        if V.tag(value) == "bool" then return k(machine, V.bool(not value.b)) end
-        return k(machine, V.runtime(ctx.builder:un("Not", self:expression(ctx, value), S.Bool), S.Bool))
-    end
-    if value.ty:isF64() then
-        -- Only negation applies to a float; complement and shift are integer operations.
-        if op ~= "-" then
-            D.reject("type-mismatch", "Negation is the only unary operator F64 has, not " .. op,
+    return self:evalExprCPS(machine, ctx, expr.operand, function(m, value)
+        local op = expr.operator
+        if op == "not" then
+            self:requireType(value, S.Bool, expr.operand.span)
+            if V.tag(value) == "bool" then return k(m, V.bool(not value.b)) end
+            return self:expressionCPS(m, ctx, value, nil, function(m2, operand)
+                return k(m2, V.runtime(ctx.builder:un("Not", operand, S.Bool), S.Bool))
+            end)
+        end
+        if value.ty:isF64() then
+            -- Only negation applies to a float; complement and shift are integer operations.
+            if op ~= "-" then
+                D.reject("type-mismatch", "Negation is the only unary operator F64 has, not " .. op,
+                    expr.operand.span)
+            end
+            if V.isKnown(value) then return k(m, V.f64(-value.n)) end
+            return self:expressionCPS(m, ctx, value, nil, function(m2, operand)
+                return k(m2, V.runtime(ctx.builder:un("Neg", operand, S.F64), S.F64))
+            end)
+        end
+        if not value.ty:isInteger() then
+            D.reject("type-mismatch", "Expected an integer but found " .. S.encode(value.ty),
                 expr.operand.span)
         end
-        if V.isKnown(value) then return k(machine, V.f64(-value.n)) end
-        return k(machine, V.runtime(ctx.builder:un("Neg", self:expression(ctx, value), S.F64), S.F64))
-    end
-    if not value.ty:isInteger() then
-        D.reject("type-mismatch", "Expected an integer but found " .. S.encode(value.ty), expr.operand.span)
-    end
-    local ty = value.ty
-    if V.isInteger(value) then
-        if ty:isWide() then
-            local high, low = wordsOf(value)
-            if op == "-" then return k(machine, V.int64(ty, U64Kernel.neg(high, low))) end
-            return k(machine, V.int64(ty, U64Kernel.bnot(high, low)))
+        local ty = value.ty
+        if V.isInteger(value) then
+            if ty:isWide() then
+                local high, low = wordsOf(value)
+                if op == "-" then return k(m, V.int64(ty, U64Kernel.neg(high, low))) end
+                return k(m, V.int64(ty, U64Kernel.bnot(high, low)))
+            end
+            local n = op == "-" and wrap(ty, -value.n) or wrap(ty, bit.bnot(value.n))
+            return k(m, V.int(ty, n))
         end
-        local n = op == "-" and wrap(ty, -value.n) or wrap(ty, bit.bnot(value.n))
-        return k(machine, V.int(ty, n))
-    end
-    return k(machine, V.runtime(ctx.builder:un(op == "-" and "Neg" or "BitNot",
-        self:expression(ctx, value), ty), ty))
+        return self:expressionCPS(m, ctx, value, nil, function(m2, operand)
+            return k(m2, V.runtime(ctx.builder:un(op == "-" and "Neg" or "BitNot", operand, ty), ty))
+        end)
+    end)
 end
-
-function Eval:evalBinary(ctx, expr)
+-- Both operands are evaluated on the machine, so a chain of operators (`a + b + c`) is tail calls.
+-- This is where expression depth stops costing host frames: the nested `evalExprCPS` calls below are
+-- in tail position and the driver reuses the frame.
+function Eval:evalBinaryCPS(machine, ctx, expr, k)
     local op = expr.operator
-    if op == "and" or op == "or" then return self:evalShortCircuit(ctx, expr) end
-    local left = self:evalExpr(ctx, expr.left)
-    local right = self:evalExpr(ctx, expr.right)
-    return self:binaryOp(ctx, op, left, right, expr.left.span, expr.right.span, expr.span)
+    if op == "and" or op == "or" then
+        return self:evalShortCircuit(machine, ctx, expr, k)
+    end
+    return self:evalExprCPS(machine, ctx, expr.left, function(m, left)
+        return self:evalExprCPS(m, ctx, expr.right, function(m2, right)
+            return self:binaryOpCPS(m2, ctx, op, left, right, expr.left.span, expr.right.span,
+                expr.span, k)
+        end)
+    end)
 end
 
 -- One implementation of every binary operator, shared by expressions and compound stores.
-function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
+
+-- Both operands as IR, then one operation. Seven places want exactly this, so it is a method rather
+-- than seven nested continuation pairs.
+function Eval:binaryOperandsCPS(machine, ctx, left, right, irOp, ty, k)
+    return self:expressionCPS(machine, ctx, left, nil, function(m, leftExpr)
+        return self:expressionCPS(m, ctx, right, nil, function(m2, rightExpr)
+            return k(m2, V.runtime(ctx.builder:bin(irOp, leftExpr, rightExpr, ty), ty))
+        end)
+    end)
+end
+
+function Eval:binaryOpCPS(machine, ctx, op, left, right, leftSpan, rightSpan, span, k)
     if left.ty:isPtr() or right.ty:isPtr() then
         -- Two addresses of one element type compare by address. A pointer has no order and no integer
         -- value, so nothing else about it is offered.
@@ -2126,38 +2607,35 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
         if not ctx.residual then
             D.reject("runtime-in-normalization", "A pointer comparison needs runtime code", span)
         end
-        return V.runtime(ctx.builder:bin(COMPARE[op], self:expression(ctx, left),
-            self:expression(ctx, right), S.Bool), S.Bool)
+        return self:binaryOperandsCPS(machine, ctx, left, right, COMPARE[op], S.Bool, k)
     end
     if left.ty:isF64() or right.ty:isF64() then
-        return self:floatOp(ctx, op, left, right, leftSpan, rightSpan, span)
+        return self:floatOpCPS(machine, ctx, op, left, right, leftSpan, rightSpan, span, k)
     end
     leftSpan, rightSpan, span = leftSpan or ctx.span, rightSpan or ctx.span, span or ctx.span
     if (op == "==" or op == "!=") and left.ty:isString() and right.ty:isString() then
         -- Strings compare by content: a byte sequence has no identity a program can observe, so
         -- pointer equality would be a surprising answer rather than the useful one.
         if V.tag(left) == "string" and V.tag(right) == "string" then
-            return V.bool((left.bytes == right.bytes) == (op == "=="))
+            return k(machine, V.bool((left.bytes == right.bytes) == (op == "==")))
         end
         if not ctx.residual then
             D.reject("runtime-in-normalization", "A run-time string comparison needs runtime code", span)
         end
-        return V.runtime(ctx.builder:bin(COMPARE[op], self:expression(ctx, left), self:expression(ctx, right),
-            S.Bool), S.Bool)
+        return self:binaryOperandsCPS(machine, ctx, left, right, COMPARE[op], S.Bool, k)
     end
     if (op == "==" or op == "!=") and left.ty:isBool() and right.ty:isBool() then
         -- A Bool compares by value. The operation is not ordered: section 7 offers Bool only
         -- equality, exactly as it offers only equality for Unit.
         if V.isKnown(left) and V.isKnown(right) then
-            return V.bool((left.b == right.b) == (op == "=="))
+            return k(machine, V.bool((left.b == right.b) == (op == "==")))
         end
-        return V.runtime(ctx.builder:bin(COMPARE[op], self:expression(ctx, left),
-            self:expression(ctx, right), S.Bool), S.Bool)
+        return self:binaryOperandsCPS(machine, ctx, left, right, COMPARE[op], S.Bool, k)
     end
     if (op == "==" or op == "!=") and left.ty:isUnit() and right.ty:isUnit() then
         -- Unit has one value and no runtime representation, so both operands already ran for their
         -- effects and the answer is known: Unit equals Unit.
-        return V.bool(op == "==")
+        return k(machine, V.bool(op == "=="))
     end
     if COMPARE[op] then
         -- A comparison widens both sides, which is always safe and never narrows.
@@ -2191,10 +2669,9 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
             elseif op == "<=" then result = a <= b
             elseif op == ">" then result = a > b
             else result = a >= b end
-            return V.bool(result)
+            return k(machine, V.bool(result))
         end
-        return V.runtime(ctx.builder:bin(COMPARE[op], self:expression(ctx, left), self:expression(ctx, right), S.Bool),
-            S.Bool)
+        return self:binaryOperandsCPS(machine, ctx, left, right, COMPARE[op], S.Bool, k)
     end
     local irOp = ARITH[op]
     if not irOp then D.bug("operator", "Unknown binary operator " .. tostring(op)) end
@@ -2256,7 +2733,7 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
         elseif op == "&" then high, low = U64Kernel.band(ah, al, bh, bl)
         elseif op == "|" then high, low = U64Kernel.bor(ah, al, bh, bl)
         else high, low = U64Kernel.bxor(ah, al, bh, bl) end
-        return V.int64(ty, high, low)
+        return k(machine, V.int64(ty, high, low))
     end
     if V.isInteger(left) and V.isInteger(right) then
         local x, y = left.n, right.n
@@ -2279,136 +2756,201 @@ function Eval:binaryOp(ctx, op, left, right, leftSpan, rightSpan, span)
         elseif op == "&" then result = wrap(ty, bit.band(x, y))
         elseif op == "|" then result = wrap(ty, bit.bor(x, y))
         else result = wrap(ty, bit.bxor(x, y)) end
-        return V.int(ty, result)
+        return k(machine, V.int(ty, result))
     end
     local builder = ctx.builder
-    local leftExpr, rightExpr = self:expression(ctx, left), self:expression(ctx, right)
-    -- A signed power with a negative exponent has no result, so a run-time one is checked first.
-    if op == "^" and ty:isSigned() then
-        if V.isKnown(right) and right.n < 0 then
-            D.reject("numeric-range", "A signed power needs a power that is not negative", rightSpan)
-        end
-        if not V.isKnown(right) then
-            builder:emit(ctx.body, Ir.Trap(builder:bin("Lt", rightExpr,
-                builder:int(right.ty, 0), S.Bool), "numeric-range"))
-        end
-    end
-    if (op == "/" or op == "%") and not V.isInteger(right) then
-        builder:trap(ctx.body, builder:bin("Eq", rightExpr, builder:u32(0), S.Bool), "division-zero")
-    end
-    return V.runtime(builder:bin(irOp, leftExpr, rightExpr, ty), ty)
+    return self:expressionCPS(machine, ctx, left, nil, function(m2, leftExpr)
+        return self:expressionCPS(m2, ctx, right, nil, function(m3, rightExpr)
+            -- A signed power with a negative exponent has no result, so a run-time one is checked first.
+            if op == "^" and ty:isSigned() then
+                if V.isKnown(right) and right.n < 0 then
+                    D.reject("numeric-range", "A signed power needs a power that is not negative", rightSpan)
+                end
+                if not V.isKnown(right) then
+                    builder:emit(ctx.body, Ir.Trap(builder:bin("Lt", rightExpr,
+                        builder:int(right.ty, 0), S.Bool), "numeric-range"))
+                end
+            end
+            if (op == "/" or op == "%") and not V.isInteger(right) then
+                builder:trap(ctx.body, builder:bin("Eq", rightExpr, builder:u32(0), S.Bool),
+                    "division-zero")
+            end
+            return k(m3, V.runtime(builder:bin(irOp, leftExpr, rightExpr, ty), ty))
+        end)
+    end)
 end
 
-function Eval:evalShortCircuit(ctx, expr)
-    local left = self:evalExpr(ctx, expr.left)
-    self:requireType(left, S.Bool, expr.left.span)
-    local isOr = expr.operator == "or"
-    if V.tag(left) == "bool" then
-        local short = isOr and left.b or (not isOr and not left.b)
-        if short then return V.bool(isOr) end
-        local right = self:evalExpr(ctx, expr.right)
-        self:requireType(right, S.Bool, expr.right.span)
-        return right
-    end
-    local test = self:expression(ctx, left)
-    local yesList, noList = {}, {}
-    local yesCtx = ctx:arm(yesList)
-    local yesValue = self:evalExpr(yesCtx, expr.right)
-    self:requireType(yesValue, S.Bool, expr.right.span)
-    local builder = ctx.builder
-    local storage = builder:var(ctx.body, S.Bool, nil)
-    local place = Ir.Local(storage)
-    builder:store(yesList, place, self:expression(yesCtx, yesValue))
-    builder:store(noList, place, builder:bool(isOr))
-    builder:emit(ctx.body, Ir.If(test, S.list(yesList), S.list(noList)))
-    return V.runtime(builder:ref(builder:read(ctx.body, S.Bool, place), S.Bool), S.Bool)
+-- `a and b` / `a or b`: the left side decides whether the right side runs at all, so each answer is
+-- its own continuation. The right side of the residual form is evaluated under the arm's frame, which
+-- is the one place a continuation has to carry a *different* ctx (`yesCtx`) than its caller's.
+-- `a and b` / `a or b`: the left side decides whether the right side runs at all, so each answer is
+-- its own continuation. The right side of the residual form is evaluated under the arm's frame, which
+-- is the one place a continuation has to carry a *different* ctx (`yesCtx`) than its caller's.
+function Eval:evalShortCircuit(machine, ctx, expr, k)
+    return self:evalExprCPS(machine, ctx, expr.left, function(m, left)
+        self:requireType(left, S.Bool, expr.left.span)
+        local isOr = expr.operator == "or"
+        if V.tag(left) == "bool" then
+            local short = isOr and left.b or (not isOr and not left.b)
+            if short then return k(m, V.bool(isOr)) end
+            return self:evalExprCPS(m, ctx, expr.right, function(m2, right)
+                self:requireType(right, S.Bool, expr.right.span)
+                return k(m2, right)
+            end)
+        end
+        return self:expressionCPS(m, ctx, left, nil, function(m2, test)
+            local yesList, noList = {}, {}
+            local yesCtx = ctx:arm(yesList)
+            return self:evalExprCPS(m2, yesCtx, expr.right, function(m3, yesValue)
+                self:requireType(yesValue, S.Bool, expr.right.span)
+                local builder = ctx.builder
+                local storage = builder:var(ctx.body, S.Bool, nil)
+                local place = Ir.Local(storage)
+                return self:expressionCPS(m3, yesCtx, yesValue, nil, function(m4, yesExpr)
+                    builder:store(yesList, place, yesExpr)
+                    builder:store(noList, place, builder:bool(isOr))
+                    builder:emit(ctx.body, Ir.If(test, S.list(yesList), S.list(noList)))
+                    return k(m4, V.runtime(builder:ref(builder:read(ctx.body, S.Bool, place), S.Bool),
+                        S.Bool))
+                end)
+            end)
+        end)
+    end)
 end
-
 -- Evaluates an expression in an expected-signature position. Only a lambda (or a conditional
 -- choosing between lambdas) consumes the expectation; anything else evaluates normally.
-function Eval:evalExpected(ctx, expr, expected)
-    if expected == nil then return self:evalExpr(ctx, expr) end
-    if expr.kind == "Lambda" then return self:evalLambda(ctx, expr, expected) end
-    if expr.kind == "ArrayExpr" then return self:evalArray(ctx, expr, expected) end
-    if expr.kind == "Condition" then return self:evalCondition(ctx, expr, expected) end
-    return self:evalExpr(ctx, expr)
+
+-- Evaluates an expression in an expected-signature position. Every arm is a tail call into a converted
+-- method, so the expectation costs no frame of its own: this is the router's expectation-aware twin.
+function Eval:evalExpectedCPS(machine, ctx, expr, expected, k)
+    if expected == nil then return self:evalExprCPS(machine, ctx, expr, k) end
+    if expr.kind == "Lambda" then return self:evalLambdaCPS(machine, ctx, expr, expected, k) end
+    if expr.kind == "ArrayExpr" then return self:evalArrayCPS(machine, ctx, expr, expected, k) end
+    if expr.kind == "Condition" then return self:evalConditionCPS(machine, ctx, expr, expected, k) end
+    return self:evalExprCPS(machine, ctx, expr, k)
 end
 
-function Eval:evalCondition(ctx, expr, expected)
+
+-- `if then else` as an expression. The test is one step on the machine; what follows stays in one
+-- frame because the arms are `evalExpected` (not yet converted), and every terminal answer goes
+-- through `k` so the caller is not made to return through this frame.
+function Eval:evalConditionCPS(machine, ctx, expr, expected, k)
     -- The test is not a tail position; both arms are.
     local tail = ctx.tail
     ctx.tail = false
-    local test = self:evalExpr(ctx, expr.test)
-    self:requireType(test, S.Bool, expr.test.span)
-    if V.tag(test) == "bool" then
-        return self:evalExpected(ctx, test.b and expr.yes or expr.no, expected)
-    end
-    local builder = ctx.builder
-    local testExpr = self:expression(ctx, test)
-    local yesList, noList = {}, {}
-    -- Both arms are tail positions, so each arm context inherits the flag.
-    ctx.tail = tail
-    local yesCtx, noCtx = ctx:arm(yesList), ctx:arm(noList)
-    ctx.tail = false
-    local yesValue = self:evalExpected(yesCtx, expr.yes, expected)
-    local yesTerminated = yesCtx.terminated or false
-    local noValue = self:evalExpected(noCtx, expr.no, expected)
-    local noTerminated = noCtx.terminated or false
-    -- An arm that transfers control (a tail back edge) never reaches the continuation.
-    if yesTerminated and noTerminated then
-        ctx.terminated = true
-        return V.unit()
-    end
-    if not yesTerminated and not noTerminated then
-        -- Two callable arms whose types differ join into one tagged callable, unless they are the
-        -- same code identity, in which case their callable type already agrees.
-        local yesCallable, noCallable = self:isCallableValue(yesValue), self:isCallableValue(noValue)
-        local sameCallable = yesCallable and noCallable and yesValue.ty ~= nil and yesValue.ty == noValue.ty
-        if yesCallable and noCallable and not sameCallable then
-            local _, joinedYes, joinedNo = self:joinCallables(yesValue, noValue, expr.span)
-            yesValue, noValue = joinedYes, joinedNo
-        elseif (yesCallable or noCallable) and yesValue.ty ~= noValue.ty then
-            local other = yesCallable and noValue or yesValue
-            D.reject("branch-result", "One arm is a callable and the other is "
-                .. (other.ty and S.encode(other.ty) or "a bare word with no callable type"), expr.span)
+    return self:evalExprCPS(machine, ctx, expr.test, function(m, test)
+        self:requireType(test, S.Bool, expr.test.span)
+        if V.tag(test) == "bool" then
+            return self:evalExpectedCPS(m, ctx, test.b and expr.yes or expr.no, expected, k)
         end
-        if yesValue.ty ~= noValue.ty then
-            D.reject("branch-result", "Conditional arms have different types: "
-                .. S.encode(yesValue.ty) .. " and " .. S.encode(noValue.ty), expr.span)
-        end
-    end
-    -- When both continuing arms agree on one known scalar, the value is that scalar whatever the
-    -- test. The arms still run for their effects, but there is no join slot to allocate and no read
-    -- to copy back out.
-    if not yesTerminated and not noTerminated and self:sameKnownScalar(yesValue, noValue) then
-        -- The test expression is pure, so an arm list that is empty on both sides has no effect to
-        -- keep: there is no `If` to emit at all.
-        if #yesList > 0 or #noList > 0 then
-            builder:emit(ctx.body, Ir.If(testExpr, S.list(yesList), S.list(noList)))
-        end
-        return yesValue
-    end
-    local ty = yesTerminated and noValue.ty or yesValue.ty
-    local storage = builder:var(ctx.body, ty, nil)
-    local place = Ir.Local(storage)
-    -- The arm's own statements must receive any reads materialising its result: an aggregate
-    -- result is canonicalised into reads of the storage it was built into, which belongs to the
-    -- arm, not to the continuation.
-    if not yesTerminated then builder:store(yesList, place, self:expression(yesCtx, yesValue)) end
-    if not noTerminated then builder:store(noList, place, self:expression(noCtx, noValue)) end
-    builder:emit(ctx.body, Ir.If(testExpr, S.list(yesList), S.list(noList)))
-    return V.runtime(builder:ref(builder:read(ctx.body, ty, place), ty), ty)
+        local builder = ctx.builder
+        return self:expressionCPS(m, ctx, test, nil, function(m2, testExpr)
+            local yesList, noList = {}, {}
+            -- Both arms are tail positions, so each arm context inherits the flag.
+            ctx.tail = tail
+            local yesCtx, noCtx = ctx:arm(yesList), ctx:arm(noList)
+            ctx.tail = false
+            return self:evalExpectedCPS(m2, yesCtx, expr.yes, expected, function(m3, yesValue)
+                local yesTerminated = yesCtx.terminated or false
+                return self:evalExpectedCPS(m3, noCtx, expr.no, expected, function(m4, noValue)
+                    local noTerminated = noCtx.terminated or false
+                    return self:evalConditionJoin(m4, ctx, expr, yesCtx, noCtx, yesValue, yesTerminated,
+                        noValue, noTerminated, yesList, noList, testExpr, builder, k)
+                end)
+            end)
+        end)
+    end)
 end
 
+-- What a conditional does once both continuing arms have their values: join callable arms, compare the
+-- result types, and either use a known scalar or allocate the join slot. It is a method of its own
+-- because the two arm evaluations are continuations, and a continuation cannot be re-indented away.
+-- What a conditional does once both continuing arms have their values: join callable arms, compare the
+-- result types, and either use a known scalar or allocate the join slot. It is a method of its own
+-- because the two arm evaluations are continuations, and a continuation cannot be re-indented away.
+-- What a conditional does once both continuing arms have their values: join callable arms, compare the
+-- result types, and either use a known scalar or allocate the join slot. It is a method of its own
+-- because the two arm evaluations are continuations, and a continuation cannot be re-indented away.
+function Eval:evalConditionJoin(m, ctx, expr, yesCtx, noCtx, yesValue, yesTerminated, noValue,
+        noTerminated, yesList, noList, testExpr, builder, k)
+    if yesTerminated and noTerminated then
+        ctx.terminated = true
+        return k(m, V.unit())
+    end
+    -- The join slot: one storage cell, written by whichever arm runs. The arm's own statements must
+    -- receive any reads materialising its result, which belongs to the arm, not to the continuation.
+    local function joined(m2)
+        local ty = yesTerminated and noValue.ty or yesValue.ty
+        local storage = builder:var(ctx.body, ty, nil)
+        local place = Ir.Local(storage)
+        local function emit(m3)
+            builder:emit(ctx.body, Ir.If(testExpr, S.list(yesList), S.list(noList)))
+            return k(m3, V.runtime(builder:ref(builder:read(ctx.body, ty, place), ty), ty))
+        end
+        local function second(m3)
+            if noTerminated then return emit(m3) end
+            return self:expressionCPS(m3, noCtx, noValue, nil, function(m4, noExpr)
+                builder:store(noList, place, noExpr)
+                return emit(m4)
+            end)
+        end
+        if yesTerminated then return second(m2) end
+        return self:expressionCPS(m2, yesCtx, yesValue, nil, function(m3, yesExpr)
+            builder:store(yesList, place, yesExpr)
+            return second(m3)
+        end)
+    end
+    local function afterChecks(m2)
+        -- When both continuing arms agree on one known scalar, the value is that scalar whatever the
+        -- test. The arms still run for their effects, but there is no join slot to allocate and no read
+        -- to copy back out.
+        if not yesTerminated and not noTerminated and self:sameKnownScalar(yesValue, noValue) then
+            -- The test expression is pure, so an arm list that is empty on both sides has no effect to
+            -- keep: there is no `If` to emit at all.
+            if #yesList > 0 or #noList > 0 then
+                builder:emit(ctx.body, Ir.If(testExpr, S.list(yesList), S.list(noList)))
+            end
+            return k(m2, yesValue)
+        end
+        return joined(m2)
+    end
+    -- An arm that transfers control (a tail back edge) never reaches the continuation, so with one such
+    -- arm there is nothing to compare: the other arm's value is the result.
+    if yesTerminated or noTerminated then return afterChecks(m) end
+    -- Two callable arms whose types differ join into one tagged callable, unless they are the same code
+    -- identity, in which case their callable type already agrees.
+    local yesCallable, noCallable = self:isCallableValue(yesValue), self:isCallableValue(noValue)
+    local sameCallable = yesCallable and noCallable and yesValue.ty ~= nil and yesValue.ty == noValue.ty
+    if yesCallable and noCallable and not sameCallable then
+        return self:joinCallablesCPS(m, yesValue, noValue, expr.span, function(m2, _, joinedYes, joinedNo)
+            yesValue, noValue = joinedYes, joinedNo
+            return afterChecks(m2)
+        end)
+    end
+    if (yesCallable or noCallable) and yesValue.ty ~= noValue.ty then
+        local other = yesCallable and noValue or yesValue
+        D.reject("branch-result", "One arm is a callable and the other is "
+            .. (other.ty and S.encode(other.ty) or "a bare word with no callable type"), expr.span)
+    end
+    if yesValue.ty ~= noValue.ty then
+        D.reject("branch-result", "Conditional arms have different types: "
+            .. S.encode(yesValue.ty) .. " and " .. S.encode(noValue.ty), expr.span)
+    end
+    return afterChecks(m)
+end
 -- Schemas and records -------------------------------------------------------------------------
 
 -- A schema literal: data fields, methods, and no bound fields yet.
-function Eval:evalSchema(ctx, expr)
-    return self:newSchema(ctx, expr, nil, nil, nil)
+-- A schema expression is one call: `newSchema` builds it, and the router reaches this on the machine.
+function Eval:evalSchemaCPS(machine, ctx, expr, k)
+    return self:newSchemaCPS(machine, ctx, expr, nil, nil, nil, k)
 end
 
 -- Builds a schema, or a specialised copy of `base` with extra static (readonly) fields.
-function Eval:newSchema(ctx, expr, statics, readonly, base)
+
+-- A schema literal: the members are walked in written order, and a field's type is resolved on the
+-- type path, which is what lets a schema mention a cell its own definition reserved.
+function Eval:newSchemaCPS(machine, ctx, expr, statics, readonly, base, k)
     self.nextDef = self.nextDef + 1
     local def = {
         id = self.nextDef, span = expr.span, node = expr,
@@ -2420,12 +2962,31 @@ function Eval:newSchema(ctx, expr, statics, readonly, base)
         for _, name in ipairs(base.fieldOrder) do def.fieldOrder[#def.fieldOrder + 1] = name end
         for name, method in pairs(base.methods) do def.methods[name] = method end
         def.type, def.fieldNames = base.type, base.fieldNames
-        return V.schema(def)
+        return k(machine, V.schema(def))
     end
-    for _, member in ipairs(expr.members) do
-        if member.kind == "FieldMember" then
-            local name = member.name.text
-            local ty = self:typeOf(member.type, ctx.scope, member.span)
+    local function finish()
+        local names = {}
+        for name in pairs(def.fields) do names[#names + 1] = name end
+        local fields = {}
+        for _, name in ipairs(names) do fields[name] = def.fields[name] end
+        def.type = S.record(fields)
+        def.fieldNames = names
+        return k(machine, V.schema(def))
+    end
+    local function memberAt(index)
+        if index > #expr.members then return finish() end
+        local member = expr.members[index]
+        if member.kind ~= "FieldMember" then
+            local name = member.def.name.text
+            if def.fields[name] or def.methods[name] then
+                D.reject("duplicate", "Duplicate schema member " .. name, member.def.name.span)
+            end
+            local method = self:define(member.def, ctx.scope, def)
+            def.methods[name] = method
+            return memberAt(index + 1)
+        end
+        local name = member.name.text
+        return self:typeOfCPS(machine, member.type, ctx.scope, member.span, function(m, ty)
             -- A field declared as a signature is represented by the borrowed callable ABI: the
             -- field holds an invocation pointer and an environment pointer, not callable code.
             if ty:isSig() then ty = S.view(ty) end
@@ -2434,207 +2995,237 @@ function Eval:newSchema(ctx, expr, statics, readonly, base)
             end
             def.fields[name] = ty
             def.fieldOrder[#def.fieldOrder + 1] = name
-        else
-            local name = member.def.name.text
-            if def.fields[name] or def.methods[name] then
-                D.reject("duplicate", "Duplicate schema member " .. name, member.def.name.span)
-            end
-            local method = self:define(member.def, ctx.scope, def)
-            def.methods[name] = method
-        end
+            return memberAt(index + 1)
+        end)
     end
-    local names = {}
-    for name in pairs(def.fields) do names[#names + 1] = name end
-    local fields = {}
-    for _, name in ipairs(names) do fields[name] = def.fields[name] end
-    def.type = S.record(fields)
-    def.fieldNames = names
-    return V.schema(def)
+    return memberAt(1)
 end
-
 -- `Schema { field = value }`: either a partial (static) supply or a construction.
-function Eval:evalSupply(ctx, expr)
+
+-- Keyed supply `S { ... }`: a variant payload, a match, a keyed callable, or a schema instance. The
+-- two field walks are local drivers answering through `k`; `makeVariant`, `constructRecord`, `newSchema`
+-- and `applyKeyed` are still direct, so each is one answer through `k`.
+function Eval:evalSupplyCPS(machine, ctx, expr, k)
     -- The tail position belongs to a keyed invocation, not to the base or the supplied values.
     local tail = ctx.tail
     ctx.tail = false
-    local base = self:evalExpr(ctx, expr.schema)
-    if V.tag(base) == "ctor" then
-        -- A sum alternative with a record payload is built like a record, then tagged.
-        if #expr.fields == 0 and base.caseType == S.Unit then
-            return self:makeVariant(ctx, base, nil, expr.span)
-        end
-        if not base.caseType:isRecord() then
-            D.reject("variant-payload",
-                "Alternative " .. base.case .. " does not take a record; apply it to one value instead",
-                expr.span)
-        end
-        local values = {}
-        for _, field in ipairs(expr.fields) do
-            local name = field.name.text
-            if not S.field(base.caseType, name) then
-                D.reject("unknown-member", "Alternative " .. base.case .. " has no field " .. name,
-                    field.name.span)
+    return self:evalExprCPS(machine, ctx, expr.schema, function(m, base)
+        if V.tag(base) == "ctor" then
+            -- A sum alternative with a record payload is built like a record, then tagged.
+            if #expr.fields == 0 and base.caseType == S.Unit then
+                return self:makeVariantCPS(m, ctx, base, nil, expr.span, k)
             end
-            if values[name] ~= nil then
-                D.reject("duplicate", "Field " .. name .. " is supplied twice", field.name.span)
+            if not base.caseType:isRecord() then
+                D.reject("variant-payload",
+                    "Alternative " .. base.case .. " does not take a record; apply it to one value instead",
+                    expr.span)
             end
-            values[name] = self:evalExpr(ctx, field.value)
-        end
-        for _, field in ipairs(base.caseType.fields) do
-            if values[field.name] == nil then
-                D.reject("variant-payload", "Alternative " .. base.case .. " is missing field "
-                    .. field.name, expr.span)
+            local values = {}
+            local function payload(index)
+                if index > #expr.fields then
+                    for _, field in ipairs(base.caseType.fields) do
+                        if values[field.name] == nil then
+                            D.reject("variant-payload", "Alternative " .. base.case .. " is missing field "
+                                .. field.name, expr.span)
+                        end
+                    end
+                    return self:constructRecordCPS(machine, ctx, base.caseType, values, nil,
+                        function(m, record)
+                            return self:makeVariantCPS(m, ctx, base, record, expr.span, k)
+                        end)
+                end
+                local field = expr.fields[index]
+                local name = field.name.text
+                if not S.field(base.caseType, name) then
+                    D.reject("unknown-member", "Alternative " .. base.case .. " has no field " .. name,
+                        field.name.span)
+                end
+                if values[name] ~= nil then
+                    D.reject("duplicate", "Field " .. name .. " is supplied twice", field.name.span)
+                end
+                return self:evalExprCPS(machine, ctx, field.value, function(mm, value)
+                    values[name] = value
+                    return payload(index + 1)
+                end)
             end
+            return payload(1)
         end
-        return self:makeVariant(ctx, base, self:constructRecord(ctx, base.caseType, values, nil), expr.span)
-    end
-    if V.tag(base) == "variant" or (V.tag(base) == "runtime" and base.ty:isSum()) then
-        return self:evalMatch(ctx, base, expr, nil)
-    end
-    if V.tag(base) == "word" and base.def.keyed then
-        return self:applyKeyed(ctx, base, expr.fields, expr.span, tail)
-    end
-    if V.tag(base) ~= "schema" then
-        D.reject("schema-required", "Keyed supply needs a schema on the left", expr.schema.span)
-    end
-    local def = base.def
-    local supplied = {}
-    for _, field in ipairs(expr.fields) do
-        local name = field.name.text
-        if not def.fields[name] then
-            D.reject("unknown-member", "Schema has no field " .. name, field.name.span)
+        if V.tag(base) == "variant" or (V.tag(base) == "runtime" and base.ty:isSum()) then
+            return self:evalMatchCPS(machine, ctx, base, expr, nil, k)
         end
-        if supplied[name] ~= nil or def.statics[name] ~= nil then
-            D.reject("duplicate", "Field " .. name .. " is supplied twice", field.name.span)
+        if V.tag(base) == "word" and base.def.keyed then
+            return self:applyKeyedCPS(m, ctx, base, expr.fields, expr.span, tail, k)
         end
-        supplied[name] = self:evalExpr(ctx, field.value)
-    end
+        if V.tag(base) ~= "schema" then
+            D.reject("schema-required", "Keyed supply needs a schema on the left", expr.schema.span)
+        end
+        local def = base.def
+        local supplied = {}
+        local function afterFields()
+            -- A field is still runtime if the base did not bind it statically.
+            local missing = {}
+            for _, name in ipairs(def.fieldOrder) do
+                if supplied[name] == nil and def.statics[name] == nil then missing[#missing + 1] = name end
+            end
+            if #missing > 0 then
+                -- Partial supply: every supplied field must be static, and becomes readonly.
+                local statics, readonly = {}, {}
+                for name, value in pairs(def.statics) do statics[name], readonly[name] = value, true end
+                for name, value in pairs(supplied) do
+                    if not V.isStatic(value) then
+                        D.reject("static-required",
+                            "Partial schema supply needs a static value for field " .. name, expr.span)
+                    end
+                    statics[name], readonly[name] = value, true
+                end
+                return self:newSchemaCPS(machine, ctx, def.node, statics, readonly, def, k)
+            end
 
-    -- A field is still runtime if the base did not bind it statically.
-    local missing = {}
-    for _, name in ipairs(def.fieldOrder) do
-        if supplied[name] == nil and def.statics[name] == nil then missing[#missing + 1] = name end
-    end
-    if #missing > 0 then
-        -- Partial supply: every supplied field must be static, and becomes readonly.
-        local statics, readonly = {}, {}
-        for name, value in pairs(def.statics) do statics[name], readonly[name] = value, true end
-        for name, value in pairs(supplied) do
-            if not V.isStatic(value) then
-                D.reject("static-required",
-                    "Partial schema supply needs a static value for field " .. name, expr.span)
+            -- Saturated construction: the instance owns mutable storage for every data field.
+            local values = {}
+            for name, value in pairs(def.statics) do values[name] = value end
+            for name, value in pairs(supplied) do values[name] = value end
+            for _, name in ipairs(def.fieldOrder) do
+                if values[name] == nil then D.bug("schema-fields", "A data field was not supplied") end
             end
-            statics[name], readonly[name] = value, true
+            local ty = def.type
+            if not ctx.residual then
+                -- Static evaluation builds a concrete record; it is not runtime storage.
+                local fields = {}
+                for _, name in ipairs(def.fieldNames) do fields[name] = values[name] end
+                return k(machine, V.record(ty, fields, def))
+            end
+            return self:constructRecordCPS(machine, ctx, ty, values, def, k)
         end
-        return self:newSchema(ctx, def.node, statics, readonly, def)
-    end
-
-    -- Saturated construction: the instance owns mutable storage for every data field.
-    local values = {}
-    for name, value in pairs(def.statics) do values[name] = value end
-    for name, value in pairs(supplied) do values[name] = value end
-    for _, name in ipairs(def.fieldOrder) do
-        if values[name] == nil then D.bug("schema-fields", "A data field was not supplied") end
-    end
-    local ty = def.type
-    if not ctx.residual then
-        -- Static evaluation builds a concrete record; it is not runtime storage.
-        local fields = {}
-        for _, name in ipairs(def.fieldNames) do fields[name] = values[name] end
-        return V.record(ty, fields, def)
-    end
-    return self:constructRecord(ctx, ty, values, def)
+        -- The supplied fields are evaluated in written order, one CPS step each, and the rest of the
+        -- body runs once they are all in -- which is why the terminal branch calls it.
+        local function field(index)
+            if index > #expr.fields then return afterFields() end
+            local entry = expr.fields[index]
+            local name = entry.name.text
+            if not def.fields[name] then
+                D.reject("unknown-member", "Schema has no field " .. name, entry.name.span)
+            end
+            if supplied[name] ~= nil or def.statics[name] ~= nil then
+                D.reject("duplicate", "Field " .. name .. " is supplied twice", entry.name.span)
+            end
+            return self:evalExprCPS(machine, ctx, entry.value, function(mm, value)
+                supplied[name] = value
+                return field(index + 1)
+            end)
+        end
+        return field(1)
+    end)
 end
 
 -- Builds a record value of `ty` from a field-name keyed supply. `def` supplies methods and static
 -- bindings when the record came from a source schema; it is absent for a sum alternative.
-function Eval:constructRecord(ctx, ty, values, def)
+
+-- A record built from a field-name keyed supply.
+-- A record built from a field-name keyed supply.
+function Eval:constructRecordCPS(machine, ctx, ty, values, def, k)
     if not ctx.residual then
         local fields = {}
         for _, name in ipairs(S.fieldNames(ty)) do fields[name] = values[name] or V.unit() end
-        return V.record(ty, fields, def)
+        return k(machine, V.record(ty, fields, def))
     end
     local exprs, borrowed = {}, false
-    for index, field in ipairs(ty.fields) do
+    local function fieldAt(index)
+        if index > #ty.fields then
+            -- The Make is the value until a place is demanded (a field store, a reference, or a borrowed
+            -- receiver). `body` is where that spill goes, so a demand from inside an arm still names
+            -- storage the outer scope remembers. No storage exists until something needs an address.
+            return k(machine, V.object(ty, nil, def, borrowed, nil, ctx.builder:make(ty, exprs), ctx.body))
+        end
+        local field = ty.fields[index]
         local fieldValue = values[field.name] or V.unit()
-        exprs[index] = self:expression(ctx, fieldValue, field.type)
         -- A signature-typed field is a view whose environment points at a local adapter, so an
         -- instance holding one is itself tied to this activation.
         if self:isBorrowed(fieldValue) or field.type:isView() then borrowed = true end
+        return self:expressionCPS(machine, ctx, fieldValue, field.type, function(m, expr)
+            exprs[index] = expr
+            return fieldAt(index + 1)
+        end)
     end
-    -- The Make is the value until a place is demanded (a field store, a reference, or a borrowed
-    -- receiver). `body` is where that spill goes, so a demand from inside an arm still names storage
-    -- the outer scope remembers. No storage exists until something needs an address.
-    return V.object(ty, nil, def, borrowed, nil, ctx.builder:make(ty, exprs), ctx.body)
+    return fieldAt(1)
 end
-
-function Eval:evalFieldSelect(ctx, expr)
-    local base = self:evalExpr(ctx, expr.base)
-    local name = expr.field.text
-    -- Selection through a reference selects from the instance it names, so the reference is read as
-    -- that instance and the ordinary member rules apply.
-    base = self:placeObject(base) or base
-    if base.ty and base.ty:isSlice() and name == "length" then
-        local known = self:sliceCount(base)
-        if known then return V.u32(known) end
-        if not ctx.residual then
-            D.reject("runtime-in-normalization", "A runtime slice length needs runtime code", expr.span)
+-- Field selection: the base is the one child, so its evaluation is a continuation and every answer
+-- below goes through `k`. The member rules themselves are unchanged and still run inline.
+function Eval:evalFieldSelectCPS(machine, ctx, expr, k)
+    return self:evalExprCPS(machine, ctx, expr.base, function(m, value)
+        local name = expr.field.text
+        -- Selection through a reference selects from the instance it names, so the reference is read
+        -- as that instance and the ordinary member rules apply.
+        local base = self:placeObject(value) or value
+        if base.ty and base.ty:isSlice() and name == "length" then
+            local known = self:sliceCount(base)
+            if known then return k(m, V.u32(known)) end
+            if not ctx.residual then
+                D.reject("runtime-in-normalization", "A runtime slice length needs runtime code", expr.span)
+            end
+            return self:expressionCPS(m, ctx, base, base.ty, function(m2, data)
+                return k(m2, V.runtime(ctx.builder:sliceLength(data, S.U32), S.U32))
+            end)
         end
-        return V.runtime(ctx.builder:sliceLength(self:expression(ctx, base, base.ty), S.U32), S.U32)
-    end
-    local tag = V.tag(base)
-    if tag == "object" then
-        local def = base.schema
-        if def.methods[name] then return V.method(def.methods[name], base) end
-        if def.fields[name] then return self:readFieldValue(ctx, self:fieldSlot(def, base, name), expr.span) end
-        D.reject("unknown-member", "Value has no member " .. name, expr.field.span)
-    elseif tag == "record" then
-        if base.schema and base.schema.methods[name] then
-            return V.method(base.schema.methods[name], base)
+        local tag = V.tag(base)
+        if tag == "object" then
+            local def = base.schema
+            if def.methods[name] then return k(m, V.method(def.methods[name], base)) end
+            if def.fields[name] then
+                return k(m, self:readFieldValue(ctx, self:fieldSlot(def, base, name), expr.span))
+            end
+            D.reject("unknown-member", "Value has no member " .. name, expr.field.span)
+        elseif tag == "record" then
+            if base.schema and base.schema.methods[name] then
+                return k(m, V.method(base.schema.methods[name], base))
+            end
+            if base.fields[name] ~= nil then return k(m, base.fields[name]) end
+            D.reject("unknown-member", "Record has no field " .. name, expr.field.span)
+        elseif tag == "schema" then
+            if base.def.methods[name] then return k(m, V.method(base.def.methods[name], nil)) end
+            D.reject("unknown-member", "Schema has no member " .. name, expr.field.span)
+        elseif tag == "namespace" then
+            local member = base.members[name]
+            if not member then
+                D.reject("unknown-member", "Module " .. tostring(base.module) .. " does not export " .. name,
+                    expr.field.span)
+            end
+            return k(m, member)
+        elseif tag == "type" and base.value:isSum() then
+            -- A sum type's member names a constructor for one alternative.
+            local caseType = S.caseOf(base.value, name)
+            if not caseType then
+                D.reject("unknown-member", "Sum type has no alternative " .. name, expr.field.span)
+            end
+            return k(m, V.ctor(base.value, name, caseType))
+        elseif tag == "runtime" and (base.ty:isRef() or base.ty:isPtr()) then
+            -- A reference and a raw pointer reach the record they address the same way, so the field
+            -- is the same projection one dereference on; only the lifetime rule differs, and a
+            -- pointer has none to check.
+            local ty = S.field(self:pointeeType(base.ty), name)
+            if not ty then D.reject("unknown-member", "Record has no field " .. name, expr.field.span) end
+            return self:derefPlaceCPS(m, ctx, base, expr.span, function(m2, deref)
+                local place = Ir.Project(deref, Ir.Field(name))
+                local read = ctx.builder:read(ctx.body, ty, place)
+                return k(m2, V.runtime(ctx.builder:ref(read, ty), ty))
+            end)
+        elseif tag == "runtime" and base.ty:isRecord() then
+            local ty = S.field(base.ty, name)
+            if not ty then D.reject("unknown-member", "Record has no field " .. name, expr.field.span) end
+            if not ctx.residual then
+                D.reject("runtime-in-normalization", "Cannot read a runtime record field here", expr.span)
+            end
+            -- A record value spilled into storage for a store must read through that storage, so a
+            -- store and a later read observe the same instance instead of the pre-spill value.
+            if base.place then
+                local place = Ir.Project(base.place, Ir.Field(name))
+                local read = ctx.builder:read(ctx.body, ty, place)
+                return k(m, V.runtime(ctx.builder:ref(read, ty), ty, nil, place))
+            end
+            return k(m, V.runtime(ctx.builder:get(base.expr, name, ty), ty))
         end
-        if base.fields[name] ~= nil then return base.fields[name] end
-        D.reject("unknown-member", "Record has no field " .. name, expr.field.span)
-    elseif tag == "schema" then
-        if base.def.methods[name] then return V.method(base.def.methods[name], nil) end
-        D.reject("unknown-member", "Schema has no member " .. name, expr.field.span)
-    elseif tag == "namespace" then
-        local member = base.members[name]
-        if not member then
-            D.reject("unknown-member", "Module " .. tostring(base.module) .. " does not export " .. name,
-                expr.field.span)
-        end
-        return member
-    elseif tag == "type" and base.value:isSum() then
-        -- A sum type's member names a constructor for one alternative.
-        local caseType = S.caseOf(base.value, name)
-        if not caseType then D.reject("unknown-member", "Sum type has no alternative " .. name, expr.field.span) end
-        return V.ctor(base.value, name, caseType)
-    elseif tag == "runtime" and (base.ty:isRef() or base.ty:isPtr()) then
-        -- A reference and a raw pointer reach the record they address the same way, so the field is
-        -- the same projection one dereference on; only the lifetime rule differs, and a pointer has
-        -- none to check.
-        -- A runtime reference is a pointer, so the field lives at the place it points to.
-        local ty = S.field(self:pointeeType(base.ty), name)
-        if not ty then D.reject("unknown-member", "Record has no field " .. name, expr.field.span) end
-        local place = Ir.Project(self:derefPlace(ctx, base, expr.span), Ir.Field(name))
-        local read = ctx.builder:read(ctx.body, ty, place)
-        return V.runtime(ctx.builder:ref(read, ty), ty)
-    elseif tag == "runtime" and base.ty:isRecord() then
-        local ty = S.field(base.ty, name)
-        if not ty then D.reject("unknown-member", "Record has no field " .. name, expr.field.span) end
-        if not ctx.residual then
-            D.reject("runtime-in-normalization", "Cannot read a runtime record field here", expr.span)
-        end
-        -- A record value spilled into storage for a store must read through that storage, so a store
-        -- and a later read observe the same instance instead of the pre-spill value.
-        if base.place then
-            local place = Ir.Project(base.place, Ir.Field(name))
-            local read = ctx.builder:read(ctx.body, ty, place)
-            return V.runtime(ctx.builder:ref(read, ty), ty, nil, place)
-        end
-        return V.runtime(ctx.builder:get(base.expr, name, ty), ty)
-    end
-    D.reject("member-required", "Cannot select from " .. S.encode(base.ty or S.Unit), expr.span)
+        D.reject("member-required", "Cannot select from " .. S.encode(base.ty or S.Unit), expr.span)
+    end)
 end
 
 function Eval:fieldSlot(def, object, name)
@@ -2647,29 +3238,40 @@ end
 
 -- Stores -------------------------------------------------------------------------------------
 
-function Eval:execStore(ctx, stmt)
-    local slot, place = self:storeTarget(ctx, stmt.target)
-    if slot.readonly then
-        D.reject("readonly-field", "Field " .. slot.name .. " was bound by static supply and cannot be assigned",
-            stmt.target.span)
-    end
-    local operator = stmt.operator
-    if operator == "=" then
-        local value = self:evalExpr(ctx, stmt.value)
-        self:requireAgainst(value, slot.ty, stmt.value.span)
-        return self:writeSlot(ctx, slot, place, value)
-    end
-    local binary = COMPOUND[operator]
-    if not binary then D.bug("operator", "Unknown assignment operator " .. tostring(operator)) end
-    -- The target is evaluated once, the old value read once, then the RHS runs.
-    local old = self:readSlot(ctx, slot, stmt.target.span)
-    local value = self:evalExpr(ctx, stmt.value)
-    local combined = self:binaryOp(ctx, binary, old, value, stmt.target.span, stmt.value.span, stmt.span)
-    return self:writeSlot(ctx, slot, place, combined)
+-- An assignment. The target resolves once, and for a compound operator the old value is read before
+-- the right-hand side runs, which is what makes `x += f()` see the value `x` had.
+function Eval:execStoreCPS(machine, ctx, stmt, k)
+    return self:storeTargetCPS(machine, ctx, stmt.target, function(m, slot, place)
+        if slot.readonly then
+            D.reject("readonly-field", "Field " .. slot.name .. " was bound by static supply and cannot be assigned",
+                stmt.target.span)
+        end
+        local operator = stmt.operator
+        if operator == "=" then
+            return self:evalExprCPS(m, ctx, stmt.value, function(m2, value)
+                self:requireAgainst(value, slot.ty, stmt.value.span)
+                return self:writeSlotCPS(m2, ctx, slot, place, value, k)
+            end)
+        end
+        local binary = COMPOUND[operator]
+        if not binary then D.bug("operator", "Unknown assignment operator " .. tostring(operator)) end
+        -- The target is evaluated once, the old value read once, then the RHS runs.
+        return self:readSlotCPS(m, ctx, slot, stmt.target.span, function(m2, old)
+            return self:evalExprCPS(m2, ctx, stmt.value, function(m3, value)
+                return self:binaryOpCPS(m3, ctx, binary, old, value, stmt.target.span,
+                    stmt.value.span, stmt.span, function(m4, combined)
+                        return self:writeSlotCPS(m4, ctx, slot, place, combined, k)
+                    end)
+            end)
+        end)
+    end)
 end
 
 -- Resolves a store target to a place, plus the slot describing it.
-function Eval:storeTarget(ctx, target)
+
+-- Resolves a store target to a slot plus its place. `placeOf` may evaluate an index expression, so it
+-- is the one continuation; what the place turned out to be then decides the borrow and module rules.
+function Eval:storeTargetCPS(machine, ctx, target, k)
     if target.kind ~= "Reference" and target.kind ~= "FieldSelect" and target.kind ~= "IndexExpr" then
         D.reject("not-a-place", "Only storage can be assigned", target.span)
     end
@@ -2683,71 +3285,82 @@ function Eval:storeTarget(ctx, target)
                 target.span)
         end
     end
-    local reached = self:placeOf(ctx, target, target.span)
-    -- A store in residual code goes to storage. Normalize code writes the concrete value it names so
-    -- a later read observes it: a local or enclosing aggregate, or module storage under the reference
-    -- interpreter (`session.run`), which executes the program rather than specialising it. Module
-    -- storage is runtime state, so compile-time initialization and residual specialization never
-    -- write it; a mutating top-level initializer rejects instead of baking a moved start value.
-    local origin = not ctx.residual and self:placeOrigin(ctx, target) or nil
-    -- `placeOrigin` names the route a *name* spells, so a write through a local binding that holds a
-    -- reference to module storage looks like a local write. What the place turned out to be is the
-    -- other half of the question, and without it such a write is folded away with its effect lost.
-    local modules = origin == "module"
-        or (reached.container ~= nil and reached.container.module == true)
-    -- Module storage is runtime state: residual specialization never writes it, because such a store
-    -- would not appear in the generated code. Initialization (`session.moduleDemand`) and the reference
-    -- interpreter (`session.run`) execute over concrete state and do write it.
-    if not ctx.residual and modules
-        and not (ctx.session.run or ctx.session.demanding) then
-        D.reject("runtime-in-normalization",
-            "Module storage is runtime state, so only module initialization may write it", target.span)
-    end
-    if not ctx.residual then
-        if reached.concrete == "field" then
-            return { kind = "concrete-field", name = reached.name, record = reached.record,
-                ty = reached.ty }, nil
+    return self:placeOfCPS(machine, ctx, target, target.span, function(m, reached)
+      local function withOrigin(m2, origin)
+        -- A store in residual code goes to storage. Normalize code writes the concrete value it names so
+        -- a later read observes it: a local or enclosing aggregate, or module storage under the reference
+        -- interpreter (`session.run`), which executes the program rather than specialising it. Module
+        -- storage is runtime state, so compile-time initialization and residual specialization never
+        -- write it; a mutating top-level initializer rejects instead of baking a moved start value.
+        -- `placeOrigin` names the route a *name* spells, so a write through a local binding that holds a
+        -- reference to module storage looks like a local write. What the place turned out to be is the
+        -- other half of the question, and without it such a write is folded away with its effect lost.
+        local modules = origin == "module"
+            or (reached.container ~= nil and reached.container.module == true)
+        -- Module storage is runtime state: residual specialization never writes it, because such a store
+        -- would not appear in the generated code. Initialization (`session.moduleDemand`) and the reference
+        -- interpreter (`session.run`) execute over concrete state and do write it.
+        if not ctx.residual and modules
+            and not (ctx.session.run or ctx.session.demanding) then
+            D.reject("runtime-in-normalization",
+                "Module storage is runtime state, so only module initialization may write it", target.span)
         end
-        if reached.concrete == "index" then
-            return { kind = "concrete-index", array = reached.array, index = reached.index,
-                ty = reached.ty }, nil
+        if not ctx.residual then
+            if reached.concrete == "field" then
+                return k(m, { kind = "concrete-field", name = reached.name, record = reached.record,
+                    ty = reached.ty }, nil)
+            end
+            if reached.concrete == "index" then
+                return k(m, { kind = "concrete-index", array = reached.array, index = reached.index,
+                    ty = reached.ty }, nil)
+            end
         end
-    end
-    -- A slice is a view of storage someone else owns, not storage of its own, and a string
-    -- literal's bytes are read-only. A write therefore names the array the view came from.
-    if reached.readonly then
-        D.reject("not-a-place", "A slice is a read-only view; write the array it views instead",
-            target.span)
-    end
-    if not reached.place then
-        D.bug("not-a-place", "A store target in residual code must be storage")
-    end
-    -- The container is the object or array whose storage is selected, so the borrow rules can see
-    -- whether it is module storage or a borrowed receiver.
-    return { kind = "field", name = target.kind == "IndexExpr" and "[index]" or "field",
-        ty = reached.ty, place = reached.place, static = nil, readonly = false,
-        record = reached.container, retaining = (reached.container and reached.container.enclosing)
-            and true or false }, reached.place
+        -- A slice is a view of storage someone else owns, not storage of its own, and a string
+        -- literal's bytes are read-only. A write therefore names the array the view came from.
+        if reached.readonly then
+            D.reject("not-a-place", "A slice is a read-only view; write the array it views instead",
+                target.span)
+        end
+        if not reached.place then
+            D.bug("not-a-place", "A store target in residual code must be storage")
+        end
+        -- The container is the object or array whose storage is selected, so the borrow rules can see
+        -- whether it is module storage or a borrowed receiver.
+        return k(m, { kind = "field", name = target.kind == "IndexExpr" and "[index]" or "field",
+            ty = reached.ty, place = reached.place, static = nil, readonly = false,
+            record = reached.container, retaining = (reached.container and reached.container.enclosing)
+                and true or false }, reached.place)
+      end
+      if ctx.residual then return withOrigin(m, nil) end
+      return self:placeOriginCPS(m, ctx, target, function(m2, origin)
+          return withOrigin(m2, origin)
+      end)
+    end)
 end
 
 -- Either a residual IR place or a concrete interpreter field. The span is only consulted by the
 -- residual branch: a concrete read has no IR to reject.
-function Eval:readSlot(ctx, slot, span)
-    if slot.kind == "concrete-field" then return slot.record.fields[slot.name] or V.unit() end
-    if slot.kind == "concrete-index" then return slot.array.items[slot.index + 1] end
-    return self:readFieldValue(ctx, slot, span)
+
+-- A field or element read. `readFieldValue` is a leaf -- it builds IR or returns a concrete value --
+-- so its answer is direct and this costs no frame of its own.
+function Eval:readSlotCPS(machine, ctx, slot, span, k)
+    if slot.kind == "concrete-field" then return k(machine, slot.record.fields[slot.name] or V.unit()) end
+    if slot.kind == "concrete-index" then return k(machine, slot.array.items[slot.index + 1]) end
+    return k(machine, self:readFieldValue(ctx, slot, span))
 end
 
-function Eval:writeSlot(ctx, slot, place, value)
+-- A store. The concrete cases write the frontend value directly; the residual case materialises the
+-- value first, which is the one continuation here.
+function Eval:writeSlotCPS(machine, ctx, slot, place, value, k)
     if slot.kind == "concrete-index" then
         slot.array.items[slot.index + 1] = value
         if self:isBorrowed(value) then slot.array.borrowed = true end
-        return
+        return k(machine)
     end
     if slot.kind == "concrete-field" then
         slot.record.fields[slot.name] = value
         if self:isBorrowed(value) then slot.record.borrowed = true end
-        return
+        return k(machine)
     end
     -- Assigning callable code to a signature-typed field builds a view whose environment is a
     -- local adapter, so the assignment is a borrow even when the code itself is not.
@@ -2760,9 +3373,12 @@ function Eval:writeSlot(ctx, slot, place, value)
             "Module storage outlives the activation that made this borrow, so it cannot hold one",
             ctx.span)
     end
-    ctx.builder:store(ctx.body, place, self:expression(ctx, value, slot.ty))
-    -- Storing a borrow into an instance makes that instance non-retaining too.
-    if becomesBorrowed and slot.record then slot.record.borrowed = true end
+    return self:expressionCPS(machine, ctx, value, slot.ty, function(m, expr)
+        ctx.builder:store(ctx.body, place, expr)
+        -- Storing a borrow into an instance makes that instance non-retaining too.
+        if becomesBorrowed and slot.record then slot.record.borrowed = true end
+        return k(m)
+    end)
 end
 
 
@@ -2770,79 +3386,111 @@ end
 -- captured environment as leading arguments. A closure folds only in normalize code, where folding is
 -- the only way to produce a value, so it has no residual-mode probe to swallow and does not go
 -- through `foldOrBuild`.
-function Eval:invokeClosure(ctx, plan, envExprs, values, span, bound)
+
+-- Closure application: a static closure is evaluated now; otherwise a direct call carries the captured
+-- environment as leading arguments. A closure folds only in normalize code, where folding is the only
+-- way to produce a value, so it has no residual-mode probe to swallow and does not go through
+-- `foldOrBuild`.
+function Eval:invokeClosureCPS(machine, ctx, plan, envExprs, values, span, bound, k)
     local def = plan.def
     local merged = appendArguments(bound, values)
     if #merged > #def.params then D.reject("arity", "Overapplication is not supported", span) end
     if #merged < #def.params then
         -- Partial application of a closure binds static arguments, exactly as for a named word.
         requireStatic(merged, span, def)
-        return V.closure(plan, merged)
+        return k(machine, V.closure(plan, merged))
     end
     if envExprs == nil and #plan.runtimeOrder == 0 then
         local allKnown = true
         for _, value in ipairs(merged) do if not V.isKnown(value) then allKnown = false end end
         if allKnown and not ctx.residual then
-            return self:evaluateClosureStatically(plan, merged, span)
+            return self:evaluateClosureStaticallyCPS(machine, plan, merged, span, k)
         end
     end
     if not ctx.residual then
         D.reject("runtime-in-normalization", "This closure call needs runtime code", span)
     end
     local callable = { plan = plan, env = self:closureEnvironment(plan, envExprs) }
-    return self:callClosure(ctx, callable, merged, span)
+    return self:callClosureCPS(machine, ctx, callable, merged, span, k)
 end
 
 -- Binds a known callable's hidden inputs in a local adapter and yields a view value.
-function Eval:makeView(ctx, value, sig)
+
+-- A signature-typed view: an invocation pointer plus the environment slots it needs. No evaluation
+-- edge is recursive except the capture slots, which are direct because `expression` is reached through
+-- its shim.
+-- A signature-typed view: an invocation pointer plus the environment slots it needs. Each branch builds
+-- its slots, and `finish` emits the view once they are in.
+function Eval:makeViewCPS(machine, ctx, value, sig, k)
     local viewType = S.view(sig)
-    local entry, slots, borrowed = nil, {}, false
     local tag = V.tag(value)
+    local function finish(entry, slots)
+        local id = ctx.builder:valueId()
+        ctx.builder:emit(ctx.body, Ir.View(id, viewType, entry, S.list(slots)))
+        -- The environment points at a local adapter, so the view is not retaining. The `Ir.BorrowArg`
+        -- slots above are what record that: the checker sees the borrowed places through them.
+        return k(machine, ctx.builder:ref(id, viewType))
+    end
     if tag == "closure" then
         local plan = value.plan
-        entry = self:callableInstance({ plan = plan }, value.bound or {}, ctx.span).target
-        for _, name in ipairs(plan.runtimeOrder) do
-            local capture = plan.runtime[name]
-            slots[#slots + 1] = Ir.ValueArg(self:expression(ctx, capture, capture.ty))
-        end
-        for _, name in ipairs(plan.borrowedOrder) do
-            slots[#slots + 1] = Ir.BorrowArg(plan.borrowed[name].place)
-            borrowed = true
-        end
-    elseif tag == "word" then
-        entry = self:instanceFor(value.def, ctx.span, value.args).target
-    elseif tag == "method" then
-        -- A method value borrows its receiver, which is exactly the hidden prefix of its instance.
-        local def = value.def
-        local instance = self:instanceFor(def, ctx.span, {}, value.receiver)
+        return self:callableInstanceCPS(machine, { plan = plan }, value.bound or {}, ctx.span,
+            function(m, instance)
+                local entry = instance.target
+                local slots = {}
+                local function captureAt(index)
+                    if index > #plan.runtimeOrder then
+                        for _, name in ipairs(plan.borrowedOrder) do
+                            slots[#slots + 1] = Ir.BorrowArg(plan.borrowed[name].place)
+                        end
+                        return finish(entry, slots)
+                    end
+                    local capture = plan.runtime[plan.runtimeOrder[index]]
+                    return self:expressionCPS(m, ctx, capture, capture.ty, function(m2, expr)
+                        slots[#slots + 1] = Ir.ValueArg(expr)
+                        return captureAt(index + 1)
+                    end)
+                end
+                return captureAt(1)
+            end)
+    end
+    if tag == "word" then
+        return self:instanceForCPS(machine, value.def, ctx.span, value.args, nil, function(m, instance)
+            return finish(instance.target, {})
+        end)
+    end
+    if tag ~= "method" then D.bug("c-view", "Only known code can be bound into a view") end
+    -- A method value borrows its receiver, which is exactly the hidden prefix of its instance.
+    local def = value.def
+    return self:instanceForCPS(machine, def, ctx.span, {}, value.receiver, function(m, instance)
         local sc = scope(def.lexical)
         local inputs = {}
-        for index = 1, #def.params do
-            inputs[index] = S.inValue(self:requirement(def, index, sc, ctx.span))
+        local function requirement(index)
+            if index > #def.params then
+                if not self:sigMatches(S.sig(inputs, instance.results), sig) then
+                    D.reject("callable-shape", "Method " .. tostring(def.name)
+                        .. " does not match the required signature", ctx.span)
+                end
+                return self:recordPlaceCPS(m, ctx, value.receiver, ctx.span, function(m2, place)
+                    return finish(instance.target, { Ir.BorrowArg(place) })
+                end)
+            end
+            return self:requirementCPS(m, def, index, sc, ctx.span, function(m2, ty)
+                inputs[index] = S.inValue(ty)
+                return requirement(index + 1)
+            end)
         end
-        if not self:sigMatches(S.sig(inputs, instance.results), sig) then
-            D.reject("callable-shape", "Method " .. tostring(def.name)
-                .. " does not match the required signature", ctx.span)
-        end
-        entry = instance.target
-        slots[#slots + 1] = Ir.BorrowArg(self:recordPlace(ctx, value.receiver, ctx.span))
-        borrowed = true
-    else
-        D.bug("c-view", "Only known code can be bound into a view")
-    end
-    local id = ctx.builder:valueId()
-    ctx.builder:emit(ctx.body, Ir.View(id, viewType, entry, S.list(slots)))
-    -- The environment points at a local adapter, so the view is not retaining. The `Ir.BorrowArg`
-    -- slots above are what record that: the checker sees the borrowed places through them.
-    return ctx.builder:ref(id, viewType)
+        return requirement(1)
+    end)
 end
-
 -- An opaque callable is invoked through its view: the environment pointer plus the argument list.
 -- A runtime callable is a value whose representation names code, so what it can be called as is
 -- read from its type: an Owned value carries a known environment, a View is opaque code, and a
 -- Tagged value is a tag plus the environment of the arm that tag names. This is the one dispatch the
 -- three former entry points (`applyOwned`, `applyView`, `applyTagged`) each had in front of them.
-function Eval:invokeRuntime(ctx, value, args, span)
+
+-- Applying a callable whose code is not known at the call site: a materialised owned closure, an opaque
+-- view, or a tagged callable. The last two build IR, so their argument and result lists are drivers.
+function Eval:invokeRuntimeCPS(machine, ctx, value, args, span, k)
     local tag, ty = V.tag(value), value.ty
     if tag == "runtime" and ty and ty:isOwned() then
         local plan = self:planOf(ty, span)
@@ -2852,7 +3500,7 @@ function Eval:invokeRuntime(ctx, value, args, span)
         end
         if S.environmentOf(ty) == S.Unit then
             -- Pure code carries no environment, so there is nothing to project: the call is direct.
-            return self:invokeClosure(ctx, plan, {}, args, span, value.bound)
+            return self:invokeClosureCPS(machine, ctx, plan, {}, args, span, value.bound, k)
         end
         local envTys = {}
         for _, field in ipairs(ty.environment.fields or {}) do envTys[field.name] = field.type end
@@ -2860,7 +3508,7 @@ function Eval:invokeRuntime(ctx, value, args, span)
         for _, name in ipairs(plan.envNames) do
             envExprs[#envExprs + 1] = ctx.builder:get(value.expr, name, envTys[name])
         end
-        return self:invokeClosure(ctx, plan, envExprs, args, span, nil)
+        return self:invokeClosureCPS(machine, ctx, plan, envExprs, args, span, nil, k)
     end
     if tag == "runtime" and ty and ty:isView() then
         -- An opaque callable is invoked through its view: the environment pointer plus the argument
@@ -2871,25 +3519,32 @@ function Eval:invokeRuntime(ctx, value, args, span)
         local sig = ty.visible
         if #args ~= #sig.inputs then D.reject("arity", "Opaque callable arity mismatch", span) end
         local operands = {}
-        for index, input in ipairs(sig.inputs) do
+        local function operand(index)
+            if index > #sig.inputs then
+                local results = {}
+                for _ = 1, #sig.results do results[#results + 1] = ctx.builder:valueId() end
+                ctx.builder:emit(ctx.body, Ir.Indirect(S.list(results), value.expr, S.list(operands)))
+                if #sig.results == 0 then return k(machine, V.unit()) end
+                if #sig.results == 1 then
+                    return k(machine, V.runtime(ctx.builder:ref(results[1], sig.results[1]), sig.results[1]))
+                end
+                local out = {}
+                for position, resultTy in ipairs(sig.results) do
+                    out[position] = V.runtime(ctx.builder:ref(results[position], resultTy), resultTy)
+                end
+                return k(machine, V.results(out))
+            end
+            local input = sig.inputs[index]
             if input.kind ~= "InValue" then
                 D.todo("view-input", "Only by-value callable inputs are supported", span)
             end
             self:requireType(args[index], input.type, span)
-            operands[#operands + 1] = Ir.ValueArg(self:expression(ctx, args[index]))
+            return self:expressionCPS(machine, ctx, args[index], nil, function(m, expr)
+                operands[#operands + 1] = Ir.ValueArg(expr)
+                return operand(index + 1)
+            end)
         end
-        local results = {}
-        for _ = 1, #sig.results do results[#results + 1] = ctx.builder:valueId() end
-        ctx.builder:emit(ctx.body, Ir.Indirect(S.list(results), value.expr, S.list(operands)))
-        if #sig.results == 0 then return V.unit() end
-        if #sig.results == 1 then
-            return V.runtime(ctx.builder:ref(results[1], sig.results[1]), sig.results[1])
-        end
-        local out = {}
-        for index, resultTy in ipairs(sig.results) do
-            out[index] = V.runtime(ctx.builder:ref(results[index], resultTy), resultTy)
-        end
-        return V.results(out)
+        return operand(1)
     end
     if (tag == "runtime" or tag == "variant") and ty and ty:isTagged() then
         -- A call on a tagged callable: test the tag, then run that arm's code directly. Every arm
@@ -2897,61 +3552,86 @@ function Eval:invokeRuntime(ctx, value, args, span)
         if not ctx.residual then
             D.reject("runtime-in-normalization", "A tagged call needs runtime code", span)
         end
-        local expr = value.expr
-        if expr == nil then
-            -- A tagged value built in this expression has not been emitted yet.
-            expr = self:expression(ctx, value, ty)
-        end
-        if expr.kind ~= "Ref" then D.bug("tagged-call", "A tagged callable must be an SSA value") end
-        local variantId = expr.value
-        local builder = ctx.builder
-        local results = ty.visible.results
-        local slots = {}
-        for index = 1, #results do slots[index] = builder:var(ctx.body, results[index], nil) end
-        local pieces = {}
-        for _, name in ipairs(S.casesOf(ty)) do
-            local arm = {}
-            local armCtx = ctx:arm(arm)
-            local result = self:callTaggedArm(armCtx, name, variantId, ty, args, span)
-            pieces[#pieces + 1] = { name = name, list = arm, ctx = armCtx, value = result,
-                terminated = armCtx.terminated }
-        end
-        for _, piece in ipairs(pieces) do
-            if not piece.terminated then
-                local values = self:expand(piece.value)
-                if #values ~= #results then
-                    D.bug("tagged-arity", "A tagged arm returned the wrong number of results")
+        local function withExpr(m, expr)
+            if expr.kind ~= "Ref" then D.bug("tagged-call", "A tagged callable must be an SSA value") end
+            local variantId = expr.value
+            local builder = ctx.builder
+            local results = ty.visible.results
+            local slots = {}
+            for index = 1, #results do slots[index] = builder:var(ctx.body, results[index], nil) end
+            local pieces = {}
+            local function armAt(index, names)
+                if not names then names = S.casesOf(ty) end
+                if index > #names then
+                    -- Every arm's statements are in place, so the tag tests can be layered innermost
+                    -- first, and the joined slots are read after them.
+                    local pending = {}
+                    for _, piece in ipairs(pieces) do
+                        if not piece.terminated then
+                            local values = self:expand(piece.value)
+                            if #values ~= #results then
+                                D.bug("tagged-arity", "A tagged arm returned the wrong number of results")
+                            end
+                            for position, item in ipairs(values) do
+                                pending[#pending + 1] = { piece = piece, position = position, value = item }
+                            end
+                        end
+                    end
+                    local function store(position)
+                        if position > #pending then
+                            local child = pieces[#pieces].list
+                            for position2 = #pieces - 1, 1, -1 do
+                                local piece = pieces[position2]
+                                local parent = {}
+                                local id = builder:valueId()
+                                builder:emit(parent, Ir.VariantMatches(id, variantId, ty, piece.name))
+                                builder:emit(parent, Ir.If(builder:ref(id, S.Bool), S.list(piece.list),
+                                    S.list(child)))
+                                child = parent
+                            end
+                            for _, stmt in ipairs(child) do ctx.body[#ctx.body + 1] = stmt end
+                            local out = {}
+                            for index2, resultTy in ipairs(results) do
+                                local place = Ir.Local(slots[index2])
+                                out[index2] = V.runtime(builder:ref(builder:read(ctx.body, resultTy, place),
+                                    resultTy), resultTy)
+                            end
+                            if #out == 0 then return k(m, V.unit()) end
+                            if #out == 1 then return k(m, out[1]) end
+                            return k(m, V.results(out))
+                        end
+                        local item = pending[position]
+                        return self:expressionCPS(m, item.piece.ctx, item.value, results[item.position],
+                            function(m2, ir)
+                                builder:store(item.piece.list, Ir.Local(slots[item.position]), ir)
+                                return store(position + 1)
+                            end)
+                    end
+                    return store(1)
                 end
-                for index, item in ipairs(values) do
-                    builder:store(piece.list, Ir.Local(slots[index]),
-                        self:expression(piece.ctx, item, results[index]))
-                end
+                local name = names[index]
+                local arm = {}
+                local armCtx = ctx:arm(arm)
+                return self:callTaggedArmCPS(machine, armCtx, name, variantId, ty, args, span,
+                    function(m2, result)
+                        pieces[#pieces + 1] = { name = name, list = arm, ctx = armCtx, value = result,
+                            terminated = armCtx.terminated }
+                        return armAt(index + 1, names)
+                    end)
             end
+            return armAt(1)
         end
-        local child = pieces[#pieces].list
-        for index = #pieces - 1, 1, -1 do
-            local piece = pieces[index]
-            local parent = {}
-            local id = builder:valueId()
-            builder:emit(parent, Ir.VariantMatches(id, variantId, ty, piece.name))
-            builder:emit(parent, Ir.If(builder:ref(id, S.Bool), S.list(piece.list), S.list(child)))
-            child = parent
-        end
-        for _, stmt in ipairs(child) do ctx.body[#ctx.body + 1] = stmt end
-        local out = {}
-        for index, resultTy in ipairs(results) do
-            local place = Ir.Local(slots[index])
-            out[index] = V.runtime(builder:ref(builder:read(ctx.body, resultTy, place), resultTy), resultTy)
-        end
-        if #out == 0 then return V.unit() end
-        if #out == 1 then return out[1] end
-        return V.results(out)
+        local expr = value.expr
+        if expr ~= nil then return withExpr(machine, expr) end
+        -- A tagged value built in this expression has not been emitted yet.
+        return self:expressionCPS(machine, ctx, value, ty, withExpr)
     end
     D.reject("callable-required", "Only words, methods and closures can be applied", span)
 end
-
 -- Evaluating a capture-free closure with known arguments produces a value, not a call.
-function Eval:evaluateClosureStatically(plan, args, span)
+
+-- Compile-time execution of a closure body over concrete arguments.
+function Eval:evaluateClosureStaticallyCPS(machine, plan, args, span, k)
     local sc = scope(plan.def.lexical)
     for _, name in ipairs(plan.borrowedOrder) do
         local borrowed = plan.borrowed[name]
@@ -2975,10 +3655,12 @@ function Eval:evaluateClosureStatically(plan, args, span)
     for index, param in ipairs(plan.def.params) do
         declare(sc, param.name.text, { kind = "value", name = param.name.text, value = args[index] }, param.span)
     end
-    local result = self:execBody(self:staticFrame(sc, span), plan.def.body, span)
-    if #result == 0 then return V.unit() end
-    if #result == 1 then return result[1] end
-    return V.results(result)
+    return self:execBodyCPS(machine, self:staticFrame(sc, span), plan.def.body, span,
+        function(m, result)
+            if #result == 0 then return k(m, V.unit()) end
+            if #result == 1 then return k(m, result[1]) end
+            return k(m, V.results(result))
+        end)
 end
 
 -- Closures ------------------------------------------------------------------------------------
@@ -2991,29 +3673,35 @@ end
 local function envFieldName(index) return string.format("c%02d", index) end
 
 -- Materialises the value a free name refers to at closure-creation time.
-function Eval:captureValue(ctx, name, span)
+
+-- The value a closure captures by name. A binding is demanded if it has never been computed.
+function Eval:captureValueCPS(machine, ctx, name, span, k)
     local slot = lookup(ctx.scope, name)
     if not slot then D.reject("unknown-name", "Unknown captured name: " .. name, span) end
     if slot.kind == "value" then
-        local demanded = self:demand(slot, span)
-        return demanded.value or V.unit()
-    elseif slot.kind == "concrete-field" then
-        return slot.record.fields[slot.name] or V.unit()
-    elseif slot.kind == "field" or slot.kind == "param" then
+        return self:demandCPS(machine, slot, span, function(m, demanded)
+            return k(m, demanded.value or V.unit())
+        end)
+    end
+    if slot.kind == "concrete-field" then
+        return k(machine, slot.record.fields[slot.name] or V.unit())
+    end
+    if slot.kind == "field" or slot.kind == "param" then
         if not ctx.residual then
             D.reject("runtime-in-normalization", "Cannot capture runtime storage " .. name, span)
         end
         -- Reading a field captures its value; the field path must not be flattened to the root.
         local place = slot.kind == "field" and slot.place or Ir.Local(slot.storage)
         local read = ctx.builder:read(ctx.body, slot.ty, place)
-        return V.runtime(ctx.builder:ref(read, slot.ty), slot.ty)
-    elseif slot.kind == "word" then
-        return V.word(slot.def, {}, span)
+        return k(machine, V.runtime(ctx.builder:ref(read, slot.ty), slot.ty))
     end
+    if slot.kind == "word" then return k(machine, V.word(slot.def, {}, span)) end
     D.bug("capture", "Unknown capture binding kind " .. tostring(slot.kind))
 end
-
-function Eval:evalLambda(ctx, expr, expected)
+-- A lambda literal. The capture walk is the only recursive edge, so it is a local driver that answers
+-- through `k` once the plan is complete; `captureValue`, `typeOf` and `callableInstance` are still
+-- direct, so the plan is finished in one frame and only the closure itself is the answer.
+function Eval:evalLambdaCPS(machine, ctx, expr, expected, k)
     local order = Resolve.captures(expr)
 
     local plan = { def = self:define(expr, moduleTop(ctx.scope), nil, "|lambda|"), order = order,
@@ -3021,13 +3709,108 @@ function Eval:evalLambda(ctx, expr, expected)
         runtime = {}, runtimeOrder = {}, captures = order }
     plan.def.lambda = true
     plan.borrowed, plan.borrowedOrder = {}, {}
-    for _, name in ipairs(order) do
-        local value = self:captureValue(ctx, name, expr.span)
+    local function capture(index)
+        if index > #order then
+            local inputs, results = {}, {}
+            -- Declared before the driver that calls it: a local declared later is not in scope for a
+            -- closure created earlier, and the call would silently become a global one.
+            local afterParameters
+            afterParameters = function(inputs, results)
+                if expr.annotation then results[1] = expr.annotation end
+                -- Resolved parameter types travel with the plan: a contextually typed lambda has no annotation
+                -- to re-evaluate when its body is compiled.
+                plan.paramTypes = {}
+                for position, input in ipairs(inputs) do plan.paramTypes[position] = input.type end
+                plan.sig = S.sig(inputs, results)
+                plan.envNames = {}
+                local envFields = {}
+                for position, name in ipairs(plan.runtimeOrder) do
+                    plan.envNames[position] = envFieldName(position)
+                    envFields[envFieldName(position)] = plan.runtime[name].ty
+                end
+                plan.envTy = #plan.runtimeOrder > 0 and S.record(envFields) or S.Unit
+                plan.key = "closure:" .. tostring(plan.def.id)
+                for _, name in ipairs(order) do
+                    local static, borrowed = plan.static[name], plan.borrowed[name]
+                    if borrowed then
+                        -- A record borrow is keyed by its schema identity; an array borrow has no schema, so its
+                        -- type is the identity.
+                        local shape = tostring(borrowed.kind) .. ":"
+                            .. (borrowed.schema and tostring(borrowed.schema.id) or S.encode(borrowed.ty))
+                        if borrowed.method then shape = shape .. ":" .. tostring(borrowed.method.id) end
+                        plan.key = plan.key .. "|" .. name .. "=@" .. shape
+                    else
+                        plan.key = plan.key .. (static and ("|" .. name .. "=" .. (V.encode(static) or "?"))
+                            or ("|" .. name .. "=#"))
+                    end
+                end
+                self.plans = self.plans or {}
+                self.plans[plan.key] = plan
+                -- Build the base instance now: its result types become the visible signature of the closure
+                -- type, and a call-site specialisation must agree with them.
+                -- Compile the base instance now: its result types complete the closure's visible signature,
+                -- which is what lets a callable argument be checked against a required signature. Code that is
+                -- never called is left to the C compiler to discard.
+                return self:callableInstanceCPS(machine, { plan = plan }, {}, expr.span,
+                    function(m, base)
+                        plan.sig = S.sig(inputs, base.results)
+                        plan.ty = S.owned(plan.key, plan.sig, plan.envTy)
+                        return k(m, V.closure(plan))
+                    end)
+            end
+            local function parameter(position)
+                if position > #expr.params then
+                    return afterParameters(inputs, results)
+                end
+                local param = expr.params[position]
+                if not param.annotation then
+                    -- Contextual typing: the expected signature supplies the missing annotation.
+                    if expected == nil then
+                        D.todo("lambda-annotation",
+                            "A lambda parameter without a type annotation needs an expected signature; either "
+                            .. "annotate it or pass the lambda where a signature is required", param.span)
+                    end
+                    if #expr.params > #expected.inputs then
+                        D.reject("callable-shape", "The lambda takes more parameters than its expected signature",
+                            expr.span)
+                    end
+                    local input = expected.inputs[position]
+                    if input.kind ~= "InValue" then
+                        D.todo("lambda-annotation", "A lambda parameter cannot be a borrowed place", param.span)
+                    end
+                    inputs[position] = input
+                    return parameter(position + 1)
+                end
+                return self:typeOfCPS(machine, param.annotation, ctx.scope, expr.span, function(m, ty)
+                    inputs[position] = S.inValue(ty)
+                    return parameter(position + 1)
+                end)
+            end
+            return parameter(1)
+        end
+        local name = order[index]
+        return self:captureValueCPS(machine, ctx, name, expr.span, function(m, value)
         local tag = V.tag(value)
         if V.isStatic(value) then
             plan.static[name] = value
-        elseif tag == "object" or tag == "method" or tag == "record" or tag == "array" then
-            -- A mutable instance or a method view is borrowed, never copied: the closure is tied to
+            return capture(index + 1)
+        end
+        if not (tag == "object" or tag == "method" or tag == "record" or tag == "array") then
+            if tag == "closure" then
+                -- A nested borrowed closure would need a place for a callable environment.
+                D.reject("borrow-escape",
+                    "Capturing a borrowed closure needs a callable environment, which is not supported; "
+                    .. "capture its receiver instead", expr.span)
+            end
+            if not ctx.residual then
+                D.reject("runtime-in-normalization", "This closure captures runtime value " .. name,
+                    expr.span)
+            end
+            plan.runtimeOrder[#plan.runtimeOrder + 1] = name
+            plan.runtime[name] = value
+            return capture(index + 1)
+        end
+        -- A mutable instance or a method view is borrowed, never copied: the closure is tied to
             -- the activation that created it. In residual code the place travels as a place input;
             -- under the interpreter a concrete aggregate is simply referred to. An array is a mutable
             -- instance too, so it borrows like a record rather than travelling by value.
@@ -3037,106 +3820,35 @@ function Eval:evalLambda(ctx, expr, expected)
             end
             -- A borrow needs an address, so a value still carrying its construction expression
             -- materialises here. The closure is then non-retaining, and returning it escapes.
-            local place = object.place
-            if ctx.residual then
+            local function withPlace(m2, place)
+                plan.borrowedOrder[#plan.borrowedOrder + 1] = name
                 if object.ty:isArray() then
-                    place = self:arrayPlace(ctx, object, expr.span)
+                    plan.borrowed[name] = { kind = "array", ty = object.ty, place = place,
+                        record = place == nil and object or nil }
                 else
-                    place = self:recordPlace(ctx, object, expr.span)
+                    local schema = object.schema
+                    plan.borrowed[name] = {
+                        kind = tag == "method" and "method" or "object",
+                        ty = object.ty, schema = schema or { id = 0, fields = S.fieldsOf(object.ty),
+                            fieldNames = S.fieldNames(object.ty), statics = {}, readonly = {}, methods = {} },
+                        place = place, record = place == nil and object or nil,
+                        method = tag == "method" and value.def or nil,
+                    }
                 end
+                if ctx.residual and not place then
+                    D.reject("runtime-in-normalization", "Cannot capture runtime storage " .. name,
+                        expr.span)
+                end
+                return capture(index + 1)
             end
-            plan.borrowedOrder[#plan.borrowedOrder + 1] = name
+            if not ctx.residual then return withPlace(m, object.place) end
             if object.ty:isArray() then
-                plan.borrowed[name] = { kind = "array", ty = object.ty, place = place,
-                    record = place == nil and object or nil }
-            else
-                local schema = object.schema
-                plan.borrowed[name] = {
-                    kind = tag == "method" and "method" or "object",
-                    ty = object.ty, schema = schema or { id = 0, fields = S.fieldsOf(object.ty),
-                        fieldNames = S.fieldNames(object.ty), statics = {}, readonly = {}, methods = {} },
-                    place = place, record = place == nil and object or nil,
-                    method = tag == "method" and value.def or nil,
-                }
+                return self:arrayPlaceCPS(m, ctx, object, expr.span, withPlace)
             end
-            if ctx.residual and not place then
-                D.reject("runtime-in-normalization", "Cannot capture runtime storage " .. name, expr.span)
-            end
-        elseif tag == "closure" then
-            -- A nested borrowed closure would need a place for a callable environment.
-            D.reject("borrow-escape",
-                "Capturing a borrowed closure needs a callable environment, which is not supported; "
-                .. "capture its receiver instead", expr.span)
-        else
-            if not ctx.residual then
-                D.reject("runtime-in-normalization", "This closure captures runtime value " .. name, expr.span)
-            end
-            plan.runtimeOrder[#plan.runtimeOrder + 1] = name
-            plan.runtime[name] = value
-        end
+            return self:recordPlaceCPS(m, ctx, object, expr.span, withPlace)
+        end)
     end
-
-    local inputs, results = {}, {}
-    for index, param in ipairs(expr.params) do
-        if param.annotation then
-            inputs[index] = S.inValue(self:typeOf(param.annotation, ctx.scope, expr.span))
-        else
-            -- Contextual typing: the expected signature supplies the missing annotation.
-            if expected == nil then
-                D.todo("lambda-annotation",
-                    "A lambda parameter without a type annotation needs an expected signature; either "
-                    .. "annotate it or pass the lambda where a signature is required", param.span)
-            end
-            if #expr.params > #expected.inputs then
-                D.reject("callable-shape", "The lambda takes more parameters than its expected signature",
-                    expr.span)
-            end
-            local input = expected.inputs[index]
-            if input.kind ~= "InValue" then
-                D.todo("lambda-annotation", "A lambda parameter cannot be a borrowed place", param.span)
-            end
-            inputs[index] = input
-        end
-    end
-    if expr.annotation then results[1] = expr.annotation end
-    -- Resolved parameter types travel with the plan: a contextually typed lambda has no annotation
-    -- to re-evaluate when its body is compiled.
-    plan.paramTypes = {}
-    for index, input in ipairs(inputs) do plan.paramTypes[index] = input.type end
-    plan.sig = S.sig(inputs, results)
-    plan.envNames = {}
-    local envFields = {}
-    for index, name in ipairs(plan.runtimeOrder) do
-        plan.envNames[index] = envFieldName(index)
-        envFields[envFieldName(index)] = plan.runtime[name].ty
-    end
-    plan.envTy = #plan.runtimeOrder > 0 and S.record(envFields) or S.Unit
-    plan.key = "closure:" .. tostring(plan.def.id)
-    for _, capture in ipairs(order) do
-        local static, borrowed = plan.static[capture], plan.borrowed[capture]
-        if borrowed then
-            -- A record borrow is keyed by its schema identity; an array borrow has no schema, so its
-            -- type is the identity.
-            local shape = tostring(borrowed.kind) .. ":"
-                .. (borrowed.schema and tostring(borrowed.schema.id) or S.encode(borrowed.ty))
-            if borrowed.method then shape = shape .. ":" .. tostring(borrowed.method.id) end
-            plan.key = plan.key .. "|" .. capture .. "=@" .. shape
-        else
-            plan.key = plan.key .. (static and ("|" .. capture .. "=" .. (V.encode(static) or "?"))
-                or ("|" .. capture .. "=#"))
-        end
-    end
-    self.plans = self.plans or {}
-    self.plans[plan.key] = plan
-    -- Build the base instance now: its result types become the visible signature of the closure
-    -- type, and a call-site specialisation must agree with them.
-    -- Compile the base instance now: its result types complete the closure's visible signature,
-    -- which is what lets a callable argument be checked against a required signature. Code that is
-    -- never called is left to the C compiler to discard.
-    local base = self:callableInstance({ plan = plan }, {}, expr.span)
-    plan.sig = S.sig(inputs, base.results)
-    plan.ty = S.owned(plan.key, plan.sig, plan.envTy)
-    return V.closure(plan)
+    return capture(1)
 end
 
 -- Resolves the plan behind an Owned type, which is how a returned or passed closure is called.
@@ -3186,76 +3898,110 @@ function Eval:closureEnvironment(plan, envExprs)
     return entries
 end
 
-function Eval:callClosure(ctx, callable, args, span)
-    local instance = self:callableInstance(callable, args, span)
-    if instance.status == "building" and not instance.results then
-        D.reject("recursive-result", "Recursive closure needs an explicit result annotation", span)
-    end
-    -- Environment arguments precede the declared parameters for the compiled lambda.
-    return self:emitCallableCall(ctx, instance, callable.env, args, span)
+-- Environment arguments precede the declared parameters for the compiled lambda.
+function Eval:callClosureCPS(machine, ctx, callable, args, span, k)
+    return self:callableInstanceCPS(machine, callable, args, span, function(m, instance)
+        if instance.status == "building" and not instance.results then
+            D.reject("recursive-result", "Recursive closure needs an explicit result annotation", span)
+        end
+        return self:emitCallableCallCPS(m, ctx, instance, callable.env, args, span, k)
+    end)
 end
 
-function Eval:emitCallableCall(ctx, instance, envArgs, args, span)
+-- A call through a known callable: the environment arguments come first, then the declared parameters
+-- in signature order.
+-- A call through a known callable: the environment arguments come first, then the declared parameters
+-- in signature order. Three local drivers -- environment, parameters, answer -- keep every step a tail
+-- call, so a call costs no host frames of its own.
+function Eval:emitCallableCallCPS(machine, ctx, instance, envArgs, args, span, k)
     local builder = ctx.builder
     local operands = {}
-    for index, arg in ipairs(envArgs) do
+    local function answer()
+        local runtime = instance.runtimeResults or self:runtimeResults(instance.results)
+        local results = {}
+        for _ = 1, #runtime do results[#results + 1] = builder:valueId() end
+        builder:emit(ctx.body, Ir.Call(S.list(results), instance.target, S.list(operands)))
+        local ir = {}
+        for index, ty in ipairs(runtime) do
+            ir[index] = V.runtime(builder:ref(results[index], ty), ty)
+        end
+        local out = self:logicalResults(instance.results, ir)
+        if #out == 0 then return k(machine, V.unit()) end
+        if #out == 1 then return k(machine, out[1]) end
+        return k(machine, V.results(out))
+    end
+    local function parameters()
+        local function parameter(index)
+            if index > #instance.paramPositions then return answer() end
+            local position = instance.paramPositions[index]
+            -- After the environment, the declared parameters follow in signature order.
+            return self:expressionCPS(machine, ctx, args[position], instance.inputTypes[#envArgs + index],
+                function(m, expr)
+                    operands[#operands + 1] = Ir.ValueArg(expr)
+                    return parameter(index + 1)
+                end)
+        end
+        return parameter(1)
+    end
+    local function environment(index)
+        if index > #envArgs then return parameters() end
+        local arg = envArgs[index]
         if arg.kind == "place" then
             operands[#operands + 1] = Ir.BorrowArg(arg.place)
-        else
-            operands[#operands + 1] = Ir.ValueArg(arg.expr or self:expression(ctx, arg.value,
-                instance.inputTypes[index]))
+            return environment(index + 1)
         end
+        if arg.expr then
+            operands[#operands + 1] = Ir.ValueArg(arg.expr)
+            return environment(index + 1)
+        end
+        return self:expressionCPS(machine, ctx, arg.value, instance.inputTypes[index], function(m, expr)
+            operands[#operands + 1] = Ir.ValueArg(expr)
+            return environment(index + 1)
+        end)
     end
-    for index, position in ipairs(instance.paramPositions) do
-        -- After the environment, the declared parameters follow in signature order.
-        operands[#operands + 1] = Ir.ValueArg(self:expression(ctx, args[position],
-            instance.inputTypes[#envArgs + index]))
-    end
-    local runtime = instance.runtimeResults or self:runtimeResults(instance.results)
-    local results = {}
-    for _ = 1, #runtime do results[#results + 1] = builder:valueId() end
-    builder:emit(ctx.body, Ir.Call(S.list(results), instance.target, S.list(operands)))
-    local ir = {}
-    for index, ty in ipairs(runtime) do
-        ir[index] = V.runtime(builder:ref(results[index], ty), ty)
-    end
-    local out = self:logicalResults(instance.results, ir)
-    if #out == 0 then return V.unit() end
-    if #out == 1 then return out[1] end
-    return V.results(out)
+    return environment(1)
 end
+-- The shim: `callClosureCPS`, `expressionCPS`, `makeViewCPS` and `evalLambdaCPS` reach the converted
+-- form directly; this stays for any caller that has not converted.
 
-function Eval:callableInstance(callable, args, span)
+-- The instance for one closure plan and argument vector, or the one already built for it.
+function Eval:callableInstanceCPS(machine, callable, args, span, k)
     local key = self:callableKey(callable.plan, args)
     local existing = self.instances[key]
     if existing then
         if existing.failure then error(existing.failure, 0) end
-        return existing
+        return k(machine, existing)
     end
     local count = 0
     for _ in pairs(self.instances) do count = count + 1 end
-    if count >= (self.limits.keys or 1024) then D.resource("keys", "Residual instance budget exhausted", span) end
-    return self:buildCallableInstance(key, callable, args, span)
+    if count >= (self.limits.keys or 1024) then
+        D.resource("keys", "Residual instance budget exhausted", span)
+    end
+    return self:buildCallableInstanceCPS(machine, key, callable, args, span, k)
 end
-
 -- The same shape as `buildInstance`: the failed attempt is remembered here, so a probe that swallows
 -- the diagnostic still leaves the session usable.
 -- probe that swallows the diagnostic still leaves the session usable.
-function Eval:buildCallableInstance(key, callable, args, span)
-    local ok, result = self:withNesting("build", span, nil, self.constructCallableInstance, self,
-        key, callable, args, span)
-    if not ok then
+
+-- Building a callable instance. The depth is counted on the machine and the attempt runs under a
+-- `Build` descriptor: a failure is remembered on the instance and re-raised, which is exactly what the
+-- `pcall` pair did, without a host frame per attempt.
+function Eval:buildCallableInstanceCPS(machine, key, callable, args, span, k)
+    machine:checkDepth("build", span, key)
+    machine:push("build", span, key, function(_, diagnostic)
         local instance = self.instances[key]
         if instance then
-            instance.failure = result
+            instance.failure = diagnostic
             instance.status = "failed"
         end
-        error(result, 0)
-    end
-    return result
+        error(diagnostic, 0)
+    end)
+    return self:constructCallableInstanceCPS(machine, key, callable, args, span, function(m, instance)
+        machine:pop()
+        return k(m, instance)
+    end)
 end
-
-function Eval:constructCallableInstance(key, callable, args, span)
+function Eval:constructCallableInstanceCPS(machine, key, callable, args, span, k)
     local plan, def = callable.plan, callable.plan.def
     self.nextFn = self.nextFn + 1
     local instance = { key = key, def = def, plan = plan, target = "wordletfn_" .. self.nextFn,
@@ -3303,98 +4049,109 @@ function Eval:constructCallableInstance(key, callable, args, span)
         declare(sc, name, { kind = "value", name = name, value = value }, span)
     end
 
-    for index, param in ipairs(def.params) do
+    local function afterParameters(m)
+        return self:declaredResultCPS(m, def, sc, span, function(m2, declared)
+            instance.results = declared
+            local ctx = self:residualFrame(sc, span)
+            ctx.builder, ctx.body, ctx.fn, ctx.instance = builder, body, { id = instance.target }, instance
+            return self:execBodyResidualCPS(m2, ctx, def.body, span, function(m3)
+                if not instance.results then instance.results = ctx.resultTypes end
+        if not instance.results then D.reject("recursive-result", "Closure has no returning path", span) end
+        for _, ty in ipairs(instance.results) do
+            if not S.representable(ty) then
+                D.todo("static-callable-result",
+                    "A closure result that is pure code with no environment has no runtime representation", span)
+            end
+        end
+        local statements = setup
+        for _, stmt in ipairs(body) do statements[#statements + 1] = stmt end
+        instance.runtimeResults = self:runtimeResults(instance.results)
+        instance.fn = Ir.Fn(instance.target, Ir.Body, 0, S.list(inputs), S.list(instance.runtimeResults),
+            S.list(params), S.list(statements))
+        instance.status = "done"
+        return k(m3, instance)
+            end)
+        end)
+    end
+    local function parameterAt(index, m)
+        if index > #def.params then return afterParameters(m) end
+        local param = def.params[index]
+        local function withTy(m2, ty)
+            local supplied = args[index]
+            local bound = false
+            if ty:isSig() then
+                -- A callable parameter: static code is specialised away entirely; otherwise the Owned
+                -- type carries the code identity, so the call stays direct and only the environment
+                -- travels as a by-value input.
+                if supplied ~= nil and (V.tag(supplied) == "closure" or V.tag(supplied) == "word") then
+                    if self:callableMatches(supplied, ty) == false then
+                        D.reject("callable-shape", "Callable does not match the required signature", param.span)
+                    end
+                    if V.isStatic(supplied) then
+                        declare(sc, param.name.text, { kind = "value", name = param.name.text, value = supplied },
+                            param.span)
+                        bound = true
+                    else
+                        -- A closure with a runtime environment travels by value as that environment. A
+                        -- closure that borrows storage is non-retaining, so the parameter becomes an
+                        -- erased view, which the caller binds through a local adapter that holds the
+                        -- borrowed places.
+                        ty = self:borrowsStorage(supplied) and S.view(ty) or supplied.ty
+                    end
+                elseif V.tag(supplied) == "method" then
+                    -- A method borrows its receiver, so it is non-retaining for the same reason a
+                    -- borrowing closure is: the parameter takes a view.
+                    ty = S.view(ty)
+                elseif supplied ~= nil and V.tag(supplied) == "runtime" and supplied.ty:isOwned() then
+                    ty = supplied.ty
+                elseif supplied ~= nil and V.tag(supplied) == "runtime" and supplied.ty:isView() then
+                    ty = supplied.ty
+                elseif supplied == nil then
+                    -- An entry face with no call site: the callable arrives from outside, so it needs
+                    -- the invocation-pointer ABI rather than a code identity.
+                    ty = S.view(ty)
+                else
+                    D.todo("opaque-callable",
+                        "A callable argument with no known code needs a function-pointer ABI", param.span)
+                end
+            else
+                S.checkRuntime(ty, param.span)
+            end
+            if not bound and ty == S.Unit then
+                -- A Unit parameter carries no information, so it is not a runtime input at all: the
+                -- name is bound to the Unit value and neither the ABI nor the call site mentions it.
+                declare(sc, param.name.text, { kind = "value", name = param.name.text, value = V.unit() }, param.span)
+                bound = true
+            end
+            if not bound then
+                if supplied ~= nil and V.isStatic(supplied) then
+                    self:requireType(supplied, ty, param.span)
+                    declare(sc, param.name.text, { kind = "value", name = param.name.text, value = supplied }, param.span)
+                else
+                    local value = builder:valueId()
+                    params[#params + 1] = Ir.ValueParam(#inputs, value, ty)
+                    inputs[#inputs + 1] = S.inValue(ty)
+                    paramTypes[#paramTypes + 1] = ty
+                    instance.paramPositions[#instance.paramPositions + 1] = index
+                    if ty:isRecord() then
+                        declare(sc, param.name.text, { kind = "value", name = param.name.text,
+                            value = V.object(ty, nil, { fields = S.fieldsOf(ty),
+                                fieldNames = S.fieldNames(ty), statics = {}, readonly = {}, methods = {}, type = ty },
+                                nil, false, builder:ref(value, ty), setup) },
+                            param.span)
+                    else
+                        declare(sc, param.name.text, { kind = "value", name = param.name.text,
+                            value = V.runtime(builder:ref(value, ty), ty) }, param.span)
+                    end
+                end
+            end
+            return parameterAt(index + 1, m2)
+        end
         -- A contextually typed lambda carries its resolved parameter types on the plan.
-        local ty = plan.paramTypes[index] or self:requirement(def, index, sc, span)
-        local supplied = args[index]
-        local bound = false
-        if ty:isSig() then
-            -- A callable parameter: static code is specialised away entirely; otherwise the Owned
-            -- type carries the code identity, so the call stays direct and only the environment
-            -- travels as a by-value input.
-            if supplied ~= nil and (V.tag(supplied) == "closure" or V.tag(supplied) == "word") then
-                if self:callableMatches(supplied, ty) == false then
-                    D.reject("callable-shape", "Callable does not match the required signature", param.span)
-                end
-                if V.isStatic(supplied) then
-                    declare(sc, param.name.text, { kind = "value", name = param.name.text, value = supplied },
-                        param.span)
-                    bound = true
-                else
-                    -- A closure with a runtime environment travels by value as that environment. A
-                    -- closure that borrows storage is non-retaining, so the parameter becomes an
-                    -- erased view, which the caller binds through a local adapter that holds the
-                    -- borrowed places.
-                    ty = self:borrowsStorage(supplied) and S.view(ty) or supplied.ty
-                end
-            elseif V.tag(supplied) == "method" then
-                -- A method borrows its receiver, so it is non-retaining for the same reason a
-                -- borrowing closure is: the parameter takes a view.
-                ty = S.view(ty)
-            elseif supplied ~= nil and V.tag(supplied) == "runtime" and supplied.ty:isOwned() then
-                ty = supplied.ty
-            elseif supplied ~= nil and V.tag(supplied) == "runtime" and supplied.ty:isView() then
-                ty = supplied.ty
-            elseif supplied == nil then
-                -- An entry face with no call site: the callable arrives from outside, so it needs
-                -- the invocation-pointer ABI rather than a code identity.
-                ty = S.view(ty)
-            else
-                D.todo("opaque-callable",
-                    "A callable argument with no known code needs a function-pointer ABI", param.span)
-            end
-        else
-            S.checkRuntime(ty, param.span)
-        end
-        if not bound and ty == S.Unit then
-            -- A Unit parameter carries no information, so it is not a runtime input at all: the
-            -- name is bound to the Unit value and neither the ABI nor the call site mentions it.
-            declare(sc, param.name.text, { kind = "value", name = param.name.text, value = V.unit() }, param.span)
-            bound = true
-        end
-        if not bound then
-            if supplied ~= nil and V.isStatic(supplied) then
-                self:requireType(supplied, ty, param.span)
-                declare(sc, param.name.text, { kind = "value", name = param.name.text, value = supplied }, param.span)
-            else
-                local value = builder:valueId()
-                params[#params + 1] = Ir.ValueParam(#inputs, value, ty)
-                inputs[#inputs + 1] = S.inValue(ty)
-                paramTypes[#paramTypes + 1] = ty
-                instance.paramPositions[#instance.paramPositions + 1] = index
-                if ty:isRecord() then
-                    declare(sc, param.name.text, { kind = "value", name = param.name.text,
-                        value = V.object(ty, nil, { fields = S.fieldsOf(ty),
-                            fieldNames = S.fieldNames(ty), statics = {}, readonly = {}, methods = {}, type = ty },
-                            nil, false, builder:ref(value, ty), setup) },
-                        param.span)
-                else
-                    declare(sc, param.name.text, { kind = "value", name = param.name.text,
-                        value = V.runtime(builder:ref(value, ty), ty) }, param.span)
-                end
-            end
-        end
+        if plan.paramTypes[index] then return withTy(m, plan.paramTypes[index]) end
+        return self:requirementCPS(m, def, index, sc, span, withTy)
     end
-
-    instance.results = self:declaredResult(def, sc, span)
-    local ctx = self:residualFrame(sc, span)
-    ctx.builder, ctx.body, ctx.fn, ctx.instance = builder, body, { id = instance.target }, instance
-    self:execBodyResidual(ctx, def.body, span)
-    if not instance.results then instance.results = ctx.resultTypes end
-    if not instance.results then D.reject("recursive-result", "Closure has no returning path", span) end
-    for _, ty in ipairs(instance.results) do
-        if not S.representable(ty) then
-            D.todo("static-callable-result",
-                "A closure result that is pure code with no environment has no runtime representation", span)
-        end
-    end
-    local statements = setup
-    for _, stmt in ipairs(body) do statements[#statements + 1] = stmt end
-    instance.runtimeResults = self:runtimeResults(instance.results)
-    instance.fn = Ir.Fn(instance.target, Ir.Body, 0, S.list(inputs), S.list(instance.runtimeResults),
-        S.list(params), S.list(statements))
-    instance.status = "done"
-    return instance
+    return parameterAt(1, machine)
 end
 
 -- Bodies --------------------------------------------------------------------------------------
@@ -3405,50 +4162,82 @@ end
 -- runs at the return rather than here: a return inside a statement conditional's arm is an exit from
 -- this block too, and running the action here would miss that path and could only ever produce one
 -- value.
-function Eval:execDefer(ctx, statements, index, stmt)
-    local frame = { pending = self:deferredCall(ctx, stmt), parent = ctx.deferFrame, span = stmt.span }
-    ctx.deferFrame = frame
-    local terminated = self:execBlock(ctx, statements, index + 1)
-    ctx.deferFrame = frame.parent
-    return terminated
+
+-- A deferred action. Its callee and arguments are evaluated where the `defer` is written, and then
+-- the rest of the list runs with the action pending on the frame.
+function Eval:execDeferCPS(machine, ctx, statements, index, stmt, k)
+    return self:deferredCallCPS(machine, ctx, stmt, function(m, pending)
+        local frame = { pending = pending, parent = ctx.deferFrame, span = stmt.span }
+        ctx.deferFrame = frame
+        return self:execBlockCPS(m, ctx, statements, index + 1, function(m2, terminated)
+            ctx.deferFrame = frame.parent
+            return k(m2, terminated)
+        end)
+    end)
 end
 
 -- Every deferred action pending at a return, innermost first, which is the reverse of the order the
 -- `defer` statements were written. Running them here is what makes a transfer out of the block in
 -- the middle of a conditional reach them as well.
-function Eval:runPendingDefers(ctx)
+
+-- Every deferred action pending at a return, innermost first, which is the reverse of the order the
+-- `defer` statements were written. Each action is a supply step, so walking the frame chain is a
+-- continuation rather than a loop.
+function Eval:runPendingDefersCPS(machine, ctx, k)
     local frame = ctx.deferFrame
-    while frame do
-        self:supply(ctx, frame.pending.callee, frame.pending.args, frame.pending.span)
+    local function runNext(m)
+        if not frame then return k(m) end
+        local current = frame
         frame = frame.parent
+        -- `supply` is still direct (it converts with the rest of the spine), so its answer is
+        -- discarded here; the walk to the next frame is the tail call.
+        return self:supplyCPS(m, ctx, current.pending.callee, current.pending.args,
+            current.pending.span, function(m2) return runNext(m2) end)
     end
+    return runNext(machine)
 end
 
 -- The callee and the arguments of a deferred action are evaluated where the `defer` is written, so a
 -- read of mutable storage there is a snapshot of what the program had rather than of what the names
 -- mean later.
-function Eval:deferredCall(ctx, stmt)
-    local callee = self:evalExpr(ctx, stmt.call.callee)
-    local args = self:evalArguments(ctx, stmt.call.arguments, callee)
-    return { callee = callee, args = args, span = stmt.call.span }
+
+-- The callee and the arguments of a deferred action, both evaluated where the `defer` is written so a
+-- read of mutable storage there is a snapshot rather than what the names mean later.
+function Eval:deferredCallCPS(machine, ctx, stmt, k)
+    return self:evalExprCPS(machine, ctx, stmt.call.callee, function(m, callee)
+        return self:evalArgumentsCPS(m, ctx, stmt.call.arguments, callee, function(m2, args)
+            return k(m2, { callee = callee, args = args, span = stmt.call.span })
+        end)
+    end)
 end
 
 
 
-function Eval:execBlock(ctx, statements, from)
+-- A statement list. The walk is a continuation over the remaining statements, so a block costs one
+-- frame however many statements it has, and the answer is whether control left the list (a `return`, or
+-- a back edge a returned expression took). `from` lets a `defer` hand the rest of a list to a nested
+-- block over the same context.
+function Eval:execBlockCPS(machine, ctx, statements, from, k)
     -- A statement list is not a tail position; only a `return` inside it is, and it sets the flag.
     ctx.tail = false
-    for index = from or 1, #statements do
+    local function statement(index)
+        if index > #statements then return k(machine, false) end
         local stmt = statements[index]
         self:step(stmt.span)
         local kind = stmt.kind
-        if kind == "Defer" then return self:execDefer(ctx, statements, index, stmt) end
+        if kind == "Defer" then
+            return self:execDeferCPS(machine, ctx, statements, index, stmt, k)
+        end
         if kind == "ValueStmt" then
-            local values = self:expand(self:evalValueDef(ctx, stmt.def))
-            for index, binder in ipairs(stmt.def.binders) do
-                declare(ctx.scope, binder.name.text,
-                    { kind = "value", name = binder.name.text, value = values[index] or V.unit() }, binder.span)
-            end
+            return self:evalValueDefCPS(machine, ctx, stmt.def, function(m, bound)
+                local values = self:expand(bound)
+                for position, binder in ipairs(stmt.def.binders) do
+                    declare(ctx.scope, binder.name.text,
+                        { kind = "value", name = binder.name.text, value = values[position] or V.unit() },
+                        binder.span)
+                end
+                return statement(index + 1)
+            end)
         elseif kind == "WordStmt" then
             local def = self:define(stmt.def, ctx.scope, nil)
             declare(ctx.scope, stmt.def.name.text, { kind = "word", name = stmt.def.name.text, def = def }, stmt.def.name.span)
@@ -3459,53 +4248,74 @@ function Eval:execBlock(ctx, statements, from)
             local savedExpected, savedTail, savedTerminated = ctx.expectedResult, ctx.tail, ctx.terminated
             if #stmt.values ~= 1 then ctx.expectedResult = nil end
             ctx.tail, ctx.terminated = #stmt.values == 1, false
-            local values = self:evalList(ctx, stmt.values)
-            ctx.expectedResult, ctx.tail = savedExpected, savedTail
-            self:checkReturn(values, stmt.span)
-            if ctx.terminated then return true end
-            ctx.terminated = savedTerminated
-            if ctx.residual then
-                local exprs = self:materializeAll(ctx, values,
-                    ctx.instance and ctx.instance.results or nil)
-                ctx.resultTypes = {}
-                for index, value in ipairs(values) do ctx.resultTypes[index] = value.ty end
-                -- The action runs after the returned expression has been evaluated and before the value
-                -- leaves. `materializeAll` above is what takes the snapshot the returned value names,
-                -- so a read of storage the action changes still yields what it was at the return.
-                self:runPendingDefers(ctx)
-                ctx.builder:emit(ctx.body, Ir.Return(S.list(exprs)))
-            else
+            return self:evalListCPS(machine, ctx, stmt.values, function(m, values)
+                ctx.expectedResult, ctx.tail = savedExpected, savedTail
+                self:checkReturn(values, stmt.span)
+                if ctx.terminated then return k(m, true) end
+                ctx.terminated = savedTerminated
+                if ctx.residual then
+                    return self:materializeAllCPS(m, ctx, values,
+                        ctx.instance and ctx.instance.results or nil, function(m2, exprs)
+                            ctx.resultTypes = {}
+                            for position, value in ipairs(values) do
+                                ctx.resultTypes[position] = value.ty
+                            end
+                            -- The action runs after the returned expression has been evaluated and before
+                            -- the value leaves. `materializeAll` above is what takes the snapshot the
+                            -- returned value names, so a read of storage the action changes still yields
+                            -- what it was at the return.
+                            return self:runPendingDefersCPS(m2, ctx, function(m3)
+                                ctx.builder:emit(ctx.body, Ir.Return(S.list(exprs)))
+                                return k(m3, true)
+                            end)
+                        end)
+                end
                 -- The interpreter executes the program rather than compiling it, so the actions run as
                 -- ordinary calls on the way out of the block.
-                self:runPendingDefers(ctx)
-                ctx.result = values
-            end
-            return true
+                return self:runPendingDefersCPS(m, ctx, function(m2)
+                    ctx.result = values
+                    return k(m2, true)
+                end)
+            end)
         elseif kind == "IfStmt" then
-            if self:execIfStatement(ctx, stmt) then return true end
+            return self:execIfStatementCPS(machine, ctx, stmt, function(m, returned)
+                if returned then return k(m, true) end
+                return statement(index + 1)
+            end)
         elseif kind == "CallStmt" then
-            self:evalApply(ctx, stmt.call)
+            -- A statement call is not a position for its value, so it is discarded and the walk goes on.
+            return self:evalApplyCPS(machine, ctx, stmt.call, function(m)
+                return statement(index + 1)
+            end)
         elseif kind == "StoreStmt" then
-            self:execStore(ctx, stmt)
+            return self:execStoreCPS(machine, ctx, stmt, function(m)
+                return statement(index + 1)
+            end)
         else
             D.todo("statement", "Unsupported statement form: " .. tostring(kind), stmt.span)
         end
+        return statement(index + 1)
     end
-    return false
+    return statement(from or 1)
 end
 
-function Eval:materializeAll(ctx, values, wants)
+-- A value list as an IR expression list. A Unit slot is logical but has no runtime representation,
+-- exactly as a Unit parameter has none, so it is dropped here and the IR result list is the erased one.
+-- A value list as an IR expression list. A Unit slot is logical but has no runtime representation,
+-- exactly as a Unit parameter has none, so it is dropped here and the IR result list is the erased one.
+function Eval:materializeAllCPS(machine, ctx, values, wants, k)
     local out = {}
-    for index, value in ipairs(values) do
-        -- A Unit slot is logical but has no runtime representation, exactly as a Unit parameter has
-        -- none, so it is dropped here and the IR result list is the erased one.
-        if value.ty ~= S.Unit then
-            out[#out + 1] = self:expression(ctx, value, wants and wants[index] or nil)
-        end
+    local function item(index)
+        if index > #values then return k(machine, out) end
+        local value = values[index]
+        if value.ty == S.Unit then return item(index + 1) end
+        return self:expressionCPS(machine, ctx, value, wants and wants[index] or nil, function(m, expr)
+            out[#out + 1] = expr
+            return item(index + 1)
+        end)
     end
-    return out
+    return item(1)
 end
-
 -- A Unit slot erases from a result vector the way it erases from a parameter list (syntax.md §6).
 -- The function's IR results are the non-Unit ones; a call site reinserts the Unit values so a
 -- binding list keeps its positions, while a return simply drops them.
@@ -3524,60 +4334,97 @@ function Eval:logicalResults(results, runtime)
     return out
 end
 
-function Eval:execIfStatement(ctx, stmt)
-    local test = self:evalExpr(ctx, stmt.test)
-    self:requireType(test, S.Bool, stmt.test.span)
-    if V.tag(test) == "bool" then
-        if test.b then return self:execBlock(ctx, stmt.yes) end
-        return self:execBlock(ctx, stmt.no)
-    end
-    local testExpr = self:expression(ctx, test)
-    local yesList, noList = {}, {}
-    local yesReturned = self:execBlock(ctx:arm(yesList), stmt.yes)
-    local noReturned = self:execBlock(ctx:arm(noList), stmt.no)
-    if #yesList > 0 or #noList > 0 then
-        ctx.builder:emit(ctx.body, Ir.If(testExpr, S.list(yesList), S.list(noList)))
-    end
-    return yesReturned and noReturned
+-- A statement conditional. A known test runs one arm; an opaque one runs both arms into their own
+-- statement lists and emits one `If`. The answer is whether both arms returned, which is what lets the
+-- block that contains this stop looking for the end of its list.
+-- A statement conditional. A known test runs one arm; an opaque one runs both arms into their own
+-- statement lists and emits one `If`. The answer is whether both arms returned, which is what lets the
+-- block that contains this stop looking for the end of its list.
+function Eval:execIfStatementCPS(machine, ctx, stmt, k)
+    return self:evalExprCPS(machine, ctx, stmt.test, function(m, test)
+        self:requireType(test, S.Bool, stmt.test.span)
+        if V.tag(test) == "bool" then
+            return self:execBlockCPS(m, ctx, test.b and stmt.yes or stmt.no, nil, k)
+        end
+        return self:expressionCPS(m, ctx, test, nil, function(m2, testExpr)
+            local yesList, noList = {}, {}
+            return self:execBlockCPS(m2, ctx:arm(yesList), stmt.yes, nil, function(m3, yesReturned)
+                return self:execBlockCPS(m3, ctx:arm(noList), stmt.no, nil, function(m4, noReturned)
+                    if #yesList > 0 or #noList > 0 then
+                        ctx.builder:emit(ctx.body, Ir.If(testExpr, S.list(yesList), S.list(noList)))
+                    end
+                    return k(m4, yesReturned and noReturned)
+                end)
+            end)
+        end)
+    end)
 end
-
 -- Value definitions and annotations -----------------------------------------------------------
 
-function Eval:evalValueDef(ctx, def)
-    -- Evaluate signature annotations first: they supply missing lambda parameter types.
+-- The shim for the callers that reach this by name or through a `pcall` (`demand` does, which a
+-- grep for `self:evalValueDef(` misses because it is written `self.evalValueDef`). One boundary.
+
+-- A value definition. The annotations resolve first, because they are what types an unannotated
+-- lambda or an empty array literal; then each value is evaluated with its expectation; then each
+-- binder is checked. No child here is recursive, so nothing nests and every answer goes straight back
+-- through `k`. The caller enters it through the machine's driver.
+-- A value definition. The annotations resolve first, because they are what types an unannotated
+-- lambda, and then the values are evaluated in written order; the binders are checked once all of them
+-- are in. Both walks are local drivers, so neither costs host frames.
+function Eval:evalValueDefCPS(machine, ctx, def, k)
     local expectations = {}
-    for index, binder in ipairs(def.binders) do
-        if binder.annotation then
-            local ty = self:typeOf(binder.annotation, ctx.scope, binder.span)
+    local function annotation(index)
+        if index > #def.binders then
+            local values = {}
+            local function value(position)
+                if position > #def.values then
+                    local bound = {}
+                    local function binderAt(binderIndex)
+                        if binderIndex > #def.binders then
+                            if #bound == 1 then return k(machine, bound[1]) end
+                            return k(machine, V.results(bound))
+                        end
+                        local binder = def.binders[binderIndex]
+                        return self:checkAnnotationCPS(machine, ctx, binder,
+                            values[binderIndex] or V.unit(), function(m, checked)
+                                bound[binderIndex] = checked
+                                return binderAt(binderIndex + 1)
+                            end)
+                    end
+                    return binderAt(1)
+                end
+                return self:evalExpectedCPS(machine, ctx, def.values[position], expectations[position],
+                    function(m, produced)
+                        if position < #def.values then
+                            values[#values + 1] = self:first(produced)
+                        else
+                            for _, item in ipairs(self:expand(produced)) do values[#values + 1] = item end
+                        end
+                        return value(position + 1)
+                    end)
+            end
+            return value(1)
+        end
+        local binder = def.binders[index]
+        if not binder.annotation then return annotation(index + 1) end
+        return self:typeOfCPS(machine, binder.annotation, ctx.scope, binder.span, function(m, ty)
             -- A signature annotation types an unannotated lambda; any other annotation is what an
             -- array literal with no elements of its own has to take its type from.
             if ty:isSig() or ty:isArray() then expectations[index] = ty end
-        end
+            return annotation(index + 1)
+        end)
     end
-    local values = {}
-    for index, expr in ipairs(def.values) do
-        local value = self:evalExpected(ctx, expr, expectations[index])
-        if index < #def.values then
-            values[#values + 1] = self:first(value)
-        else
-            for _, item in ipairs(self:expand(value)) do values[#values + 1] = item end
-        end
-    end
-    local bound = {}
-    for index, binder in ipairs(def.binders) do
-        bound[index] = self:checkAnnotation(ctx, binder, values[index] or V.unit())
-    end
-    if #bound == 1 then return bound[1] end
-    return V.results(bound)
+    return annotation(1)
 end
 
-function Eval:checkAnnotation(ctx, binder, value)
-    if not binder.annotation then return value end
-    local ty = self:typeOf(binder.annotation, ctx.scope, binder.span)
-    self:requireAgainst(value, ty, binder.span)
-    return value
+-- A binder's annotation, checked against the value bound to it.
+function Eval:checkAnnotationCPS(machine, ctx, binder, value, k)
+    if not binder.annotation then return k(machine, value) end
+    return self:typeOfCPS(machine, binder.annotation, ctx.scope, binder.span, function(m, ty)
+        self:requireAgainst(value, ty, binder.span)
+        return k(m, value)
+    end)
 end
-
 -- A type expression is a Type value or a schema (which denotes its record type).
 function Eval:asType(value, span)
     if V.tag(value) == "type" then return value.value end
@@ -3585,30 +4432,32 @@ function Eval:asType(value, span)
     return nil
 end
 
-function Eval:typeOf(expr, sc, span)
+-- The type an expression denotes, computed in a static frame so that naming a type is not an
+-- evaluation of a value. The name being computed right now is the recursion knot: its cell comes back
+-- rather than its layout being demanded.
+function Eval:typeOfCPS(machine, expr, sc, span, k)
     if expr.kind == "Reference" then
         local slot = lookup(sc, expr.name.text)
-        -- The name is being computed right now, so this is the recursion knot: hand back the cell it
-        -- reserved rather than demanding its layout.
         if slot and slot.open and slot.cell and self:isTypeDefinition(slot) then
             self.types.referenced[slot.cell] = true
-            return S.named(slot.cell)
+            return k(machine, S.named(slot.cell))
         end
     end
-    local value = self:evalExpr(self:staticFrame(sc, span), expr)
-    local ty = self:asType(value, span)
-    if not ty then D.reject("type-required", "Expected a type", expr.span) end
-    return ty
+    return self:evalExprCPS(machine, self:staticFrame(sc, span), expr, function(m, value)
+        local ty = self:asType(value, span)
+        if not ty then D.reject("type-required", "Expected a type", expr.span) end
+        return k(m, ty)
+    end)
 end
 
-function Eval:requirement(def, index, sc, span)
+-- The declared type of one parameter, which is what a call requirement reports.
+function Eval:requirementCPS(machine, def, index, sc, span, k)
     local param = def.params[index]
     if not param.annotation then
         D.reject("type-required", "Parameter " .. param.name.text .. " needs a type annotation", param.span)
     end
-    return self:typeOf(param.annotation, sc, param.span)
+    return self:typeOfCPS(machine, param.annotation, sc, param.span, k)
 end
-
 -- Integer arithmetic -------------------------------------------------------------------------------
 -- One implementation of the per-width rules, shared by the interpreter and by the builder when it
 -- folds constants. Wrapping is masked at the type's own width, so a narrower integer wraps the way
@@ -3675,7 +4524,14 @@ end
 
 -- Argument expectations come from parameters whose annotation is written as a signature, so an
 -- unannotated lambda argument is typed by the requirement it is passed to.
-function Eval:evalArguments(ctx, exprs, callee)
+
+-- The argument vector. Every step here is direct except the final answer, because `evalExpected` is
+-- not on the machine yet; the walk over the arguments is iterative, so it costs one frame whatever the
+-- arity. A builtin parameter that names a type resolves on the type path and declares into the callee's
+-- scope as it goes.
+-- The argument vector. Every argument is a step, and a builtin parameter that names a type resolves
+-- on the type path and declares into the callee's scope as it goes.
+function Eval:evalArgumentsCPS(machine, ctx, exprs, callee, k)
     local def, offset
     local tag = V.tag(callee)
     if tag == "word" then
@@ -3690,67 +4546,78 @@ function Eval:evalArguments(ctx, exprs, callee)
     end
     local sc = (def and offset == 0) and scope(def.lexical) or nil
     local values = {}
-    for index, expr in ipairs(exprs) do
+    local function argument(index)
+        if index > #exprs then return k(machine, values) end
+        local expr = exprs[index]
         local param = sc and def.params[index] or nil
         if param and param.isType then
             -- A builtin parameter that names a type is resolved on the type path, which is the path
             -- that hands back the cell an open definition reserved instead of demanding its layout.
             -- That is what lets `Array(Node, 2)` inside Node's own definition reach the cycle checker
             -- rather than being refused as an eager initializer.
-            local held = V.type(self:typeOf(expr, sc, expr.span))
-            values[#values + 1] = held
-            if param.name and param.name.text then
-                declare(sc, param.name.text, { kind = "value", name = param.name.text, value = held },
-                    param.span)
-            end
-        else
-            local expected
-            -- The requirement decides, not how it was spelled: an alias of a signature is a signature,
-            -- so a lambda passed to `f: Endo` gets its parameter type from it just as one passed to a
-            -- written `(U32): U32` does. Only a signature is used this way, as that is what types a
-            -- lambda.
-            if param and param.annotation then
-                local ty = self:typeOf(param.annotation, sc, param.span)
-                if ty:isSig() then expected = ty end
-            end
-            local value = self:evalExpected(ctx, expr, expected)
-            if index < #exprs then
-                local adjusted = self:first(value)
-                values[#values + 1] = adjusted
-                if param and param.name and param.name.text then
-                    declare(sc, param.name.text, { kind = "value", name = param.name.text,
-                        value = adjusted }, param.span)
+            return self:typeOfCPS(machine, expr, sc, expr.span, function(m, ty)
+                local held = V.type(ty)
+                values[#values + 1] = held
+                if param.name and param.name.text then
+                    declare(sc, param.name.text, { kind = "value", name = param.name.text, value = held },
+                        param.span)
                 end
-            else
-                for _, item in ipairs(self:expand(value)) do values[#values + 1] = item end
-            end
+                return argument(index + 1)
+            end)
         end
+        local function withExpected(expected)
+            return self:evalExpectedCPS(machine, ctx, expr, expected, function(m, value)
+                if index < #exprs then
+                    local adjusted = self:first(value)
+                    values[#values + 1] = adjusted
+                    if param and param.name and param.name.text then
+                        declare(sc, param.name.text, { kind = "value", name = param.name.text,
+                            value = adjusted }, param.span)
+                    end
+                else
+                    for _, item in ipairs(self:expand(value)) do values[#values + 1] = item end
+                end
+                return argument(index + 1)
+            end)
+        end
+        -- The requirement decides, not how it was spelled: an alias of a signature is a signature,
+        -- so a lambda passed to `f: Endo` gets its parameter type from it just as one passed to a
+        -- written `(U32): U32` does. Only a signature is used this way, as that is what types a
+        -- lambda.
+        if not (param and param.annotation) then return withExpected(nil) end
+        return self:typeOfCPS(machine, param.annotation, sc, param.span, function(m, ty)
+            return withExpected(ty:isSig() and ty or nil)
+        end)
     end
-
-    return values
+    return argument(1)
 end
-
 -- `U8(x)`, `U16(x)` and `U32(x)` convert between integer widths: widening is free, narrowing traps
 -- when the value does not fit, and a known value outside the target is rejected while compiling.
 -- An integer becomes the nearest double, rounding once with ties to even. The exact kernel does the
 -- rounding, because a Lua division would round twice for a value above 2^53.
-function Eval:roundToFloat(ctx, value, span)
+
+-- An integer to F64: known values round here, a runtime one converts in code.
+function Eval:roundToFloatCPS(machine, ctx, value, span, k)
     local from = value.ty
     if V.isKnown(value) then
         local high, low = wordsOf(value)
         if from:isWide() and from:isSigned() and U64Kernel.slt(high, low, 0, 0) then
-            return V.f64(-U64Kernel.tofloat(U64Kernel.neg(high, low)))
+            return k(machine, V.f64(-U64Kernel.tofloat(U64Kernel.neg(high, low))))
         end
-        if from:isWide() then return V.f64(U64Kernel.tofloat(high, low)) end
-        return V.f64(value.n)
+        if from:isWide() then return k(machine, V.f64(U64Kernel.tofloat(high, low))) end
+        return k(machine, V.f64(value.n))
     end
-    return V.runtime(ctx.builder:convert(self:expression(ctx, value), S.F64), S.F64)
+    return self:expressionCPS(machine, ctx, value, nil, function(m, expr)
+        return k(m, V.runtime(ctx.builder:convert(expr, S.F64), S.F64))
+    end)
 end
 
 -- A float becomes an integer by truncation toward zero. A value the target cannot hold rejects when it
 -- is known and stops a run-time one, which is also what keeps a NaN from becoming some integer: a NaN
 -- compares false against every bound, so it is trapped on its own.
-function Eval:truncateToInt(ctx, ty, value, span)
+
+-- An F64 to an integer: known values are range-checked here, a runtime one in code.
+function Eval:truncateToIntCPS(machine, ctx, ty, value, span, k)
     local maxDouble, minDouble = floatBounds(ty)
     if V.isKnown(value) then
         -- Truncation toward zero, which is what a conversion to an integer means; `math.modf` is
@@ -3760,33 +4627,38 @@ function Eval:truncateToInt(ctx, ty, value, span)
             D.reject("numeric-range", "Value " .. string.format("%.17g", value.n)
                 .. " does not fit in " .. S.encode(ty), span)
         end
-        if ty:isWide() then return V.int64(ty, wordsOfDouble(truncated)) end
-        return V.int(ty, truncated)
+        if ty:isWide() then return k(machine, V.int64(ty, wordsOfDouble(truncated))) end
+        return k(machine, V.int(ty, truncated))
     end
-    local builder, expr = ctx.builder, self:expression(ctx, value)
-    builder:emit(ctx.body, Ir.Trap(builder:bin("Ne", expr, expr, S.Bool), "numeric-range"))
-    builder:emit(ctx.body, Ir.Trap(builder:bin("Lt", expr, builder:float(S.F64, minDouble), S.Bool),
-        "numeric-range"))
-    builder:emit(ctx.body, Ir.Trap(builder:bin("Ge", expr, builder:float(S.F64, maxDouble), S.Bool),
-        "numeric-range"))
-    return V.runtime(builder:convert(expr, ty), ty)
+    local builder = ctx.builder
+    return self:expressionCPS(machine, ctx, value, nil, function(m, expr)
+        builder:emit(ctx.body, Ir.Trap(builder:bin("Ne", expr, expr, S.Bool), "numeric-range"))
+        builder:emit(ctx.body, Ir.Trap(builder:bin("Lt", expr, builder:float(S.F64, minDouble), S.Bool),
+            "numeric-range"))
+        builder:emit(ctx.body, Ir.Trap(builder:bin("Ge", expr, builder:float(S.F64, maxDouble), S.Bool),
+            "numeric-range"))
+        return k(m, V.runtime(builder:convert(expr, ty), ty))
+    end)
 end
 
 -- `F64(x)` rounds an integer to the nearest double, and `U32(f)` truncates a float toward zero with
 -- the target's range checked. Both directions are explicit here even where the value would be exact,
 -- because that is what names the rounding at the point it happens.
-function Eval:applyConversion(ctx, ty, args, span)
+
+-- An explicit numeric conversion. A same-width signedness change keeps every bit; a narrowing that
+-- reaches the run-time case is checked where it happens, not at the assignment.
+function Eval:applyConversionCPS(machine, ctx, ty, args, span, k)
     if #args ~= 1 then D.reject("arity", "A conversion takes one value", span) end
     local value = args[1]
     if ty:isF64() then
-        if value.ty:isF64() then return value end
+        if value.ty:isF64() then return k(machine, value) end
         if not value.ty:isInteger() then
             D.reject("type-mismatch", "F64 needs a number, found " .. S.encode(value.ty or S.Unit), span)
         end
-        return self:roundToFloat(ctx, value, span)
+        return self:roundToFloatCPS(machine, ctx, value, span, k)
     end
     if ty:isInteger() and value.ty:isF64() then
-        return self:truncateToInt(ctx, ty, value, span)
+        return self:truncateToIntCPS(machine, ctx, ty, value, span, k)
     end
     if not value.ty:isInteger() then
         D.reject("type-mismatch", S.encode(ty) .. " needs an integer, found "
@@ -3796,82 +4668,90 @@ function Eval:applyConversion(ctx, ty, args, span)
         and value.ty:isSigned() ~= ty:isSigned()
     if reinterprets then
         -- The same width read the other way keeps every bit, so nothing is checked.
-        if V.isKnown(value) then return become(value, ty, wordsOf(value)) end
-        return V.runtime(ctx.builder:convert(self:expression(ctx, value), ty), ty)
+        if V.isKnown(value) then return k(machine, become(value, ty, wordsOf(value))) end
+        return self:expressionCPS(machine, ctx, value, nil, function(m, expr)
+            return k(m, V.runtime(ctx.builder:convert(expr, ty), ty))
+        end)
     end
     -- A known value has already returned above, so a narrowing that reaches here is a run-time one:
     -- it is refused when it is converted, not at the assignment. A bound only needs a check when the
     -- source can go beyond it, which is a strict comparison.
     local converted = self:convert(value, ty, span)
-    if converted then return converted end
-    local expr = self:expression(ctx, value)
+    if converted then return k(machine, converted) end
     local sourceMinHigh, sourceMinLow = S.minWordsOf(value.ty)
     local sourceMaxHigh, sourceMaxLow = S.maxWordsOf(value.ty)
     local minHigh, minLow = S.minWordsOf(ty)
     local maxHigh, maxLow = S.maxWordsOf(ty)
     local compare = (value.ty:isSigned() or ty:isSigned()) and U64Kernel.slt or U64Kernel.lt
-    if compare(sourceMinHigh, sourceMinLow, minHigh, minLow) then
-        ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Lt", expr,
-            self:constInt(ctx, value.ty, minHigh, minLow), S.Bool), "numeric-range"))
-    end
-    if compare(maxHigh, maxLow, sourceMaxHigh, sourceMaxLow) then
-        ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Gt", expr,
-            self:constInt(ctx, value.ty, maxHigh, maxLow), S.Bool), "numeric-range"))
-    end
-    return V.runtime(ctx.builder:convert(expr, ty), ty)
+    return self:expressionCPS(machine, ctx, value, nil, function(m, expr)
+        if compare(sourceMinHigh, sourceMinLow, minHigh, minLow) then
+            ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Lt", expr,
+                self:constInt(ctx, value.ty, minHigh, minLow), S.Bool), "numeric-range"))
+        end
+        if compare(maxHigh, maxLow, sourceMaxHigh, sourceMaxLow) then
+            ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Gt", expr,
+                self:constInt(ctx, value.ty, maxHigh, maxLow), S.Bool), "numeric-range"))
+        end
+        return k(m, V.runtime(ctx.builder:convert(expr, ty), ty))
+    end)
 end
-
 -- An integer constant of a type, which a 64-bit one holds as its two words.
 function Eval:constInt(ctx, ty, high, low)
     if ty:isWide() then return ctx.builder:int64(ty, high, low) end
     return ctx.builder:int(ty, low)
 end
 
-function Eval:evalApply(ctx, expr)
-    -- The invocation is in tail position when this call is the whole returned expression, but the
-    -- callee and the arguments never are.
+
+-- An application. The callee is one step, and the three builtin spellings (`Slice`, `Ptr`, `Ref`) tail
+-- into their own converted methods so a `Slice(x)` costs no frame of its own. The invocation is in tail
+-- position when the call is the returned expression; callee and arguments never are.
+-- An application. The callee is one step, and the three builtin spellings (`Slice`, `Ptr`, `Ref`) tail
+-- into their own converted methods so a `Slice(x)` costs no frame of its own. The invocation is in tail
+-- position when the call is the returned expression; callee and arguments never are.
+function Eval:evalApplyCPS(machine, ctx, expr, k)
     local tail = ctx.tail
     ctx.tail = false
-    local callee = self:evalExpr(ctx, expr.callee)
-    if V.tag(callee) == "word" and callee.def.sliceOf and #callee.args == 0 and #expr.arguments == 1 then
-        return self:evalSlice(ctx, expr.arguments[1])
-    end
-    if V.tag(callee) == "word" and callee.def.ptrOf and #callee.args == 0 and #expr.arguments == 1 then
-        return self:evalPtr(ctx, expr.arguments[1])
-    end
-    if V.tag(callee) == "word" and callee.def.refOf and #callee.args == 0 and #expr.arguments == 1 then
-        return self:evalRef(ctx, expr.arguments[1])
-    end
-    local args = self:evalArguments(ctx, expr.arguments, callee)
-    ctx.tail = tail
-    local tag = V.tag(callee)
-    if tag == "type" then
-        -- `Unit()` is the Unit value (syntax.md §1). An integer or float type converts; any other
-        -- type is not a call.
-        if callee.value == S.Unit then
-            if #args ~= 0 then D.reject("arity", "Unit() takes no value", expr.span) end
-            return V.unit()
+    return self:evalExprCPS(machine, ctx, expr.callee, function(m, callee)
+        if V.tag(callee) == "word" and callee.def.sliceOf and #callee.args == 0 and #expr.arguments == 1 then
+            return self:evalSliceCPS(m, ctx, expr.arguments[1], k)
         end
-        if callee.value:isInteger() or callee.value:isF64() then
-            return self:applyConversion(ctx, callee.value, args, expr.span)
+        if V.tag(callee) == "word" and callee.def.ptrOf and #callee.args == 0 and #expr.arguments == 1 then
+            return self:evalPtrCPS(m, ctx, expr.arguments[1], k)
         end
-        D.reject("callable-required", S.encode(callee.value) .. " is a type, not a callable",
-            expr.callee.span)
-    end
-    if tag == "ctor" then
-        -- An alternative whose payload is not a record takes one positional argument; a Unit
-        -- alternative takes none.
-        if callee.caseType == S.Unit then
-            if #args ~= 0 then D.reject("arity", "A Unit alternative takes no value", expr.span) end
-            return self:makeVariant(ctx, callee, nil, expr.span)
+        if V.tag(callee) == "word" and callee.def.refOf and #callee.args == 0 and #expr.arguments == 1 then
+            return self:evalRefCPS(m, ctx, expr.arguments[1], k)
         end
-        if #args ~= 1 then D.reject("arity", "A variant constructor takes one value", expr.span) end
-        self:requireAgainst(args[1], callee.caseType, expr.span)
-        return self:makeVariant(ctx, callee, args[1], expr.span)
-    end
-    return self:supply(ctx, callee, args, expr.span)
+        return self:evalArgumentsCPS(m, ctx, expr.arguments, callee, function(m2, args)
+            ctx.tail = tail
+            local tag = V.tag(callee)
+            if tag == "type" then
+                -- `Unit()` is the Unit value (syntax.md §1). An integer or float type converts; any other
+                -- type is not a call.
+                if callee.value == S.Unit then
+                    if #args ~= 0 then D.reject("arity", "Unit() takes no value", expr.span) end
+                    return k(m2, V.unit())
+                end
+                if callee.value:isInteger() or callee.value:isF64() then
+                    return self:applyConversionCPS(m2, ctx, callee.value, args, expr.span, k)
+                end
+                D.reject("callable-required", S.encode(callee.value) .. " is a type, not a callable",
+                    expr.callee.span)
+            end
+            if tag == "ctor" then
+                -- An alternative whose payload is not a record takes one positional argument; a Unit
+                -- alternative takes none.
+                if callee.caseType == S.Unit then
+                    if #args ~= 0 then D.reject("arity", "A Unit alternative takes no value", expr.span) end
+                    return self:makeVariantCPS(m2, ctx, callee, nil, expr.span, k)
+                end
+                if #args ~= 1 then D.reject("arity", "A variant constructor takes one value", expr.span) end
+                self:requireAgainst(args[1], callee.caseType, expr.span)
+                return self:makeVariantCPS(m2, ctx, callee, args[1], expr.span, k)
+            end
+            return self:supplyCPS(m2, ctx, callee, args, expr.span, k)
+        end)
+    end)
 end
-
 -- A foreign declaration is a word with no body: its requirements and its result are written down, and
 -- the host symbol it calls is the name it spells. Because there is nothing to infer from, a result that
 -- the annotation leaves open is refused rather than guessed.
@@ -3886,47 +4766,59 @@ end
 
 -- The call shape of a foreign word: every requirement is an input and the result is the declared one.
 -- It is built once per definition, because a foreign call has no specialization to key.
-function Eval:foreignInstance(def, span)
+
+-- The instance that describes one foreign declaration, built once per declaration.
+function Eval:foreignInstanceCPS(machine, def, span, k)
     local existing = self.foreigns.instances[def]
-    if existing then return existing end
+    if existing then return k(machine, existing) end
     local sc = scope(def.lexical)
     local plan, types, inputs = {}, {}, {}
-    for index, param in ipairs(def.params) do
-        local ty = self:requirement(def, index, sc, span)
-        S.checkRuntime(ty, span)
-        types[#types + 1] = ty
-        inputs[#inputs + 1] = S.inValue(ty)
-        plan[#plan + 1] = { kind = "value", position = index }
-    end
-    local declared, requirements = self:declaredResult(def, sc, span)
-    if not declared or next(requirements or {}) ~= nil then
-        D.reject("result-required", "Foreign word " .. def.name
-            .. " needs a concrete result, as in `: U32`", span)
-    end
-    for _, ty in ipairs(declared) do
-        if ty == false then
-            D.reject("result-required", "Foreign word " .. def.name .. " needs a concrete result", span)
+    local function parameter(index)
+        if index > #def.params then
+            return self:declaredResultCPS(machine, def, sc, span, function(m, declared, requirements)
+                if not declared or next(requirements or {}) ~= nil then
+                    D.reject("result-required", "Foreign word " .. def.name
+                        .. " needs a concrete result, as in `: U32`", span)
+                end
+                for _, ty in ipairs(declared) do
+                    if ty == false then
+                        D.reject("result-required", "Foreign word " .. def.name
+                            .. " needs a concrete result", span)
+                    end
+                    S.checkRuntime(ty, span)
+                end
+                -- A single `Unit` result is erased, exactly as a Wordlet result contract's Unit is:
+                -- there is no value to carry, and emitting one would declare a `void` variable.
+                if #declared == 1 and declared[1] == S.Unit then declared = {} end
+                local instance = { target = def.symbol, def = def, foreign = true, inputPlan = plan,
+                    inputTypes = types, inputs = inputs, results = declared }
+                self.foreigns.instances[def] = instance
+                self.foreigns.order[#self.foreigns.order + 1] = instance
+                return k(m, instance)
+            end)
         end
-        S.checkRuntime(ty, span)
+        return self:requirementCPS(machine, def, index, sc, span, function(m, ty)
+            S.checkRuntime(ty, span)
+            types[#types + 1] = ty
+            inputs[#inputs + 1] = S.inValue(ty)
+            plan[#plan + 1] = { kind = "value", position = index }
+            return parameter(index + 1)
+        end)
     end
-    -- A single `Unit` result is erased, exactly as a Wordlet result contract's Unit is: there is no
-    -- value to carry, and emitting one would declare a `void` variable.
-    if #declared == 1 and declared[1] == S.Unit then declared = {} end
-    local instance = { target = def.symbol, def = def, foreign = true, inputPlan = plan,
-        inputTypes = types, inputs = inputs, results = declared }
-    self.foreigns.instances[def] = instance
-    self.foreigns.order[#self.foreigns.order + 1] = instance
-    return instance
+    return parameter(1)
 end
-
 -- A foreign call is an effect the compiler cannot see into, so it exists only where there is code to
 -- emit: it is never folded, and the reference interpreter has no binding to call.
-function Eval:invokeForeign(ctx, def, values, span)
+
+-- A foreign call exists only in compiled code.
+function Eval:invokeForeignCPS(machine, ctx, def, values, span, k)
     if not ctx.residual then
         D.reject("foreign-effect", "A foreign call exists only in compiled code: " .. def.name
             .. "; a constant argument does not make the host call foldable", span)
     end
-    return self:emitCall(ctx, self:foreignInstance(def, span), values, span, nil)
+    return self:foreignInstanceCPS(machine, def, span, function(m, instance)
+        return self:emitCallCPS(m, ctx, instance, values, span, nil, k)
+    end)
 end
 
 -- The one law (syntax.md §3): evaluate the callee, evaluate the arguments left to right, append
@@ -3934,7 +4826,13 @@ end
 -- here, so a partial application is decided once and each kind of saturated call has exactly one
 -- owner. `args` are evaluated values: `evalArguments` typed them against the requirements already.
 
-function Eval:supply(ctx, callee, args, span)
+-- The shim: the direct callers that are left (the residual match and the runtime dispatch) still take
+-- a value from this.
+
+-- The one place a callee of any tag becomes an invocation. A partial application answers with the
+-- bound word or method rather than calling anything, and every real call is a tail call into the
+-- family that handles it, so one supplied call costs one step and no frames of its own.
+function Eval:supplyCPS(machine, ctx, callee, args, span, k)
     local tag = V.tag(callee)
     if tag == "word" then
         local def = callee.def
@@ -3952,11 +4850,11 @@ function Eval:supply(ctx, callee, args, span)
                 end
                 requireStatic(bound, span, def)
             end
-            return V.word(def, bound, span)
+            return k(machine, V.word(def, bound, span))
         end
-        if def.builtin then return self:invokeBuiltin(ctx, def, bound, span) end
-        if def.foreign then return self:invokeForeign(ctx, def, bound, span) end
-        return self:invokeSource(ctx, def, bound, span)
+        if def.builtin then return self:invokeBuiltinCPS(machine, ctx, def, bound, span, k) end
+        if def.foreign then return self:invokeForeignCPS(machine, ctx, def, bound, span, k) end
+        return self:invokeSourceCPS(machine, ctx, def, bound, span, k)
     end
     if tag == "method" then
         local def, receiver = callee.def, callee.receiver
@@ -3964,39 +4862,54 @@ function Eval:supply(ctx, callee, args, span)
         if #bound > #def.params then D.reject("arity", "Overapplication is not supported", span) end
         if #bound < #def.params then
             requireStatic(bound, span, def)
-            return setmetatable({ tag = "method", def = def, receiver = receiver, args = bound }, V.mt)
+            return k(machine, setmetatable({ tag = "method", def = def, receiver = receiver,
+                args = bound }, V.mt))
         end
         if not receiver then
             D.reject("missing-receiver", "Bind the receiver before calling " .. def.name, span)
         end
-        return self:invokeMethod(ctx, def, bound, receiver, span)
+        return self:invokeMethodCPS(machine, ctx, def, bound, receiver, span, k)
     end
     if tag == "closure" then
-        return self:invokeClosure(ctx, callee.plan, nil, args, span, callee.bound)
+        return self:invokeClosureCPS(machine, ctx, callee.plan, nil, args, span, callee.bound, k)
     end
-    return self:invokeRuntime(ctx, callee, args, span)
+return self:invokeRuntimeCPS(machine, ctx, callee, args, span, k)
 end
 
 
 -- A builtin runs its terminal directly: it has no body to fold and never builds an instance.
-function Eval:invokeBuiltin(ctx, def, values, span)
-    return def.builtin(self, ctx, values, span)
+
+-- A builtin is one Lua function over its arguments, so its answer is direct.
+function Eval:invokeBuiltinCPS(machine, ctx, def, values, span, k)
+    return k(machine, def.builtin(self, ctx, values, span))
 end
 
 -- A named word with a source body, which is the only word that can become an instance.
-function Eval:invokeSource(ctx, def, values, span)
-    return self:foldOrBuild(ctx, def, values, span, nil, "This call needs runtime storage or values")
+
+-- A named word: fold it now or compile an instance.
+function Eval:invokeSourceCPS(machine, ctx, def, values, span, k)
+    return self:foldOrBuildCPS(machine, ctx, def, values, span, nil,
+        "This call needs runtime storage or values", k)
 end
 
 -- A method on a receiver: the receiver is an argument of a different shape, and only a concrete
 -- record can have its fields read for a static fold.
-function Eval:invokeMethod(ctx, def, values, receiver, span)
-    return self:foldOrBuild(ctx, def, values, span, receiver, "This method call needs runtime storage")
+
+-- A method call: the receiver's fields are the fold's input, so it folds only over a concrete record.
+function Eval:invokeMethodCPS(machine, ctx, def, values, receiver, span, k)
+    return self:foldOrBuildCPS(machine, ctx, def, values, span, receiver,
+        "This method call needs runtime storage", k)
 end
 
 -- The fold-or-build decision every saturated word and method call shares: a call whose arguments
 -- are all known, and either all static or in normalize code, is folded; anything else is built.
-function Eval:foldOrBuild(ctx, def, values, span, receiver, subject)
+
+-- Fold the call now, or compile an instance for it. This is where the `pcall` used to be, and it is
+-- the reason the machine has handlers: folding is an optimization in residual code, so a diagnostic
+-- that says the body needs runtime storage is the signal to compile instead, while any other
+-- diagnostic is a real one. The handler below is that decision; the machine routes a raised diagnostic
+-- to it instead of unwinding a host stack, so the fold attempt costs one descriptor and no frames.
+function Eval:foldOrBuildCPS(machine, ctx, def, values, span, receiver, subject, k)
     local allKnown, allStatic = true, true
     for _, value in ipairs(values) do
         if not V.isKnown(value) then allKnown = false end
@@ -4005,29 +4918,41 @@ function Eval:foldOrBuild(ctx, def, values, span, receiver, subject)
     local foldable = allKnown and (not ctx.residual or allStatic)
     if foldable and receiver ~= nil then foldable = V.tag(receiver) == "record" end
     if foldable then
-        -- Folding is an optimization in residual code: a diagnostic that says the body needs runtime
-        -- storage is the signal to compile it instead; any other diagnostic is a real one. The depth
-        -- itself is restored by the session.
-        local ok, folded = self:withNesting("static", span, def.name, self.evaluateStatically, self,
-            def, values, span, receiver)
-        if ok then return folded end
-        if not ctx.residual then error(folded, 0) end
-        if not (D.is(folded) and (folded.code == "runtime-in-normalization"
-            or folded.code == "static-depth" or folded.code == "foreign-effect")) then
-            error(folded, 0)
-        end
+        -- Checked before the descriptor is pushed, so a refusal leaves the session as it found it, and
+        -- raised to the *enclosing* handler: a nested fold that runs out of room in residual code
+        -- compiles instead.
+        machine:checkDepth("static", span, def.name)
+        machine:push("static", span, def.name, function(m, diagnostic)
+            if not ctx.residual then error(diagnostic, 0) end
+            if not (D.is(diagnostic) and (diagnostic.code == "runtime-in-normalization"
+                or diagnostic.code == "static-depth" or diagnostic.code == "foreign-effect")) then
+                error(diagnostic, 0)
+            end
+            return self:callInstanceCPS(m, ctx, def, values, span, receiver, k)
+        end)
+        return self:evaluateStaticallyCPS(machine, def, values, span, receiver, function(m, folded)
+            machine:pop()
+            return k(m, folded)
+        end)
     end
     if not ctx.residual then
         D.reject("runtime-in-normalization", subject, span)
     end
-    return self:callInstance(ctx, def, values, span, receiver)
+    return self:callInstanceCPS(machine, ctx, def, values, span, receiver, k)
 end
 
 -- `Word { key = value }`: supply a word's keyed requirements. Values are evaluated in written
 -- order; a name that is not a requirement, or one supplied twice, rejects. A keyed requirement is
 -- always annotated, and an annotation written as a signature types the value supplied for it exactly
 -- as a positional requirement does, which is what lets `f { g = |x| -> x }` leave `x` unannotated.
-function Eval:applyKeyed(ctx, word, fields, span, tail)
+
+-- A keyed invocation `f { x = 1 }`. Its requirements have no order, so the walk over the written
+-- fields is a local driver; a fully supplied word becomes a positional call through `supply`, and a
+-- partial one becomes a specialised word whose remaining requirements are positional.
+-- A keyed invocation `f { x = 1 }`. Its requirements have no order, so the walk over the written
+-- fields is a local driver; a fully supplied word becomes a positional call through `supply`, and a
+-- partial one becomes a specialised word whose remaining requirements are positional.
+function Eval:applyKeyedCPS(machine, ctx, word, fields, span, tail, k)
     local def = word.def
     local params = def.params
     local byName = {}
@@ -4037,51 +4962,62 @@ function Eval:applyKeyed(ctx, word, fields, span, tail)
     -- A keyed requirement has no order, so an annotation may not depend on another key: the word's
     -- own lexical scope is the right place to resolve one.
     local lexical = scope(def.lexical)
-    for _, field in ipairs(fields) do
-        local name = field.name.text
+    local function afterFields()
+        local remaining = {}
+        for _, param in ipairs(params) do
+            if bound[param.name.text] == nil then remaining[#remaining + 1] = param end
+        end
+        if #remaining == 0 then
+            local values = {}
+            for index, param in ipairs(params) do values[index] = bound[param.name.text] end
+            ctx.tail = tail
+            return self:supplyCPS(machine, ctx, V.word(def, values, span), {}, span, k)
+        end
+        for _, value in pairs(bound) do
+            if not V.isStatic(value) then
+                D.reject("static-required", "Partial keyed supply needs a static value", span)
+            end
+        end
+        self.nextDef = self.nextDef + 1
+        local specialized = {
+            id = self.nextDef, name = def.name, node = def.node, span = def.span,
+            params = remaining, keyed = remaining, statics = bound,
+            result = def.result, body = def.body, lexical = def.lexical, fields = def.fields,
+            tailSelf = def.tailSelf,
+        }
+        ctx.tail = false
+        return k(machine, V.word(specialized, {}, span))
+    end
+    local function field(index)
+        if index > #fields then return afterFields() end
+        local entry = fields[index]
+        local name = entry.name.text
         local param = byName[name]
         if not param then
             D.reject("unknown-member", "Word " .. def.name .. " has no keyed requirement " .. name,
-                field.name.span)
+                entry.name.span)
         end
         if bound[name] ~= nil then
-            D.reject("duplicate", "Keyed requirement " .. name .. " is supplied twice", field.name.span)
+            D.reject("duplicate", "Keyed requirement " .. name .. " is supplied twice", entry.name.span)
         end
-        local expected
-        if param.annotation then
-            local ty = self:typeOf(param.annotation, lexical, param.span)
-            if ty:isSig() then expected = ty end
+        local function withExpected(expected)
+            return self:evalExpectedCPS(machine, ctx, entry.value, expected, function(m, value)
+                bound[name] = value
+                return field(index + 1)
+            end)
         end
-        bound[name] = self:evalExpected(ctx, field.value, expected)
+        if not param.annotation then return withExpected(nil) end
+        return self:typeOfCPS(machine, param.annotation, lexical, param.span, function(m, ty)
+            return withExpected(ty:isSig() and ty or nil)
+        end)
     end
-    local remaining = {}
-    for _, param in ipairs(params) do
-        if bound[param.name.text] == nil then remaining[#remaining + 1] = param end
-    end
-    if #remaining == 0 then
-        local values = {}
-        for index, param in ipairs(params) do values[index] = bound[param.name.text] end
-        ctx.tail = tail
-        return self:supply(ctx, V.word(def, values, span), {}, span)
-    end
-    for _, value in pairs(bound) do
-        if not V.isStatic(value) then
-            D.reject("static-required", "Partial keyed supply needs a static value", span)
-        end
-    end
-    self.nextDef = self.nextDef + 1
-    local specialized = {
-        id = self.nextDef, name = def.name, node = def.node, span = def.span,
-        params = remaining, keyed = remaining, statics = bound,
-        result = def.result, body = def.body, lexical = def.lexical, fields = def.fields,
-        tailSelf = def.tailSelf,
-    }
-    ctx.tail = false
-    return V.word(specialized, {}, span)
+    return field(1)
 end
-
 -- Shared scope construction: parameters, and receiver fields for methods.
-function Eval:parameterScope(def, values, receiver)
+
+-- The scope a word's body sees: the receiver's fields, the statics a partial supply bound, and then
+-- the parameters one at a time, because a later annotation may depend on an earlier parameter.
+function Eval:parameterScopeCPS(machine, def, values, receiver, k)
     local sc = scope(def.lexical)
     if receiver then
         local rdef = receiver.schema or receiver.def
@@ -4099,17 +5035,21 @@ function Eval:parameterScope(def, values, receiver)
     for name, value in pairs(def.statics or {}) do
         declare(sc, name, { kind = "value", name = name, value = value }, def.span)
     end
-    for index, param in ipairs(def.params) do
+    local function parameter(index)
+        if index > #def.params then return k(machine, sc) end
+        local param = def.params[index]
         -- Check each requirement against the supplied value before binding the next parameter,
         -- since a later annotation may depend on an earlier parameter.
-        local ty = self:requirement(def, index, sc, def.span)
-        local value = self:copyArgument(values[index])
-        if value then self:requireAgainst(value, ty, param.span) end
-        declare(sc, param.name.text, { kind = "value", name = param.name.text, value = value }, param.span)
+        return self:requirementCPS(machine, def, index, sc, def.span, function(m, ty)
+            local value = self:copyArgument(values[index])
+            if value then self:requireAgainst(value, ty, param.span) end
+            declare(sc, param.name.text, { kind = "value", name = param.name.text, value = value },
+                param.span)
+            return parameter(index + 1)
+        end)
     end
-    return sc
+    return parameter(1)
 end
-
 -- Ordinary parameter binding copies record data; a local alias keeps its instance, an argument
 -- does not. Field values are immutable, so a shallow copy of the field table is a value copy.
 function Eval:copyArgument(value)
@@ -4125,97 +5065,126 @@ function Eval:copyArgument(value)
 end
 
 
-function Eval:evaluateStatically(def, values, span, receiver)
-    local sc = self:parameterScope(def, values, receiver)
-    local declared, requirements = self:declaredResult(def, sc, span)
-    local ctx = self:staticFrame(sc, span)
-    ctx.expectedResult = self:resultExpectation(requirements)
-    local result = self:execBody(ctx, def.body, span)
-    if declared then
-        if #declared ~= #result then
-            D.reject("branch-result", "Word " .. def.name .. " returned " .. #result
-                .. " values but declares " .. #declared, span)
-        end
-        for index, ty in ipairs(declared) do
-            if ty ~= false then self:requireAgainst(result[index], ty, span) end
-        end
-    end
-    if requirements then
-        for index, requirement in pairs(requirements) do
-            local actual = result[index]
-            self:requireResultSignature(actual, requirement, span)
-        end
-    end
-    if #result == 0 then return V.unit() end
-    if #result == 1 then return result[1] end
-    return V.results(result)
+-- Compile-time execution of a word over concrete values. The frame is a static one, which is what makes
+-- module storage readable and writable here, and the block walk carries the depth.
+-- Compile-time execution of a word over concrete values. The frame is a static one, which is what makes
+-- module storage readable and writable here, and the block walk carries the depth.
+function Eval:evaluateStaticallyCPS(machine, def, values, span, receiver, k)
+    return self:parameterScopeCPS(machine, def, values, receiver, function(m, sc)
+        return self:declaredResultCPS(m, def, sc, span, function(m2, declared, requirements)
+            local ctx = self:staticFrame(sc, span)
+            ctx.expectedResult = self:resultExpectation(requirements)
+            return self:execBodyCPS(m2, ctx, def.body, span, function(m3, result)
+                if declared then
+                    if #declared ~= #result then
+                        D.reject("branch-result", "Word " .. def.name .. " returned " .. #result
+                            .. " values but declares " .. #declared, span)
+                    end
+                    for index, ty in ipairs(declared) do
+                        if ty ~= false then self:requireAgainst(result[index], ty, span) end
+                    end
+                end
+                if requirements then
+                    for index, requirement in pairs(requirements) do
+                        self:requireResultSignature(result[index], requirement, span)
+                    end
+                end
+                if #result == 0 then return k(m3, V.unit()) end
+                if #result == 1 then return k(m3, result[1]) end
+                return k(m3, V.results(result))
+            end)
+        end)
+    end)
 end
-
 -- The saturated call that cannot fold: emit a call to the instance, or, when the call is a tail call
 -- to the instance currently being built, a back edge to its loop header.
-function Eval:callInstance(ctx, def, values, span, receiver)
-    local instance = self:instanceFor(def, span, values, receiver)
-    if instance.status == "building" and not instance.results then
-        D.reject("recursive-result", "Recursive " .. (receiver and "method " or "word ") .. def.name
-            .. " needs an explicit result annotation", span)
-    end
-    -- A tail call to the instance currently being built is a back edge, not a recursive call. A block
-    -- with a pending deferred action does not become a loop: the action runs after the call returns
-    -- and before the value leaves, which is not the order a back edge would give.
-    if ctx.tail and not ctx.deferFrame and ctx.instance == instance and instance.loopTargets then
-        self:loopBack(ctx, instance, values, span)
-        return V.unit()
-    end
-    return self:emitCall(ctx, instance, values, span, receiver)
+
+-- A call to a compiled instance, or a back edge when the tail call is to the instance being built. A
+-- block with a pending deferred action does not become a loop: the action runs after the call returns
+-- and before the value leaves, which is not the order a back edge would give.
+function Eval:callInstanceCPS(machine, ctx, def, values, span, receiver, k)
+    return self:instanceForCPS(machine, def, span, values, receiver, function(m, instance)
+        if instance.status == "building" and not instance.results then
+            D.reject("recursive-result", "Recursive " .. (receiver and "method " or "word ") .. def.name
+                .. " needs an explicit result annotation", span)
+        end
+        if ctx.tail and not ctx.deferFrame and ctx.instance == instance and instance.loopTargets then
+            return self:loopBackCPS(m, ctx, instance, values, span, k)
+        end
+        return self:emitCallCPS(m, ctx, instance, values, span, receiver, k)
+    end)
 end
 
 -- Evaluate every next argument before assigning any parameter, then transfer to the loop head.
-function Eval:loopBack(ctx, instance, values, span)
+
+-- A tail call to the instance being built is a back edge: the loop targets are written from the
+-- arguments and the block ends with `Next` rather than calling itself.
+-- A tail call to the instance being built is a back edge: the loop targets are written from the
+-- arguments and the block ends with `Next` rather than calling itself.
+function Eval:loopBackCPS(machine, ctx, instance, values, span, k)
     local builder = ctx.builder
     local temporaries = {}
-    for index, target in ipairs(instance.loopTargets) do
+    local function targetAt(index)
+        if index > #instance.loopTargets then
+            for position, target in ipairs(instance.loopTargets) do
+                builder:store(ctx.body, Ir.Local(target.storage), temporaries[position])
+            end
+            builder:emit(ctx.body, Ir.Next)
+            instance.loopBack = true
+            ctx.terminated = true
+            return k(machine)
+        end
+        local target = instance.loopTargets[index]
         local value = values[target.position]
         self:requireType(value, target.ty, span)
         local id = builder:valueId()
-        builder:emit(ctx.body, Ir.Let(id, target.ty, self:expression(ctx, value)))
-        temporaries[index] = builder:ref(id, target.ty)
+        return self:expressionCPS(machine, ctx, value, nil, function(m, expr)
+            builder:emit(ctx.body, Ir.Let(id, target.ty, expr))
+            temporaries[index] = builder:ref(id, target.ty)
+            return targetAt(index + 1)
+        end)
     end
-    for index, target in ipairs(instance.loopTargets) do
-        builder:store(ctx.body, Ir.Local(target.storage), temporaries[index])
-    end
-    builder:emit(ctx.body, Ir.Next)
-    instance.loopBack = true
-    ctx.terminated = true
+    return targetAt(1)
 end
-
 -- Builds the argument list from the instance's input plan.
-function Eval:emitCall(ctx, instance, values, span, receiver)
+
+-- The call itself: a borrowed receiver becomes a place argument, every other input is materialised,
+-- and the results come back as runtime values with the Unit slots reinserted.
+function Eval:emitCallCPS(machine, ctx, instance, values, span, receiver, k)
     local builder = ctx.builder
     local args = {}
-    for index, input in ipairs(instance.inputPlan) do
-        if input.kind == "place" then
+    local function input(index)
+        if index > #instance.inputPlan then
+            local runtime = instance.runtimeResults or self:runtimeResults(instance.results)
+            local results = {}
+            for _ = 1, #runtime do results[#results + 1] = builder:valueId() end
+            builder:emit(ctx.body, Ir.Call(S.list(results), instance.target, S.list(args)))
+            local ir = {}
+            for position, ty in ipairs(runtime) do
+                ir[position] = V.runtime(builder:ref(results[position], ty), ty)
+            end
+            local out = self:logicalResults(instance.results, ir)
+            if #out == 0 then return k(machine, V.unit()) end
+            if #out == 1 then return k(machine, out[1]) end
+            return k(machine, V.results(out))
+        end
+        local plan = instance.inputPlan[index]
+        if plan.kind == "place" then
             -- A borrowed receiver must be a place; a record still carrying its construction
             -- expression materialises once here.
-            args[#args + 1] = Ir.BorrowArg(self:recordPlace(ctx, receiver, span))
-        else
-            args[#args + 1] = Ir.ValueArg(self:expression(ctx, values[input.position],
-                instance.inputTypes[index]))
+            return self:recordPlaceCPS(machine, ctx, receiver, span, function(m, place)
+                args[#args + 1] = Ir.BorrowArg(place)
+                return input(index + 1)
+            end)
         end
+        return self:expressionCPS(machine, ctx, values[plan.position], instance.inputTypes[index],
+            function(m, expr)
+                args[#args + 1] = Ir.ValueArg(expr)
+                return input(index + 1)
+            end)
     end
-    local runtime = instance.runtimeResults or self:runtimeResults(instance.results)
-    local results = {}
-    for _ = 1, #runtime do results[#results + 1] = builder:valueId() end
-    builder:emit(ctx.body, Ir.Call(S.list(results), instance.target, S.list(args)))
-    local ir = {}
-    for index, ty in ipairs(runtime) do
-        ir[index] = V.runtime(builder:ref(results[index], ty), ty)
-    end
-    local out = self:logicalResults(instance.results, ir)
-    if #out == 0 then return V.unit() end
-    if #out == 1 then return out[1] end
-    return V.results(out)
+    return input(1)
 end
-
 -- Instance construction ------------------------------------------------------------------------
 
 function Eval:instanceKey(def, values, receiver)
@@ -4250,22 +5219,26 @@ function Eval:instanceKey(def, values, receiver)
     return table.concat(parts, "/")
 end
 
-function Eval:instanceFor(def, span, values, receiver)
+-- The shim: the word path reaches the converted form directly; this stays for any caller that has not
+-- converted.
+
+-- The instance for one definition and argument vector. A build that failed is remembered, so a later
+-- call with the same key reports the same diagnostic rather than finding an instance never finished.
+function Eval:instanceForCPS(machine, def, span, values, receiver, k)
     values = values or {}
     local key = self:instanceKey(def, values, receiver)
     local existing = self.instances[key]
     if existing then
-        -- A build that failed is remembered, so a later call with the same key reports the same
-        -- diagnostic rather than finding an instance that was never finished.
         if existing.failure then error(existing.failure, 0) end
-        return existing
+        return k(machine, existing)
     end
     local count = 0
     for _ in pairs(self.instances) do count = count + 1 end
-    if count >= (self.limits.keys or 1024) then D.resource("keys", "Residual instance budget exhausted", span) end
-    return self:buildInstance(key, def, values, span, receiver)
+    if count >= (self.limits.keys or 1024) then
+        D.resource("keys", "Residual instance budget exhausted", span)
+    end
+    return self:buildInstanceCPS(machine, key, def, values, span, receiver, k)
 end
-
 function Eval:loopTarget(instance, position, storage, ty)
     instance.loopTargets = instance.loopTargets or {}
     instance.loopTargets[#instance.loopTargets + 1] = { position = position, storage = storage, ty = ty }
@@ -4273,21 +5246,24 @@ end
 
 -- A failed build leaves the half-made instance remembered as failed, so a later attempt re-raises
 -- that diagnostic instead of building again. The nesting budget itself belongs to the session.
-function Eval:buildInstance(key, def, values, span, receiver)
-    local ok, result = self:withNesting("build", span, nil, self.constructInstance, self,
-        key, def, values, span, receiver)
-    if not ok then
+
+-- Building a word or method instance, one `Build` descriptor per attempt.
+function Eval:buildInstanceCPS(machine, key, def, values, span, receiver, k)
+    machine:checkDepth("build", span, key)
+    machine:push("build", span, key, function(_, diagnostic)
         local instance = self.instances[key]
         if instance then
-            instance.failure = result
+            instance.failure = diagnostic
             instance.status = "failed"
         end
-        error(result, 0)
-    end
-    return result
+        error(diagnostic, 0)
+    end)
+    return self:constructInstanceCPS(machine, key, def, values, span, receiver, function(m, instance)
+        machine:pop()
+        return k(m, instance)
+    end)
 end
-
-function Eval:constructInstance(key, def, values, span, receiver)
+function Eval:constructInstanceCPS(machine, key, def, values, span, receiver, k)
     self.nextFn = self.nextFn + 1
     local instance = { key = key, def = def, target = "wordletfn_" .. self.nextFn,
         status = "building", args = values, inputPlan = {}, inputTypes = {} }
@@ -4323,130 +5299,13 @@ function Eval:constructInstance(key, def, values, span, receiver)
         declare(sc, name, { kind = "value", name = name, value = value }, span)
     end
 
-    for index, param in ipairs(def.params) do
-        local ty = self:requirement(def, index, sc, span)
-        if ty:isSig() then
-            -- A callable parameter: static code is specialised away entirely; otherwise the Owned
-            -- type carries the code identity, so the call stays direct and only the environment
-            -- travels as a by-value input.
-            local supplied = values[index]
-            if supplied ~= nil and (V.tag(supplied) == "closure" or V.tag(supplied) == "word") then
-                if self:callableMatches(supplied, ty) == false then
-                    D.reject("callable-shape", "Callable does not match the required signature", param.span)
-                end
-                if V.isStatic(supplied) then
-                    declare(sc, param.name.text, { kind = "value", name = param.name.text, value = supplied },
-                        param.span)
-                    goto continue
-                else
-                    -- A closure with a runtime environment travels by value as that environment. A
-                    -- closure that borrows storage is non-retaining, so the parameter becomes an
-                    -- erased view, which the caller binds through a local adapter that holds the
-                    -- borrowed places.
-                    ty = self:borrowsStorage(supplied) and S.view(ty) or supplied.ty
-                end
-            elseif V.tag(supplied) == "method" then
-                -- A method borrows its receiver, so it is non-retaining for the same reason a
-                -- borrowing closure is: the parameter takes a view.
-                ty = S.view(ty)
-            elseif supplied ~= nil and V.tag(supplied) == "runtime" and supplied.ty:isOwned() then
-                ty = supplied.ty
-            elseif supplied ~= nil and V.tag(supplied) == "runtime" and supplied.ty:isView() then
-                ty = supplied.ty
-            elseif supplied == nil then
-                -- An entry face with no call site: the callable arrives from outside, so it needs
-                -- the invocation-pointer ABI rather than a code identity.
-                ty = S.view(ty)
-            else
-                D.todo("opaque-callable",
-                    "A callable argument with no known code needs a function-pointer ABI", param.span)
-            end
-        else
-            -- `Type` and the other compile-time descriptors have no runtime representation, so a
-            -- parameter of one has to be supplied statically; the static branch below binds it.
-            if not S.runtime(ty) then
-                if values[index] == nil or not V.isStatic(values[index]) then
-                    D.reject("static-required", "Parameter " .. param.name.text
-                        .. " needs a static argument of type " .. S.display(ty), param.span)
-                end
-            else
-                S.checkRuntime(ty, param.span)
-            end
-        end
-        if ty == S.Unit then
-            -- Erased exactly like a Unit result: no input, no ABI slot, name bound directly.
-            declare(sc, param.name.text, { kind = "value", name = param.name.text, value = V.unit() }, param.span)
-            goto continue
-        end
-        do
-        local supplied = values[index]
-        -- A supplied argument is checked against the requirement whichever branch binds it. The
-        -- static branch below checks the type as well; without this line a run-time argument would
-        -- reach the IR checker unchecked, where a wrong type is a compiler bug instead of a source
-        -- error.
-        if supplied ~= nil then self:requireAgainst(supplied, ty, param.span) end
-        if supplied ~= nil and V.isStatic(supplied) then
-            self:requireType(supplied, ty, param.span)
-            declare(sc, param.name.text, { kind = "value", name = param.name.text, value = supplied }, param.span)
-        else
-            local value = builder:valueId()
-            params[#params + 1] = Ir.ValueParam(#inputs, value, ty)
-            inputs[#inputs + 1] = S.inValue(ty)
-            paramTypes[#paramTypes + 1] = ty
-            instance.inputPlan[#instance.inputPlan + 1] = { kind = "value", position = index }
-            -- The call site needs each input's type to materialise its argument, so the two lists
-            -- are maintained together.
-            instance.inputTypes[#instance.inputTypes + 1] = ty
-            if ty:isArray() then
-                -- A by-value array parameter owns fresh storage only when an element is addressed;
-                -- a whole-value use reads the input directly.
-                declare(sc, param.name.text, { kind = "value", name = param.name.text,
-                    value = V.array(ty, nil, nil, false, builder:ref(value, ty), setup) }, param.span)
-            elseif ty:isRecord() then
-                -- A by-value record parameter owns fresh storage only when a write or an address
-                -- demands one, so a read-only parameter reads the input directly. A loop-carried
-                -- parameter needs its storage up front because the back edge names it.
-                local fields = { fields = S.fieldsOf(ty),
-                    fieldNames = S.fieldNames(ty), statics = {}, readonly = {}, methods = {}, type = ty }
-                if def.tailSelf then
-                    local storage = builder:storageId()
-                    setup[#setup + 1] = Ir.Var(storage, ty, builder:ref(value, ty))
-                    declare(sc, param.name.text, { kind = "value", name = param.name.text,
-                        value = V.object(ty, Ir.Local(storage), fields) }, param.span)
-                    self:loopTarget(instance, index, storage, ty)
-                else
-                    declare(sc, param.name.text, { kind = "value", name = param.name.text,
-                        value = V.object(ty, nil, fields, nil, false, builder:ref(value, ty), setup) },
-                        param.span)
-                end
-            elseif def.tailSelf then
-                -- Loop-carried parameters need mutable storage so a back edge can rebind them.
-                local storage = builder:storageId()
-                setup[#setup + 1] = Ir.Var(storage, ty, builder:ref(value, ty))
-                self:loopTarget(instance, index, storage, ty)
-                -- A value parameter is immutable, so one read per iteration is equivalent to reading at
-                -- every mention. Sharing the read is what lets expressions built from the parameter be
-                -- shared too, because reads are never interned.
-                local read = builder:valueId()
-                instance.loopHeader = instance.loopHeader or {}
-                instance.loopHeader[#instance.loopHeader + 1] = Ir.Read(read, ty, Ir.Local(storage))
-                declare(sc, param.name.text, { kind = "value", name = param.name.text,
-                    value = V.runtime(builder:ref(read, ty), ty) }, param.span)
-            else
-                declare(sc, param.name.text, { kind = "value", name = param.name.text,
-                    value = V.runtime(builder:ref(value, ty), ty) }, param.span)
-            end
-        end
-        end
-        ::continue::
-    end
-
-    local declared, requirements = self:declaredResult(def, sc, span)
+    local function afterParameters(m)
+        return self:declaredResultCPS(m, def, sc, span, function(m, declared, requirements)
     instance.results, instance.resultRequirements = declared, requirements
     local ctx = self:residualFrame(sc, span)
     ctx.builder, ctx.body, ctx.fn, ctx.instance = builder, body, { id = instance.target }, instance
     ctx.expectedResult = self:resultExpectation(requirements)
-    self:execBodyResidual(ctx, def.body, span)
+    return self:execBodyResidualCPS(m, ctx, def.body, span, function(m2)
     if instance.results then
         for index, ty in ipairs(instance.results) do
             if ty == false then instance.results[index] = ctx.resultTypes and ctx.resultTypes[index] end
@@ -4487,14 +5346,142 @@ function Eval:constructInstance(key, def, values, span, receiver)
         S.list(instance.runtimeResults), S.list(params), S.list(statements))
     instance.paramTypes = paramTypes
     instance.status = "done"
-    return instance
+    return k(m2, instance)
+    end)
+    end)
+    end
+    local function parameterAt(index, m)
+        if index > #def.params then return afterParameters(m) end
+        local param = def.params[index]
+        return self:requirementCPS(m, def, index, sc, span, function(m2, ty)
+            if ty:isSig() then
+                -- A callable parameter: static code is specialised away entirely; otherwise the Owned
+                -- type carries the code identity, so the call stays direct and only the environment
+                -- travels as a by-value input.
+                local supplied = values[index]
+                if supplied ~= nil and (V.tag(supplied) == "closure" or V.tag(supplied) == "word") then
+                    if self:callableMatches(supplied, ty) == false then
+                        D.reject("callable-shape", "Callable does not match the required signature", param.span)
+                    end
+                    if V.isStatic(supplied) then
+                        declare(sc, param.name.text, { kind = "value", name = param.name.text, value = supplied },
+                            param.span)
+                        goto continue
+                    else
+                        -- A closure with a runtime environment travels by value as that environment. A
+                        -- closure that borrows storage is non-retaining, so the parameter becomes an
+                        -- erased view, which the caller binds through a local adapter that holds the
+                        -- borrowed places.
+                        ty = self:borrowsStorage(supplied) and S.view(ty) or supplied.ty
+                    end
+                elseif V.tag(supplied) == "method" then
+                    -- A method borrows its receiver, so it is non-retaining for the same reason a
+                    -- borrowing closure is: the parameter takes a view.
+                    ty = S.view(ty)
+                elseif supplied ~= nil and V.tag(supplied) == "runtime" and supplied.ty:isOwned() then
+                    ty = supplied.ty
+                elseif supplied ~= nil and V.tag(supplied) == "runtime" and supplied.ty:isView() then
+                    ty = supplied.ty
+                elseif supplied == nil then
+                    -- An entry face with no call site: the callable arrives from outside, so it needs
+                    -- the invocation-pointer ABI rather than a code identity.
+                    ty = S.view(ty)
+                else
+                    D.todo("opaque-callable",
+                        "A callable argument with no known code needs a function-pointer ABI", param.span)
+                end
+            else
+                -- `Type` and the other compile-time descriptors have no runtime representation, so a
+                -- parameter of one has to be supplied statically; the static branch below binds it.
+                if not S.runtime(ty) then
+                    if values[index] == nil or not V.isStatic(values[index]) then
+                        D.reject("static-required", "Parameter " .. param.name.text
+                            .. " needs a static argument of type " .. S.display(ty), param.span)
+                    end
+                else
+                    S.checkRuntime(ty, param.span)
+                end
+            end
+            if ty == S.Unit then
+                -- Erased exactly like a Unit result: no input, no ABI slot, name bound directly.
+                declare(sc, param.name.text, { kind = "value", name = param.name.text, value = V.unit() }, param.span)
+                goto continue
+            end
+            do
+            local supplied = values[index]
+            -- A supplied argument is checked against the requirement whichever branch binds it. The
+            -- static branch below checks the type as well; without this line a run-time argument would
+            -- reach the IR checker unchecked, where a wrong type is a compiler bug instead of a source
+            -- error.
+            if supplied ~= nil then self:requireAgainst(supplied, ty, param.span) end
+            if supplied ~= nil and V.isStatic(supplied) then
+                self:requireType(supplied, ty, param.span)
+                declare(sc, param.name.text, { kind = "value", name = param.name.text, value = supplied }, param.span)
+            else
+                local value = builder:valueId()
+                params[#params + 1] = Ir.ValueParam(#inputs, value, ty)
+                inputs[#inputs + 1] = S.inValue(ty)
+                paramTypes[#paramTypes + 1] = ty
+                instance.inputPlan[#instance.inputPlan + 1] = { kind = "value", position = index }
+                -- The call site needs each input's type to materialise its argument, so the two lists
+                -- are maintained together.
+                instance.inputTypes[#instance.inputTypes + 1] = ty
+                if ty:isArray() then
+                    -- A by-value array parameter owns fresh storage only when an element is addressed;
+                    -- a whole-value use reads the input directly.
+                    declare(sc, param.name.text, { kind = "value", name = param.name.text,
+                        value = V.array(ty, nil, nil, false, builder:ref(value, ty), setup) }, param.span)
+                elseif ty:isRecord() then
+                    -- A by-value record parameter owns fresh storage only when a write or an address
+                    -- demands one, so a read-only parameter reads the input directly. A loop-carried
+                    -- parameter needs its storage up front because the back edge names it.
+                    local fields = { fields = S.fieldsOf(ty),
+                        fieldNames = S.fieldNames(ty), statics = {}, readonly = {}, methods = {}, type = ty }
+                    if def.tailSelf then
+                        local storage = builder:storageId()
+                        setup[#setup + 1] = Ir.Var(storage, ty, builder:ref(value, ty))
+                        declare(sc, param.name.text, { kind = "value", name = param.name.text,
+                            value = V.object(ty, Ir.Local(storage), fields) }, param.span)
+                        self:loopTarget(instance, index, storage, ty)
+                    else
+                        declare(sc, param.name.text, { kind = "value", name = param.name.text,
+                            value = V.object(ty, nil, fields, nil, false, builder:ref(value, ty), setup) },
+                            param.span)
+                    end
+                elseif def.tailSelf then
+                    -- Loop-carried parameters need mutable storage so a back edge can rebind them.
+                    local storage = builder:storageId()
+                    setup[#setup + 1] = Ir.Var(storage, ty, builder:ref(value, ty))
+                    self:loopTarget(instance, index, storage, ty)
+                    -- A value parameter is immutable, so one read per iteration is equivalent to reading at
+                    -- every mention. Sharing the read is what lets expressions built from the parameter be
+                    -- shared too, because reads are never interned.
+                    local read = builder:valueId()
+                    instance.loopHeader = instance.loopHeader or {}
+                    instance.loopHeader[#instance.loopHeader + 1] = Ir.Read(read, ty, Ir.Local(storage))
+                    declare(sc, param.name.text, { kind = "value", name = param.name.text,
+                        value = V.runtime(builder:ref(read, ty), ty) }, param.span)
+                else
+                    declare(sc, param.name.text, { kind = "value", name = param.name.text,
+                        value = V.runtime(builder:ref(value, ty), ty) }, param.span)
+                end
+            end
+            end
+            ::continue::
+            return parameterAt(index + 1, m2)
+        end)
+    end
+    return parameterAt(1, machine)
 end
 
 -- A result annotation that is a signature states what the returned callable must look like, not a
 -- concrete type: the body fixes the code identity, so that slot stays open until the body returns.
-function Eval:declaredResult(def, sc, span)
+
+-- A word's declared result list: a signature result is a requirement rather than a type, because only
+-- a shape can be checked against it.
+function Eval:declaredResultCPS(machine, def, sc, span, k)
     local result = def.result
-    if not result then return nil, nil end
+    if not result then return k(machine, nil, nil) end
     sc = sc or def.lexical
     local expressions = {}
     if result.kind == "Single" then
@@ -4503,19 +5490,23 @@ function Eval:declaredResult(def, sc, span)
         for index, item in ipairs(result.types) do expressions[index] = item end
     end
     local types, requirements = {}, {}
-    for index, expr in ipairs(expressions) do
-        local ty = self:typeOf(expr, sc, span)
-        if ty:isSig() then
-            types[index], requirements[index] = false, ty
-        else
-            S.checkRuntime(ty, span)
-            types[index] = ty
+    local function declared(index)
+        if index > #expressions then
+            if next(requirements) == nil then return k(machine, types, nil) end
+            return k(machine, types, requirements)
         end
+        return self:typeOfCPS(machine, expressions[index], sc, span, function(m, ty)
+            if ty:isSig() then
+                types[index], requirements[index] = false, ty
+            else
+                S.checkRuntime(ty, span)
+                types[index] = ty
+            end
+            return declared(index + 1)
+        end)
     end
-    if next(requirements) == nil then return types, nil end
-    return types, requirements
+    return declared(1)
 end
-
 -- One open result slot, or none, is what a signature result annotation can fix.
 function Eval:resultExpectation(requirements)
     if not requirements then return nil end
@@ -4529,35 +5520,49 @@ end
 
 -- Body execution ------------------------------------------------------------------------------
 
-function Eval:execBody(ctx, body, span)
+-- The shim: `evaluateStatically`, `evaluateClosureStatically` and the construction path still reach
+-- this by name.
+
+-- A function body: an expression body is one evaluated expression, a block body is the statement walk
+-- plus the check that some path returned. The answer is the returned value list.
+function Eval:execBodyCPS(machine, ctx, body, span, k)
     if body.kind == "Expression" then
-        local value = self:evalExpected(ctx, body.value, ctx.expectedResult)
-        local values = self:expand(value)
-        self:checkReturn(values, span)
-        return values
+        return self:evalExpectedCPS(machine, ctx, body.value, ctx.expectedResult, function(m, value)
+            local values = self:expand(value)
+            self:checkReturn(values, span)
+            return k(m, values)
+        end)
     end
     ctx.result = nil
-    local returned = self:execBlock(ctx, body.statements)
-    if not returned then D.reject("no-return", "Every reachable path must return a value", span) end
-    return ctx.result
+    return self:execBlockCPS(machine, ctx, body.statements, nil, function(m, returned)
+        if not returned then D.reject("no-return", "Every reachable path must return a value", span) end
+        return k(m, ctx.result)
+    end)
 end
 
-function Eval:execBodyResidual(ctx, body, span)
+-- A function body compiled into an instance: the returned values are materialised into an `Ir.Return`
+-- rather than handed back as frontend values.
+function Eval:execBodyResidualCPS(machine, ctx, body, span, k)
     if body.kind == "Expression" then
         ctx.tail, ctx.terminated = true, false
-        local value = self:evalExpected(ctx, body.value, ctx.expectedResult)
-        if ctx.terminated then return end
-        ctx.tail = false
-        local values = self:expand(value)
-        self:checkReturn(values, span)
-        ctx.builder:return_(ctx.body, self:materializeAll(ctx, values,
-            ctx.instance and ctx.instance.results or nil))
-        ctx.resultTypes = {}
-        for index, item in ipairs(values) do ctx.resultTypes[index] = item.ty end
-        return
+        return self:evalExpectedCPS(machine, ctx, body.value, ctx.expectedResult, function(m, value)
+            if ctx.terminated then return k(m) end
+            ctx.tail = false
+            local values = self:expand(value)
+            self:checkReturn(values, span)
+            return self:materializeAllCPS(m, ctx, values,
+                ctx.instance and ctx.instance.results or nil, function(m2, exprs)
+                    ctx.builder:return_(ctx.body, exprs)
+                    ctx.resultTypes = {}
+                    for position, item in ipairs(values) do ctx.resultTypes[position] = item.ty end
+                    return k(m2)
+                end)
+        end)
     end
-    local returned = self:execBlock(ctx, body.statements)
-    if not returned then D.reject("no-return", "Every reachable path must return a value", span) end
+    return self:execBlockCPS(machine, ctx, body.statements, nil, function(m, returned)
+        if not returned then D.reject("no-return", "Every reachable path must return a value", span) end
+        return k(m)
+    end)
 end
 
 return Eval

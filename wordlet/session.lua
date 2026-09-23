@@ -2,8 +2,8 @@
 -- it may nest. `structure.md` §3.2 fixes this shape.
 --
 -- `eval.lua` installs the evaluator's methods on this same class (`local Eval = Session`), so a
--- session is the receiver of every `Eval:*` method. This module owns the data and the nesting
--- counters; the walk that fills them stays in the evaluator.
+-- session is the receiver of every `Eval:*` method. This module owns the data and the budgets; the
+-- walk that fills them stays in the evaluator, and the machine counts the depth.
 --
 -- The two layers `ASDL.md` states are visible here. `types` caches interned `Ty` descriptions, so
 -- it grows with distinct types only and its keys are identities. Everything beside it is an
@@ -66,42 +66,5 @@ function Session:step(span)
     if self.steps > self.maxSteps then D.resource("steps", "Static evaluation budget exhausted", span) end
 end
 
--- Run one nested attempt under the budget `kind` names, restoring the depth however the attempt
--- ends. Both limits are checked before the depth changes, so a refused entry leaves the session as
--- it found it, and the attempt runs under `pcall` because a diagnostic is not always fatal: a build
--- records the failed instance and re-raises, while a fold in residual code compiles instead. The
--- caller decides which, so this returns the diagnostic rather than raising it.
---
--- `scope` is the word the static message names, so a nested fold that runs out of room says which
--- recursive word needs a run-time argument.
-function Session:withNesting(kind, span, scope, fn, ...)
-    local static = kind == "static"
-    if static then
-        local allowed = self.run and self.maxInterpretDepth or self.maxStaticDepth
-        if self.staticDepth >= allowed then
-            D.resource("static-depth", "Static evaluation nests more than " .. allowed .. " deep in "
-                .. scope .. "; a recursive word with a run-time argument is compiled instead, and"
-                .. " the reference interpreter is bounded", span)
-        end
-        self.staticDepth = self.staticDepth + 1
-    else
-        -- Specialization nests: building one instance evaluates its body, and a body that
-        -- specializes again nests another build. The host's Lua stack gives out long before a
-        -- thousand nested builds would reach the key budget, so the nesting is bounded here and its
-        -- exhaustion names a resource instead of surfacing as an unlabelled stack overflow.
-        if self.buildDepth >= self.maxBuildDepth then
-            D.resource("depth", "Specialization nests more than " .. self.maxBuildDepth
-                .. " deep; a recursive word whose static arguments change specializes once per value,"
-                .. " so bind the changing value at run time", span)
-        end
-        self.buildDepth = self.buildDepth + 1
-    end
-    -- `pcall`'s status and the one value the attempt produced: every caller destructures that pair,
-    -- and an attempt that produced no value is `true, nil`.
-    local ok, value = pcall(fn, ...)
-    if static then self.staticDepth = self.staticDepth - 1
-    else self.buildDepth = self.buildDepth - 1 end
-    return ok, value
-end
 
 return Session

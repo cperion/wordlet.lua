@@ -51,47 +51,97 @@ end
 
 -- The nearest boundary that can swallow a diagnostic, with everything above it dropped: those steps
 -- are not state to unwind, they are continuations that will never be called.
-function Machine:popToHandler()
-    while true do
+--
+-- `floor` is the descriptor depth this run started at, and it is what keeps two runs apart. A
+-- converted method reached through a boundary helper runs inside a *nested* `run`, while the chain
+-- that entered the helper is suspended below it; without the floor, a diagnostic raised in the
+-- nested run would pop to a handler belonging to that suspended chain and resume it in the wrong
+-- loop. Below the floor the diagnostic belongs to the caller, so it is raised there instead.
+function Machine:popToHandler(floor)
+    while #self.descriptors > (floor or 0) do
         local descriptor = self:pop()
-        if not descriptor then return nil end
         if descriptor.handler then return descriptor end
     end
+    return nil
 end
 
 -- The depth budgets count descriptors, so they report an exact number and name the frame that hit it
 -- rather than depending on how much host stack happened to be left.
 function Machine:checkDepth(kind, span, name)
-    local allowed = (self.session.run and self.session.maxInterpretDepth) or self.session.maxBuildDepth
+    -- Two kinds, because they bound two different recursions and carry two different codes. A static
+    -- fold is an optimization in residual code, so it is bounded by `maxStaticDepth` and its refusal is
+    -- `static-depth` (a residual fold compiles instead); the reference interpreter has no fallback and
+    -- gets `maxInterpretDepth`. Specialization nesting is bounded by `maxBuildDepth` and reports
+    -- `depth`. These are the session's own numbers and messages, moved to the machine because the
+    -- The descriptors are what count the depth, so the two bounds live here rather than in a wrapper.
+    local allowed, code
+    if kind == "static" then
+        allowed = self.session.run and self.session.maxInterpretDepth or self.session.maxStaticDepth
+        code = "static-depth"
+    else
+        -- A build or a call nests in an interpreter run too, where there is no fallback, so the
+        -- interpreter's budget applies, as the session's nesting wrapper used to choose it.
+        allowed = self.session.run and self.session.maxInterpretDepth or self.session.maxBuildDepth
+        code = "depth"
+    end
     if self.depth >= allowed then
-        D.resource("depth", ("%s nests more than %d deep (at %s); a recursive word whose static "
-            .. "arguments change specializes once per value, so bind the changing value at run time")
-            :format(kind, allowed, name), span)
+        local message
+        if kind == "static" then
+            message = "Static evaluation nests more than " .. allowed .. " deep in " .. name
+                .. "; a recursive word with a run-time argument is compiled instead, and"
+                .. " the reference interpreter is bounded"
+        else
+            message = ("%s nests more than %d deep (at %s); a recursive word whose static arguments"
+                .. " change specializes once per value, so bind the changing value at run time")
+                :format(kind, allowed, name)
+        end
+        D.resource(code, message, span)
     end
 end
 
--- A step: call the continuation with the value, under the one protected call, and answer with the next
--- pair. A diagnostic that is not ours is re-raised untouched; ours goes to the nearest handler.
-function Machine:step(k, value)
-    local ok, nextK, nextValue = pcall(k, self, value)
-    if ok then return nextK, nextValue end
-    if not D.is(nextK) then error(nextK, 0) end
-    local descriptor = self:popToHandler()
-    if not descriptor then error(nextK, 0) end
-    return descriptor.handler, nextK
+-- A step: call the continuation, under the one protected call, and answer with the next pair. A
+-- diagnostic that is not ours is re-raised untouched; ours goes to the nearest handler.
+--
+-- The value part is a *vector*, because the language's own answers are: a value definition produces one
+-- value per binder, a store target produces a slot and a place, and a declared result list produces the
+-- types and the signature requirements. Carrying one value here silently dropped the rest at every
+-- boundary, which is what made a lambda lose the signature that was supposed to type it.
+function Machine:step(k, ...)
+    local function invoke(...) return { n = select("#", ...), ... } end
+    local results = invoke(pcall(k, self, ...))
+    if results[1] then
+        -- A successful step is (continuation, values...): the protected call's status flag is not part
+        -- of the protocol, so it is dropped here rather than by every reader of the pair.
+        local shifted = { n = results.n - 1 }
+        for index = 2, results.n do shifted[index - 1] = results[index] end
+        return shifted
+    end
+    local diagnostic = results[2]
+    if not D.is(diagnostic) then error(diagnostic, 0) end
+    local descriptor = self:popToHandler(self.floor)
+    if not descriptor then error(diagnostic, 0) end
+    return { n = 2, descriptor.handler, diagnostic }
 end
 
 -- Drive until a continuation answers `nil`: the closure chain is the stack, and this loop is the only
--- host frame it needs.
-function Machine:run(k, value)
+-- host frame it needs. The floor is taken here because a nested run must not unwind into the chain that
+-- entered it, and the value vector is repacked per step so an answer of any arity survives.
+function Machine:run(k, ...)
+    local outer = self.floor
+    self.floor = #self.descriptors
+    local values = { n = select("#", ...), ... }
     while k do
         self.session.steps = self.session.steps + 1
         if self.session.steps > self.session.maxSteps then
             D.resource("steps", "Static evaluation budget exhausted")
         end
-        k, value = self:step(k, value)
+        local results = self:step(k, unpack(values, 1, values.n))
+        k = results[1]
+        values = { n = results.n - 1 }
+        for index = 2, results.n do values[index - 1] = results[index] end
     end
-    return value
+    self.floor = outer
+    return unpack(values, 1, values.n)
 end
 
 -- A self-tail call does not push a frame: it rewrites the one it is in, which is the trampoline the

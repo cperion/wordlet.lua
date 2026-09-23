@@ -155,7 +155,7 @@ function M.interpret(options)
     session:load(program)
     session:initializeModule(program, session.top)
     if type(options.entry) ~= "string" then D.reject("interpret-input", "interpret needs an `entry` name") end
-    local word = session:exportedValue(program, options.entry, session.top)
+    local word = session:exportedTop(program, options.entry, session.top)
     if V.tag(word) ~= "word" then
         D.reject("function-required", "Entry " .. options.entry .. " is not a word")
     end
@@ -175,7 +175,7 @@ function M.interpret(options)
         else D.reject("interpret-arg", "Unsupported argument " .. tostring(value)) end
     end
     local span = word.span
-    local result = session:supply(session:staticFrame(session.top, span), word, args, span)
+    local result = session:supplyTop(session:staticFrame(session.top, span), word, args, span)
     if V.tag(result) == "word" then
         D.reject("arity", "Entry " .. options.entry .. " needs more arguments to be saturated")
     end
