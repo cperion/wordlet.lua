@@ -47,66 +47,82 @@ function usesReceiver(callable)   -- accepts word | method | closure
 end
 ```
 
-### 0.2 The compiler is methods on the ASDL types
+### 0.2 Methods are used sparingly, and their install is ordered
 
-The schema declares `Ast.Expr = U32Literal(...) | Apply(...) | ... | Condition(...)`. The
-compiler's evaluation of an expression is a method on that class. The variant *owns* the
-behavior that names it:
+A variant *can* own behavior, and the schema is where its arm is declared. The question this
+document answers is where a method is the right shape. It uses methods for two things and
+nothing else:
 
-```
-function Ast.U32Literal:evaluate(ctx) return eval.literal(ctx, self) end
-function Ast.Apply:evaluate(ctx)      return eval.apply(ctx, self) end
-function Ast.Condition:evaluate(ctx)  return eval.condition(ctx, self) end
-```
+- **Structural traversal.** `Ir.Expr:each(fn)` visits the value/place/argument children. That is
+  a direct structural question, the same for every variant, and safe on the variant.
+- **Intrinsic type predicates.** `Ty:isRecord()`, `Ty:isIndirection()` read only `self`, so they
+  are safe on an interned node. A predicate that carries a `seen`/`visiting` set is *not*
+  intrinsic and stays a free function (§2.4).
 
-The evaluator becomes a call — `expr:evaluate(ctx)` — not a `switch (expr.kind)`. Adding a
-new `Ast.Expr` variant means adding a variant method; the caller does not change. Every pass
-that reads a particular variant set adds methods to those variants.
+Semantic *behavior* — how an expression evaluates, how a statement completes, what a check
+requires — is not moved onto the classes. It stays in the pass that owns it, reached through the
+per-variant functions and explicit visitors that already exist. `ASDL.md` is explicit ("Reflection
+enumerates structure, not control completion, SSA definitions, effects or borrowing. Implement
+exhaustive semantic visitors for those tasks"), and `walk.lua`'s own header repeats it ("every
+semantic question ... stays in an explicit visitor"). Today the project installs **no** class
+methods at all; `walk.lua` is reflective and every pass is a switch.
 
-The same shape applies to every ASDL family:
+The method sets are therefore small:
 
 | Family | Method set |
 | --- | --- |
-| `Ast.Expr` | `:evaluate(ctx)`, `:each(fn)` |
-| `Ast.Stmt` | `:execute(ctx)`, `:each(fn)` |
-| `Ast.Decl` | `:declare(session, scope)`, `:each(fn)` |
-| `Ast.Body` | `:run(ctx)`, `:each(fn)` |
-| `Ast.ResultSpec` | `:resolve(sc, span)`, `:each(fn)` |
-| `Ast.SchemaMember` | `:collect(ctx, def)`, `:each(fn)` |
-| `Ast.ExportItem` | `:resolve(session, top)`, `:each(fn)` |
-| `Ir.Expr` | `:each(fn)`, `:pure()` |
-| `Ir.Stmt` | `:each(fn)`, `:terminates()` |
-| `Ir.Place` | `:each(fn)`, `:root()` |
-| `Ir.Arg` | `:each(fn)`, `:expr()` |
-| `Ty.V` | `:runtime()`, `:representable()`, `:hasNamed()`, `:isIndirection()` |
+| `Ir.Expr` | `:each(fn)` |
+| `Ir.Stmt` | `:each(fn)` |
+| `Ir.Place` | `:each(fn)` |
+| `Ir.Arg` | `:each(fn)` |
+| `Ty.V` | the intrinsic predicates of §2.4 |
+
+No `Ast.*` methods, and no `:check`/`:pure`/`:terminates`/`:effects` methods (§2.2, §2.3).
 
 The parent class gets a default that reports the missing override; each variant overrides it.
-`ASDL.md` states the installation rule: install new parent methods first, per-variant methods
-second, in the schema-owning module only. A method installed on the parent *fills in* every
-variant that has not overridden; a variant override is not overwritten by a later parent install.
+`ASDL.md` states the install rule more strictly than it first reads: install parent methods
+first, per-variant methods second, in the schema-owning module only.
 
-`wordlet/schema.lua`, `wordlet/ast.lua`, and `wordlet/ir.lua` are the three
-schema-owning modules. They install the parent defaults. The pass modules install the variant
-implementations. A helper module that installs a whole method set (`ast_methods.lua`,
-`ir_methods.lua`) is the recommended organization, loaded by `wordlet/init.lua` after every
-module it names is available.
+The reason is `vendor/asdl.lua`'s `DefineClass`. A class's metatable has an `__newindex` that, the
+first time a new key is assigned to a parent, runs `for c in self.members do rawset(c, k, v)` — it
+raw-sets that key onto *every* member, including every variant that already overrode it. A parent
+method installed after the variants therefore **overwrites all of them**; it does not fill in only
+the missing ones. A second assignment to the same parent key does not propagate, because the key
+is then present and `__newindex` does not fire — the hazard is the first install. Correctness
+depends on install order, so there must be exactly one owner.
+
+`wordlet/schema.lua`, `wordlet/ast.lua`, and `wordlet/ir.lua` are the three schema-owning modules.
+`ir.lua` installs the structural `:each` methods and `schema.lua` installs the intrinsic `Ty`
+predicates; `ast.lua` installs nothing, because there are no `Ast.*` methods (§2.2). A sibling
+file is allowed only if the schema module itself requires it during its own initialization
+(`ir.lua` ending in `require("wordlet.ir_methods")`), so the install order is fixed by the schema
+module alone; `init.lua` never loads a method file, and no pass module assigns to a class. Pass
+modules contribute *visitor objects* — tables of per-variant functions the methods call through
+`self` — not mutation.
 
 ### 0.3 Reflection is for the structural question, not the semantic one
 
 `walk.lua` reads `class.__fields` reflectively. That answers "what are the children of this
 node?" structurally. That is fine and stays; it is how a *generic* traversal is written.
 
-The semantic passes must not be reflective. What a `Reference` means, what an `Apply` means,
-what a `Condition` means — those are different askings of each variant, and they belong on the
-variant. Reflection cannot answer them, and a `switch (kind)` in the pass module answers them by
-bypassing the class. The split is:
+The semantic passes must not be reflective. What a `Reference` means, what an `Apply` means, what
+a `Condition` means are different askings of each variant. But the variant answer is not
+automatically a class method. The evaluator already answers each one with a per-variant function —
+`Eval:evalReference`, `Eval:evalApply`, `Eval:evalCondition`, and the rest — and the only `kind`
+read is one router at the top of `Eval:evalExpr`, a line per variant. That router is a dispatch
+table that names the variant's own function; it is not what this document is against. What it is
+against is a class method whose body forwards to one shared function (indirection with no variant
+meaning), or new per-variant behavior accumulated in a second, growing `switch` when the variant
+is the natural owner. The real split is:
 
 ```
-structural (reflective) : walk.children(node) -- for generic traversals
-semantic   (method)     : node:evaluate(ctx)  -- per-variant meaning
+structure  : walk.children(node)            -- reflective, for generic traversals
+dispatch   : Eval:eval<Variant>(ctx, node)  -- a router to per-variant functions
+ownership  : Ir.Stmt:each(fn), Ty:isRecord() -- a method, when the variant owns the behavior
 ```
 
-Neither replaces the other. `walk.lua` is not deprecated by this document; a `switch (kind)` is.
+`walk.lua` is not deprecated by this document, and neither is a small router at a pass entry
+point. The thing that must not appear is a second `switch` beside the router.
 
 ---
 
@@ -136,8 +152,9 @@ Consequences:
 
 - `S.encode(ty)` exists only to build a *key string*. It is never a comparison.
 - Every `S.encode(a) ~= S.encode(b)` in the current code is `a ~= b`.
-- Type-valued methods (`:runtime()`, `:representable()`, `:hasNamed()`) hold `seen[ty]` and stop
-  on a repeat; there is no per-caller cycle-guard logic.
+- The cycle-aware type folds (`S.runtime`, `S.representable`, `S.hasNamed`) hold `seen[ty]` and
+  stop on a repeat; the intrinsic predicates of §2.4 have no state. There is no per-caller
+  cycle-guard logic.
 - The number of distinct `Ty` values is bounded by the source schema, not by how often each type
   is written.
 
@@ -182,24 +199,18 @@ an implementation detail; it is a structural property.
 
 ### 2.1 The install shape
 
-Each schema-owning module installs a fallback on the parent:
+The schema-owning module installs the parent defaults first and the variant methods second, in
+one ordered pass:
 
 ```lua
--- wordlet/ir.lua, after the context is defined
-local Ir = S.Ir
-
+-- wordlet/ir.lua (or a file it requires at its end), before any pass is loaded
 function Ir.Expr:each(fn)
     D.bug("ir-expr", "Ir.Expr variant has no :each method: " .. tostring(self.kind))
 end
 function Ir.Stmt:each(fn)
     D.bug("ir-stmt", "Ir.Stmt variant has no :each method: " .. tostring(self.kind))
 end
-```
 
-The variant implementations live in the pass module that owns them:
-
-```lua
--- wordlet/ir_methods.lua  (loaded after ir.lua; installs structural methods)
 function Ir.Const:each(fn) end
 function Ir.Ref:each(fn) end
 function Ir.Un:each(fn) fn(self.operand) end
@@ -212,131 +223,91 @@ function Ir.SliceLength:each(fn) fn(self.view) end
 function Ir.Null:each(fn) end
 ```
 
-`ASDL.md`: install the parent method first, the variant overrides second, in the
-schema-owning module only. The pass module that owns the semantics owns the variant methods.
+All parent defaults must be installed before the first variant method, because — per §0.2 — the
+first assignment of a parent key raw-sets it onto every member and would otherwise wipe the
+variant methods out. That is why the two groups cannot be split across modules that load in an
+unspecified order.
 
-### 2.2 The `Ast` family
+### 2.2 The `Ast` family: no methods
 
-The compiler's *readers of the source* become methods on `Ast.Expr` etc. Each method takes the
-evaluation frame as its argument; the framework does not thread a `kind` around.
+The AST does not get a method per variant, and that is a decision, not an omission. The evaluator
+already dispatches to a per-variant function — `Eval:evalReference`, `Eval:evalApply`,
+`Eval:evalUnary`, `Eval:evalBinary`, `Eval:evalCondition`, `Eval:evalSchema`, `Eval:evalArray`,
+`Eval:evalIndex`, `Eval:evalSupply`, `Eval:evalFieldSelect`, `Eval:evalLambda`,
+`Eval:evalSignature` — with the literals as a few lines in `Eval:evalExpr` itself. A method
+`Ast.Apply:evaluate = function(self, ctx) return evalApply(ctx, self) end` would relocate those
+twelve calls into twelve class slots while leaving the router and the functions exactly where they
+are: one more layer, with the variant owning nothing new. That is the indirection §0.3 rejects,
+and it is the shape `walk.lua`'s header warns against.
 
-```lua
--- wordlet/ast_methods.lua, installed once
-local function eval(ast, ctx) return require("wordlet.eval").evaluate(ctx, ast) end
+So `ast.lua` installs no behavior. Structural traversal stays in `walk.lua` (which reads
+`__fields`), and the evaluator keeps its router and its per-variant functions. If a variant's body
+later grows branches that are about that variant alone, it becomes a new `Eval:evalX`; if it grows
+state that belongs to the node, that is a schema question first.
 
-function Ast.Expr:evaluate(ctx)
-    D.bug("ast-expr", "Ast.Expr variant has no :evaluate method: " .. tostring(self.kind))
-end
-function Ast.U32Literal:evaluate(ctx) return eval(self, ctx) end
-function Ast.U64Literal:evaluate(ctx) return eval(self, ctx) end
-function Ast.BoolLiteral:evaluate(ctx) return eval(self, ctx) end
-function Ast.UnitLiteral:evaluate(ctx) return eval(self, ctx) end
-function Ast.StringLiteral:evaluate(ctx) return eval(self, ctx) end
-function Ast.FloatLiteral:evaluate(ctx) return eval(self, ctx) end
-function Ast.Reference:evaluate(ctx) return eval(self, ctx) end
-function Ast.Apply:evaluate(ctx) return eval(self, ctx) end
-function Ast.FieldSelect:evaluate(ctx) return eval(self, ctx) end
-function Ast.RecordSupply:evaluate(ctx) return eval(self, ctx) end
-function Ast.ArrayExpr:evaluate(ctx) return eval(self, ctx) end
-function Ast.IndexExpr:evaluate(ctx) return eval(self, ctx) end
-function Ast.SchemaExpr:evaluate(ctx) return eval(self, ctx) end
-function Ast.Lambda:evaluate(ctx) return eval(self, ctx) end
-function Ast.SignatureExpr:evaluate(ctx) return eval(self, ctx) end
-function Ast.UnaryExpr:evaluate(ctx) return eval(self, ctx) end
-function Ast.BinaryExpr:evaluate(ctx) return eval(self, ctx) end
-function Ast.Condition:evaluate(ctx) return eval(self, ctx) end
-```
+There is therefore no `Ast.Expr:evaluate`, no `Ast.Stmt:execute`, and no `ast_methods.lua`.
 
-The variant methods all call into `eval.evaluate`. This is not a switch in disguise: what
-distinguishes the pattern from a `switch` is that **each variant's file owns its own method**,
-and adding a variant requires editing *that variant's schema entry* — not a central
-dispatcher. When the differences grow, the method body grows in place; when a variant needs
-to inherit an implementation from a sibling product, the schema says so.
+### 2.3 The `Ir` family: structure only
 
-`Ast.Stmt` follows the same shape with `:execute(ctx)`; `Ast.Decl` with `:declare(session, scope)`;
-`Ast.Body` with `:run(ctx)`; `Ast.ResultSpec` with `:resolve(sc, span)`;
-`Ast.SchemaMember` with `:collect(ctx, def)`; `Ast.ExportItem` with `:resolve(session, top)`.
+The `Ir` classes gain exactly the structural traversal methods of §2.1 — `:each` over value,
+place and argument children — and nothing else. Control completion, effects and purity are the
+things `ASDL.md` says reflection cannot answer and that `check.lua` already answers in an explicit
+visitor (`falls`, `checkList`, `M.expr`, `M.place`). They stay there. A `:terminates`/`:effects`/
+`:pure` class method would move a semantic rule onto a non-interned occurrence node and split it
+from the visitor that carries `visible`/`storages`, which is the spread `ASDL.md` forbids.
 
-### 2.3 The `Ir` family
-
-`Ir.Expr`, `Ir.Stmt`, `Ir.Place`, `Ir.Arg` carry structural and analysis methods.
-
-Structural, as in §2.1. Analysis methods are used by `check.lua`, `cabi.lua` and `lower.lua`
-through a visitor object. `check.lua` currently has `M.expr` and `M.place` and a `checkList`
-that switches on `stmt.kind`; each variant gains a `:check(visitor)` method and the dispatcher
-collapses to `stmt:check(visitor)`.
-
-```lua
--- wordlet/ir_methods.lua
-function Ir.Stmt:check(visitor)
-    D.bug("ir-stmt", "Ir.Stmt variant has no :check method: " .. tostring(self.kind))
-end
-function Ir.Let:check(v)
-    if v:expr(self.expr) ~= self.type then D.bug("ir-type", "Let type does not match") end
-    v:bind(self.value.id, self.type)
-end
-function Ir.Read:check(v)
-    if v:place(self.place) ~= self.type then D.bug("ir-type", "Read type does not match") end
-    v:bind(self.value.id, self.type)
-end
--- ...
-```
-
-`visitor` carries `visible`, `storages`, `inLoop`, plus the shared checks
-(`v:expr(...)`, `v:place(...)`, `v:bind(...)`). The visitor is the state; the variants are the
-control flow.
-
-The other two IR-shaped methods used by analyses and the emitter are:
-
-```
-Ir.Stmt:terminates() -> boolean     -- replaces the free `falls(stmt)` in check.lua
-Ir.Stmt:effects()    -> kind        -- "pure" | "write" | "call"
-Ir.Expr:pure()       -> boolean     -- whether this expression is safe to move to its use
-```
+So `check.lua` and `lower.lua` keep their switches; what changes is only that they iterate children
+through `node:each(fn)` instead of the free `eachExpr`/`eachStmt`.
 
 ### 2.4 The `Ty` family
 
-`Ty.V` is a semantic type, so its methods are predicates and folds over structure. Each
-predicate moves from `S.isX(t)` (free function) to `t:isX()` (method):
+Only the *intrinsic* predicates move onto `Ty.V`; the cycle-aware folds do not. `ASDL.md`:
+"Methods on interned objects must be intrinsic. Put use counts, source provenance, names,
+initialization facts and all contextual analysis in pass-owned side tables." A predicate that
+reads only `self` is intrinsic. A fold that carries a `seen`/`visiting` set is contextual state and
+stays a free function with an explicit parameter.
+
+Methods, installed in `schema.lua` (the `Ty`-owning module), in place of the current `S.isX(t)`:
 
 ```
-Ty:isInteger() | :isF64() | :isBool() | :isUnit() | :isType()
-Ty:isRecord()  | :isSum() | :isTagged() | :isTaggedType()
-Ty:isRef()     | :isPtr() | :isArray() | :isSlice() | :isString()
-Ty:isSig()     | :isOwned() | :isView() | :isNamed()
-Ty:isIndirection()  -- Ref | Ptr | Slice: one predicate for "has a representation that stops"
-Ty:isRuntime()      -- has a C representation
-Ty:isRepresentable() -- can appear in a Return (type is fully closed, no open cell)
-Ty:hasNamed()       -- mentions an unsealed cell
-Ty:environment()    -- Owned -> its environment type, else itself
+Ty:isU32() :isU8() :isU16() :isInteger() :isNumeric() :isWide() :isSigned() :isF64()
+Ty:isBool() :isUnit() :isType()
+Ty:isRecord() :isSig() :isSum() :isTagged() :isTaggedType()
+Ty:isRef() :isPtr() :isArray() :isSlice() :isString()
+Ty:isNamed() :isOwned() :isView()
+Ty:isIndirection()   -- Ref | Ptr | Slice: "has a representation that stops", a predicate over
+                     -- three variants, not a fourth variant (§0.1)
 ```
 
-`Ty:isIndirection()` reads `self.kind` and returns true for `"Ref"`, `"Ptr"`, `"Slice"`. It is
-a predicate over three variants, not a fourth variant — Section 0.1. `S.encode`, `S.display`
-and `S.list` remain free functions over the schema as a whole.
+Free functions that keep an explicit walk state, unchanged in kind:
 
-### 2.5 What was a switch, now a method
+```
+S.runtime(t, seen)        -- has a C representation
+S.representable(t, seen)  -- can appear in a Return (fully closed, no open cell)
+S.hasNamed(t, seen)       -- mentions an unsealed cell
+S.environmentOf(t)        -- Owned -> its environment type, else itself (intrinsic; may move)
+```
 
-| Current site | Method |
+`S.encode`, `S.display` and `S.list` remain free functions over the schema as a whole.
+
+### 2.5 What becomes a method, and what stays a switch
+
+| Current site | Target |
 | --- | --- |
-| `Eval:evalExpr`'s `kind` chain | `Ast.Expr:evaluate(ctx)` |
-| `Eval:execBlock`'s `kind` chain | `Ast.Stmt:execute(ctx)` |
-| `Eval:load`'s `kind` chain | `Ast.Decl:declare(session, scope)` |
-| `Eval:resolveExportItem` | `Ast.ExportItem:resolve(session, top)` |
-| `Eval:execBody` | `Ast.Body:run(ctx)` |
-| `Eval:evalSignature` + callers | `Ast.ResultSpec:resolve(sc, span)` |
-| `Eval:newSchema`'s member loop | `Ast.SchemaMember:collect(ctx, def)` |
+| `Eval:evalExpr`'s `kind` chain | keep the router; each arm already names `Eval:eval<Variant>` |
+| `Eval:execBlock`, `Eval:execBody`, `Eval:load`, `Eval:newSchema` | keep their dispatch (per-variant `Eval:` functions, not class methods) |
 | `Ir.eachExpr`, `Ir.eachStmt` | `Ir.Expr:each(fn)`, `Ir.Stmt:each(fn)` |
-| `check.M.expr`, `check.M.place`, `checkList` | `Ir.Expr:check(v)`, `Ir.Place:check(v)`, `Ir.Stmt:check(v)` |
-| `check.falls` | `Ir.Stmt:terminates()` |
+| `check.M.expr`, `check.M.place`, `checkList`, `check.falls` | keep as the explicit `check.lua` visitor |
 | `lower.collectExprs`, `collectPlaceExprs` | `Ir.Expr:each(fn)`, `Ir.Place:each(fn)` |
-| `lower.usedStorages`, `usedValues`, `mutatedStorages`, `analyzeSharing`, `analyzeInlining` | one `Analysis` visitor that calls `:each` at nesting points, plus specific `:contains()` methods where shape matters |
+| `lower.usedStorages`, `usedValues`, `mutatedStorages`, `analyzeSharing`, `analyzeInlining` | one `Analysis` visitor over `Ir.Stmt:each` (Step 9) |
 | `cabi.liveInstances`' `walk` | `Ir.Stmt:each(fn)` |
-| `S.runtime`, `S.representable`, `S.hasNamed`, `Eval:checkNoValueCycle`, `Eval:reachesCell` | `Ty:runtime()`, `Ty:representable()`, `Ty:hasNamed()`, `Ty:isIndirection()` |
+| `S.isRecord` … `S.isView`, plus a new `isIndirection` | intrinsic `Ty:` methods |
+| `S.runtime`, `S.representable`, `S.hasNamed` | stay free functions; they carry a `seen` |
+| the four `S.encode(a) ~= S.encode(b)` sites | `a ~= b` (interned `Ty` identity) |
 
-Each of those is a place where the current code has a `switch (kind)` and the redesigned code
-has a method on the variant. The signature of each method is stable; adding a variant adds a
-method, not a switch arm.
+Each row is either a structural traversal (safe on the variant) or a place the current code has a
+semantic `switch` and the redesign keeps it explicit. Only the structural traversals and the
+intrinsic `Ty` predicates become methods.
 
 ---
 
@@ -390,6 +361,7 @@ V.object(ty, place, schema, ...)            tag = "object"
 V.word(def, args, span)                     tag = "word"
 V.method(def, receiver, args?)              tag = "method"
 V.closure(plan, bound?)                     tag = "closure"
+V.callable(ty, code)                        tag = "callable"  -- Owned/View/Tagged/Sig code
 
 -- Static descriptors
 V.schema(def)                               tag = "schema"
@@ -400,8 +372,9 @@ V.namespace(module, members)                tag = "namespace"
 V.results(values)                           tag = "results"
 ```
 
-The only rename is `ir` → `runtime`: the tag was never about the value being an `Ir.Expr`, it was
-about the value's representation being a residual expression.
+The one tag rename is `ir` → `runtime`: the tag was never about the value being an `Ir.Expr`, it
+was about the value's representation being a residual expression. The list above is the complete
+target; `V.callable(ty, code)` (tag `"callable"`) is added under Callables.
 
 ### 3.2 `Session`
 
@@ -448,8 +421,9 @@ The constructor is the only entry point:
 Session.new(options) -> Session
 ```
 
-The current `options.session` parameter in `M.compile` is a fossil — accepted, then refused by
-a `D.bug`. Delete it; sessions are always fresh.
+The current `options.session` parameter in `M.compile` is a fossil: it is accepted and used, and
+the `D.bug` fires only when the passed session already has instances. Delete it; sessions are
+always fresh.
 
 `Session:withNesting(kind, span, fn, ...)` replaces `enterBuild`/`leaveBuild` and
 `enterStatic`/`leaveStatic`. `kind` is `"build"` or `"static"`. The limit for `"static"` is
@@ -543,7 +517,7 @@ information and the visitor already visits each node once.
 `syntax.md` §3 defines one law: evaluate the callee, evaluate the arguments left to right,
 append them to the word's bound arguments, test saturation. Every call in the language follows
 it. The compiler must therefore have **one function** that answers "given a callable and
-arguments, what happens next", not eleven.
+arguments, what happens next", not fifteen.
 
 ```
 Eval:supply(ctx, callee, args, span)
@@ -556,7 +530,7 @@ Eval:supply(ctx, callee, args, span)
 `supply` dispatches on the callee's kind for the four variants that can be *called*. The
 implementation moves the existing `apply`/`applyClosure`/`applyMethod` bodies under one roof.
 
-The saturation terminal has four cases, one per way the language provides a body:
+The saturation terminal has five cases, one per way the language provides a body:
 
 | Callee | Saturated call |
 | --- | --- |
@@ -612,17 +586,20 @@ Eval:callInstance    -- emit a Call to a ready Instance
 Eval:loopBack        -- emit a Loop back edge for a self-tail call
 ```
 
-Nine functions, disjoint domains, one law. Today there are eleven with overlaps and four
-duplicate dispatchers.
+Ten functions, disjoint domains, one law. Today there are fifteen `apply*`/`invoke*` entry points
+with overlapping saturation logic and duplicate callee dispatchers (`apply`, `applyKeyed`,
+`applyClosure`, `applyMethod`, `applyForeign`, `applyOwned`, `applyView`, `applyTagged`,
+`applyAny`, `invoke`, `applyStatically`, `applyClosureStatically`, `applyResidual`,
+`applyMethodResidual`, `applyConversion`).
 
 ### 4.1 Schematic flow of a source call
 
 ```
 source apply node
    │
-   Ast.Apply:evaluate(ctx)
+   Eval:evalExpr(ctx, apply)      -- one-line router over the Ast.Expr kind
    │
-   Eval:evaluate(ctx, apply)
+   Eval:evalApply(ctx, apply)
    │
    Eval:supply(ctx, callee, args, span)
    │  ├─ callee is a static word/method/closure
@@ -637,7 +614,8 @@ source apply node
    Value
 ```
 
-Every edge is a method or a named function. No `switch (kind)` appears.
+Every edge is a named function or a method. The only `kind` read is the one-line router at the top
+of `Eval:evalExpr`.
 
 ---
 
@@ -648,51 +626,43 @@ step.
 
 ### 5.1 Step 1 — schema corrections
 
-The four fixes from the earlier ASDL review:
-
-1. `attributes (Span span)` uniformly on every span-carrying sum (`Decl`, `Stmt`,
-   `SchemaMember`, `Param`, `Binder`, `FieldSupply`). Remove the redundant `Span span` on
-   their variants.
-2. `Field tag` on `Ir.ConstructVariant`, `Ir.VariantMatches`, `Ir.VariantPayload`; drop the
-   `string tag` field.
-3. Mark `Ir.Literal` `unique`.
+1. `attributes (Span span)` on the three real sums that carry it: `Decl`, `Stmt`, `SchemaMember`.
+   Remove the redundant `Span span` from their variants. `attributes` is sum-only (`parseSum`);
+   `Param`, `Binder` and `FieldSupply` are products and keep an explicit `Span span`.
+2. Keep `string tag` on `Ir.ConstructVariant`, `Ir.VariantMatches` and `Ir.VariantPayload`.
+   Interning the tag as an `Ir.Field` would rewrite every construction and read to buy identity
+   comparison no consumer currently needs; revisit only if one appears.
+3. Mark each `Literal` constructor `unique`: `unique` is per-constructor
+   (`DefineClass(c.name, c.unique, ...)`), not per-sum, so `UInt(...) unique | UInt64(...) unique
+   | ...`.
 4. `Ast.UseDecl` loses `Name name`; the loader derives the lexical name from `path`.
-5. Delete the `Ir.Bundle` sentence from the `ir.asdl` header and the unused `seen` parameter on
-   `S.encode`.
+5. Delete the `Bundle` sentence from the `ir.asdl` header and the unused `seen` parameter on
+   `M.encode` (`wordlet/schema.lua:253`).
 6. Document the "at most one of `params`/`keyed` is non-empty" invariant on `Ast.WordDef` and
    check it in `parse.lua`.
 
 No behavior changes. Regenerate `wordlet/schema/ast.lua` and `wordlet/schema/ir.lua`
 (`luajit tools/embed.lua`).
 
-### 5.2 Step 2 — the `Ir` methods
+### 5.2 Step 2 — the `Ir` structural methods
 
-Install `Ir.Expr:each`, `Ir.Stmt:each`, `Ir.Place:each`, `Ir.Arg:each`, `Ir.Expr:pure`,
-`Ir.Stmt:terminates` and `Ir.Stmt:effects` in a new `wordlet/ir_methods.lua`, required from
-`wordlet/init.lua`. Rewrite `wordlet/ir.lua`'s `eachExpr`/`eachStmt` as dispatch through the
-parent default (§2.1) and make every current caller of them call the method instead.
-
-Rewrite `wordlet/check.lua`'s `checkList`, `M.expr`, `M.place` as `Ir.Stmt:check(visitor)`,
-`Ir.Expr:check(visitor)`, `Ir.Place:check(visitor)`. Rewrite `falls` as
-`Ir.Stmt:terminates`.
+Add `Ir.Expr:each`, `Ir.Stmt:each`, `Ir.Place:each`, `Ir.Arg:each` in `wordlet/ir.lua`, after the
+parent defaults and before anything requires `ir` (§2.1), replacing the current free
+`eachExpr`/`eachStmt`. Make every caller use the method. This is structural traversal only:
+`ASDL.md` and `walk.lua` both keep control completion, effects and borrowing in explicit
+visitors, so `terminates`/`effects`/`pure` do **not** become class methods. `check.lua`'s
+`falls`, `M.expr`, `M.place` and `checkList` stay as they are (tidy them if useful, but they
+remain the visitor).
 
 Rewrite `wordlet/cabi.lua`'s `liveInstances` to call `Ir.Stmt:each`.
 
-Migration of `wordlet/lower.lua`'s five analyses onto a visitor over `Ir.Stmt:each` can happen
-in the same step or the next.
+Migration of `wordlet/lower.lua`'s five analyses onto a visitor over `Ir.Stmt:each` is Step 9.
 
-### 5.3 Step 3 — the `Ast` methods and the evaluator split
+### 5.3 Step 3 — dropped
 
-Add `wordlet/ast_methods.lua` with `Ast.Expr:evaluate`, `Ast.Stmt:execute`,
-`Ast.Decl:declare`, `Ast.Body:run`, `Ast.ResultSpec:resolve`, `Ast.SchemaMember:collect`,
-`Ast.ExportItem:resolve`, and `Ast.Expr:each`. Each method's implementation moves to the
-corresponding `Eval:` function, which is unchanged; only the dispatch changes.
-
-`Eval:evalExpr` becomes `return expr:evaluate(ctx)`. `Eval:execBlock` calls
-`stmt:execute(ctx)` in its loop. `Eval:load` calls `decl:declare(self, top)`.
-
-This step is the one with the largest diff and the largest benefit: eleven dispatchers become
-eleven functions each reached through one method.
+There is no AST method step. The evaluator already routes each variant to an `Eval:evalX`
+function, so the only change would be twelve class methods that call the function already being
+called (§2.2). It is removed from the sequence rather than deferred.
 
 ### 5.4 Step 4 — the supply machine
 
@@ -716,26 +686,34 @@ fields.
 
 `Eval:enterBuild`/`leaveBuild`/`enterStatic`/`leaveStatic` become `Session:withNesting`.
 
-### 5.6 Step 6 — the `Ty` methods and the type walkers
+### 5.6 Step 6 — the `Ty` predicates
 
-Add `Ty:runtime`, `Ty:representable`, `Ty:hasNamed`, `Ty:isIndirection`, `Ty:environment` and
-the family predicates. Rewrite `wordlet/schema.lua`'s `M.runtime`, `M.representable`,
-`M.hasNamed` as method implementations. Rewrite `Eval:checkNoValueCycle` and
-`Eval:reachesCell` on top of the same methods.
+Move the intrinsic predicates onto `Ty.V` (§2.4): the family predicates and `isIndirection`.
+Leave `S.runtime`, `S.representable` and `S.hasNamed` as free functions, because each carries a
+`seen`/`visiting` set — contextual state, which `ASDL.md` keeps off interned nodes. Rewrite
+`Eval:checkNoValueCycle` and the new `Eval:reachesCell` (the case-cycle check) to share those
+free folds rather than each carrying its own walk.
 
-Replace `S.encode(a) ~= S.encode(b)` in every comparison site with `a ~= b`.
+Replace the four `S.encode(a) ~= S.encode(b)` comparison sites with `a ~= b`; all four compare
+interned `Ty` values, so identity is the comparison (`check.lua:176`; `eval.lua:1685`, `1883`,
+`1886`).
 
 ### 5.7 Step 7 — the `Value` tags and the historical cleanups
 
-Rename `V.ir` to `V.runtime` and update every read. Rename the tags if desired but not the
-union: `word`, `method`, `closure` stay three tags (§0.1).
+Rename `V.ir` to `V.runtime` and update every read. Rename tags only if a name is wrong, but keep
+the union split: `word`, `method`, `closure` stay three tags, and `callable` is its own tag rather
+than a merge with them (§0.1).
 
 Delete the historical comments in `eval.lua` and `lower.lua` that describe a version of the
-code that no longer exists. Delete the dead fields (`signature.hidden` in `cabi.lua`,
-`initialiser = true` on the module-init entry, `checkAnnotation`'s unused `ctx`, `readSlot`'s
-unused `span` on non-residual branches, `M.spanFrom` in `parse.lua`).
+code that no longer exists. Delete the dead fields: `signature.hidden` in `cabi.lua` (stored, never read), `initialiser = true`
+on the module-init entry (`eval.lua:395`), `readSlot`'s unused `span` on non-residual branches,
+and the dead `M.spanFrom = S` re-export in `parse.lua`. `checkAnnotation`'s `ctx` **is** used
+(`ctx.scope`), so it stays; the earlier plan was wrong about that one.
 
-Delete the `options.session` parameter from `M.compile` and its refusal branch.
+Delete the `options.session` parameter from `M.compile`. It is not merely refused today:
+`Eval.session(options)` is always called and `options.session` is used, with `D.bug` firing only
+if the passed session already has instances (`init.lua:31-35`). Sessions are always fresh, so the
+parameter and the branch both go.
 
 ### 5.8 Step 8 — `lower.lua` and `cabi.lua` cleanup
 
@@ -759,16 +737,16 @@ with the single pass, and rewrite the emitter's reads to come from one object.
 
 ## 6. What this structure buys
 
-- **Adding a variant is local.** It is a new ASDL entry, and one new method in the schema-owning
-  or pass-owning module. Nothing centrally dispatches on the union of kinds.
-- **Exhaustiveness is in the schema.** A missing variant method is a `D.bug` in the parent
-  default that names the variant; nothing has to be audited.
-- **The evaluator's shape matches the language's shape.** A word is a value with a `:supply`
-  behavior; a sum's match is a value with a `:tag` behavior; the schema says both, the code
-  implements both.
-- **`Interfaces.md`'s pass order is visible.** Lex produces `Token[]`; parse produces `Ast.*`
-  nodes with `:each` and `:evaluate` methods; eval produces `Ir.Fn`s with `:each` and `:check`
-  methods; check, cabi and lower read methods, not `kind` fields.
-- **The "written from the first day" test.** Any file that reads better as a method set than as
-  a dispatcher has been placed as a method set. Any file that reads as a dispatcher has a
-  schema that was not used.
+- **Adding a variant is local.** It is a new ASDL entry, plus — only where a structural traversal
+  exists — one `:each` arm. No central `switch` over the union of kinds grows.
+- **Structural exhaustiveness is in the schema.** A missing `:each` arm is a `D.bug` in the parent
+  default that names the variant. Semantic completeness stays the pass visitor's duty, as
+  `ASDL.md` requires.
+- **The evaluator's shape matches the language's shape.** A callable is a value the supply machine
+  dispatches on; a sum's match is a value dispatched on its tag; both are ordinary functions, not
+  class methods.
+- **`interfaces.md`'s pass order is visible.** Lex produces `Token[]`; parse produces `Ast.*`
+  nodes that `walk.lua` traverses structurally; eval produces `Ir.Fn`s whose statements traverse
+  through `Ir.Stmt:each`; check, cabi and lower consume IR and their own visitors.
+- **The "written from the first day" test.** A file that reads better as a data table has been
+  made one. A file that reads as an unowned switch has a visitor waiting to be named.
