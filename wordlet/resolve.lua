@@ -6,10 +6,22 @@
 -- resolves bindings during evaluation instead, because a name can denote a word, a value, a schema
 -- or a field depending on values that only exist at evaluation time; a separate static pass would
 -- have to duplicate that. The syntactic part lives here.
+local Walk = require("wordlet.walk")
+
 local M = {}
 
 -- Free names of a lambda body: referenced but not bound by its parameters or its own `let`s.
 -- A method body belongs to the schema it is written in and is not entered here.
+local function copy(bound)
+    local out = {}
+    for key in pairs(bound) do out[key] = true end
+    return out
+end
+
+-- Free names of a lambda body: referenced but not bound by its parameters or its own `let`s.
+-- Structure comes from wordlet.walk, so every expression position -- a record field, an array
+-- element, an index -- is covered by construction. Only the scoping cases are written out,
+-- because which names bind where is the part structure cannot express.
 local function freeNames(node, bound, out)
     if node == nil then return end
     local kind = node.kind
@@ -18,58 +30,51 @@ local function freeNames(node, bound, out)
         if not bound[name] then out[name] = true end
         return
     elseif kind == "Lambda" then
-        -- A nested lambda is a separate function, but the names it needs have to travel through this
-        -- one: an environment cannot hold a name its enclosing environment does not have. So its
-        -- parameters are bound and its body is walked, which is what makes captures transitive.
-        local inner = {}
-        for key in pairs(bound) do inner[key] = true end
+        -- A nested lambda is a separate function, but the names it needs travel through this one:
+        -- an environment cannot hold a name its enclosing environment does not have. Its parameter
+        -- annotations are read here; its parameters bind in its body.
+        for _, param in ipairs(node.params) do
+            if param.annotation then freeNames(param.annotation, bound, out) end
+        end
+        local inner = copy(bound)
         for _, param in ipairs(node.params) do inner[param.name.text] = true end
         return freeNames(node.body, inner, out)
     elseif kind == "SchemaExpr" then
+        -- A method body belongs to the schema it is written in, not to the enclosing lambda.
         return
     elseif kind == "Block" then
-        local inner = {}
-        for key in pairs(bound) do inner[key] = true end
+        local inner = copy(bound)
         for _, stmt in ipairs(node.statements) do freeNames(stmt, inner, out) end
         return
     elseif kind == "ValueStmt" then
-        -- The value expressions see the bindings declared so far; the binders are added after.
+        -- Annotations and values see the bindings declared so far; the binders join afterwards.
+        for _, binder in ipairs(node.def.binders) do
+            if binder.annotation then freeNames(binder.annotation, bound, out) end
+        end
         for _, value in ipairs(node.def.values) do freeNames(value, bound, out) end
         for _, binder in ipairs(node.def.binders) do bound[binder.name.text] = true end
         return
     elseif kind == "WordStmt" then
+        -- A local named word is called inside its own activation, so it sees that scope directly
+        -- and needs no capture; only its name binds, from here on.
         bound[node.def.name.text] = true
         return
     elseif kind == "IfStmt" then
         freeNames(node.test, bound, out)
+        -- Each arm is its own scope, so a declaration in one does not bind the other.
         for _, arm in ipairs({ node.yes, node.no }) do
-            for _, stmt in ipairs(arm) do freeNames(stmt, bound, out) end
+            local inner = copy(bound)
+            for _, stmt in ipairs(arm) do freeNames(stmt, inner, out) end
         end
         return
-    elseif kind == "StoreStmt" then
-        freeNames(node.target, bound, out); freeNames(node.value, bound, out)
-        return
-    elseif kind == "ReturnStmt" then
-        for _, value in ipairs(node.values) do freeNames(value, bound, out) end
-        return
-    elseif kind == "Expression" then
-        return freeNames(node.value, bound, out)
     end
-    -- Remaining expression forms: walk their child expressions.
-    local children = {
-        Apply = { "callee", "arguments" }, BinaryExpr = { "left", "right" },
-        UnaryExpr = { "operand" }, Condition = { "test", "yes", "no" },
-        FieldSelect = { "base" }, RecordSupply = { "schema", "fields" },
-        SignatureExpr = { "inputs" }, ResultSpec = nil,
-    }
-    local fields = children[kind]
-    if not fields then return end
-    for _, field in ipairs(fields) do
-        local child = node[field]
-        if type(child) == "table" and child.kind == nil and #child > 0 then
-            for _, item in ipairs(child) do freeNames(item, bound, out) end
-        elseif type(child) == "table" and (child.kind or child.value or child.name) then
-            freeNames(child, bound, out)
+    -- Every other form is walked structurally, so a new expression position is covered without a
+    -- table here to keep in step with the schema.
+    for _, child in ipairs(Walk.children(node)) do
+        if child.list then
+            for _, item in ipairs(child.value) do freeNames(item, bound, out) end
+        else
+            freeNames(child.value, bound, out)
         end
     end
 end

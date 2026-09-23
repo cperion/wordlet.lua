@@ -91,6 +91,25 @@ do
     compile(source)
 end
 
+-- Free-name analysis walks the schema, so a name captured inside any expression position is found.
+-- A hand-written child table once missed record fields, array literals and indexes.
+do
+    local source = "let M = { acc: U32 }\n"
+        .. "let pool = [3, 4, 5]\n"
+        .. "let via_field(k: U32, x: U32) : U32 = (|y: U32| -> M { acc = k + y })(x).acc\n"
+        .. "let via_array(k: U32, x: U32) : U32 = (|y: U32| -> [k, y])(x)[0]\n"
+        .. "let via_index(k: U32, x: U32) : U32 = (|y: U32| -> pool[k] + y)(x)\n"
+        .. "let via_cond(k: U32, x: U32) : U32 = (|y: U32| -> if k < y then k else y)(x)\n"
+        .. "let via_binary(k: U32, x: U32) : U32 = (|y: U32| -> k * x + y)(x)\n"
+        .. "return { functions = { via_field, via_array, via_index, via_cond, via_binary } }"
+    check(interpret("via_field", { 2, 3 }, source)[1] == 5, "a capture in a record field is found")
+    check(interpret("via_array", { 7, 1 }, source)[1] == 7, "a capture in an array literal is found")
+    check(interpret("via_index", { 1, 10 }, source)[1] == 14, "a capture in an index is found")
+    check(interpret("via_cond", { 2, 5 }, source)[1] == 2, "a capture in a conditional is found")
+    check(interpret("via_binary", { 3, 4 }, source)[1] == 16, "a capture in a binary operand is found")
+    compile(source)
+end
+
 -- Static evaluation ----------------------------------------------------------------------------
 check(interpret("affine", { 3, 7, 4 },
     "let affine(a, b, x: U32) : U32 = a * x + b\nreturn { functions = { affine } }")[1] == 19,
