@@ -406,6 +406,7 @@ Session = {
     nextDef, nextFn, nextModule, nextCell,
 
     -- Budget counters, reset per compilation.
+    instanceCount,          -- cardinality of instances, including building/failed/module-init entries
     steps, buildDepth, staticDepth,
 
     -- Compile-wide mode.

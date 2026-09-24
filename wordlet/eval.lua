@@ -417,8 +417,7 @@ function Eval:moduleInitialiserCPS(machine, modules, span, k)
             builder:emit(body, Ir.Return(S.list({})))
             local instance = { key = "module-init", def = nil, target = target, status = "done",
                 results = {}, inputTypes = {}, inputPlan = {}, fn = fn }
-            self.instances[instance.key] = instance
-            self.order[#self.order + 1] = instance
+            self:registerInstance(instance)
             return k(machine, instance)
         end
         local module = modules[index]
@@ -3995,9 +3994,7 @@ function Eval:callableInstanceCPS(machine, callable, args, span, k)
         if existing.failure then error(existing.failure, 0) end
         return k(machine, existing)
     end
-    local count = 0
-    for _ in pairs(self.instances) do count = count + 1 end
-    if count >= (self.limits.keys or 1024) then
+    if self.instanceCount >= (self.limits.keys or 1024) then
         D.resource("keys", "Residual instance budget exhausted", span)
     end
     return self:buildCallableInstanceCPS(machine, key, callable, args, span, k)
@@ -4034,8 +4031,7 @@ function Eval:constructCallableInstanceCPS(machine, key, callable, args, span, k
     self.nextFn = self.nextFn + 1
     local instance = { key = key, def = def, plan = plan, target = "wordletfn_" .. self.nextFn,
         status = "building", args = args, paramPositions = {}, inputTypes = {} }
-    self.instances[key] = instance
-    self.order[#self.order + 1] = instance
+    self:registerInstance(instance)
 
     local body, setup = {}, {}
     local builder = IR.builder()
@@ -5268,9 +5264,7 @@ function Eval:instanceForCPS(machine, def, span, values, receiver, k)
         if existing.failure then error(existing.failure, 0) end
         return k(machine, existing)
     end
-    local count = 0
-    for _ in pairs(self.instances) do count = count + 1 end
-    if count >= (self.limits.keys or 1024) then
+    if self.instanceCount >= (self.limits.keys or 1024) then
         D.resource("keys", "Residual instance budget exhausted", span)
     end
     return self:buildInstanceCPS(machine, key, def, values, span, receiver, k)
@@ -5310,8 +5304,7 @@ function Eval:constructInstanceCPS(machine, key, def, values, span, receiver, k)
     self.nextFn = self.nextFn + 1
     local instance = { key = key, def = def, target = "wordletfn_" .. self.nextFn,
         status = "building", args = values, inputPlan = {}, inputTypes = {} }
-    self.instances[key] = instance
-    self.order[#self.order + 1] = instance
+    self:registerInstance(instance)
 
     local body, setup = {}, {}
     local builder = IR.builder()

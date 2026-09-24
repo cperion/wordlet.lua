@@ -279,7 +279,11 @@ Instance = {
   not share an instance), and any other runtime argument a `*`.
 
 Instance discovery order is deterministic: the export list in source order, then depth-first over
-newly requested keys. Function IDs are assigned on reservation.
+newly requested keys. Function IDs are assigned on reservation. `Session:registerInstance` owns map
+insertion and order-list append. `instanceCount` tracks map cardinality in O(1), including building
+and failed entries; cached requests do not increment it. Both source-instance admission paths use
+that counter, not a scan or the order-list length. The compiler-owned module initializer retains
+its existing admission exemption, but its registry key counts once, including when replaced.
 
 ### 5.1 Contextual C closure
 

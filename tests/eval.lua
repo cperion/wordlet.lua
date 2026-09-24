@@ -168,6 +168,109 @@ shared:compile(Parse.source("let inc(x: U32) : U32 = x + 1\n"
     .. "let use(x: U32) : U32 = inc(x) + inc(x)\nreturn { functions = { use } }", "s.let"))
 check(#shared.order == 2, "a helper called twice in one caller has one body")
 
+-- Key admission is constant-time map cardinality, not successful bodies or order-list length.
+-- Failed reservations still occupy a key; repeated requests (including failures) do not add one.
+do
+    local V = require("wordlet.value")
+    local function done(_, value) return nil, value end
+    local function cardinality(e, want)
+        local count = 0
+        for _ in pairs(e.instances) do count = count + 1 end
+        check(e.instanceCount == count and count == want, "maintained instance count matches the map")
+    end
+    local function failure(code, fn)
+        local ok, err = pcall(fn)
+        check(not ok and D.is(err) and err.code == code, "expected instance failure " .. code)
+        check(err.span ~= nil, "instance admission/build failure retains its span")
+        return err
+    end
+    local function named(limit, body)
+        local e = Eval.new{limits={keys=limit}}
+        e:load(Parse.source("let f(x,k:U32):U32=" .. body .. " return {functions={}}", "keys.let"))
+        return e
+    end
+    local function request(e, value)
+        local def = e.top.names.f.def
+        return e:drive(e:staticFrame(e.top, def.span), function(m)
+            return e:instanceForCPS(m, def, def.span, {[2]=V.u32(value)}, nil, done)
+        end)
+    end
+    cardinality(session, 3)
+    cardinality(shared, 2)
+    local e = named(2, "x+k")
+    cardinality(e, 0)
+    local first = request(e, 1)
+    cardinality(e, 1)
+    check(request(e, 1) == first, "same named key reuses the instance")
+    cardinality(e, 1)
+    request(e, 2)
+    cardinality(e, 2)
+    failure("keys", function() request(e, 3) end)
+    cardinality(e, 2)
+    local zero = named(0, "x+k")
+    failure("keys", function() request(zero, 0) end)
+    cardinality(zero, 0)
+
+    local bad = named(1, "x+true")
+    local err = failure("type-mismatch", function() request(bad, 1) end)
+    cardinality(bad, 1)
+    check(bad.order[1].status == "failed", "failed named build remains reserved")
+    check(failure("type-mismatch", function() request(bad, 1) end) == err,
+        "same failed named key rethrows the saved diagnostic")
+    cardinality(bad, 1)
+    failure("keys", function() request(bad, 2) end)
+    cardinality(bad, 1)
+
+    local function closure(limit, body)
+        local e = Eval.new{limits={keys=limit}}
+        local program = Parse.source("let f=|x:U32|->" .. body .. " return {functions={}}", "keys.let")
+        local top = e:load(program)
+        return e, function() return e:initializeModule(program, top) end
+    end
+    local function requestClosure(e, plan, args)
+        return e:drive(e:staticFrame(e.top, plan.def.span), function(m)
+            return e:callableInstanceCPS(m, {plan=plan}, args, plan.def.span, done)
+        end)
+    end
+    local c, initialize = closure(1, "x+1")
+    initialize()
+    cardinality(c, 1)
+    local base = c.order[1]
+    check(requestClosure(c, base.plan, {}) == base, "same closure key reuses the base")
+    cardinality(c, 1)
+    failure("keys", function() requestClosure(c, base.plan, {V.u32(7)}) end)
+    cardinality(c, 1)
+    local cz, initializeZero = closure(0, "x+1")
+    failure("keys", initializeZero)
+    cardinality(cz, 0)
+    local cb, initializeBad = closure(1, "x+true")
+    local closureError = failure("type-mismatch", initializeBad)
+    cardinality(cb, 1)
+    local failed = cb.order[1]
+    check(failed.status == "failed", "failed closure build remains reserved")
+    check(failure("type-mismatch", function() requestClosure(cb, failed.plan, {}) end) == closureError,
+        "same failed closure key rethrows the saved diagnostic")
+    cardinality(cb, 1)
+    failure("keys", function() requestClosure(cb, failed.plan, {V.u32(7)}) end)
+    cardinality(cb, 1)
+
+    -- The compiler-owned initializer is still admitted after the source-key budget is full.
+    -- Its registration counts toward map cardinality; replacing that key must not count twice.
+    local module = Eval.new{limits={keys=1}}
+    module:compile(Parse.source("let Box={n:U32} let box=Box{n=7} "
+        .. "let f():U32=box.n return {functions={f}}", "keys.let"))
+    cardinality(module, 2)
+    local previous = module.instances["module-init"]
+    check(previous ~= nil, "module initializer is registered")
+    module:drive(module:staticFrame(module.top, nil), function(m)
+        return module:moduleInitialiserCPS(m, module.modules, nil, done)
+    end)
+    cardinality(module, 2)
+    check(module.instances["module-init"] ~= previous and #module.order == 3,
+        "initializer replacement changes the order list but not map cardinality")
+    cardinality(Eval.new(), 0)
+end
+
 -- Records, methods and stores ------------------------------------------------------------------
 local RECORDS = [==[
 let P = { x: U32, y: U32 }

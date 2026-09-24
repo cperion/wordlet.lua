@@ -43,6 +43,7 @@ function Session.new(options)
         nextCell = 0, nextDef = 0, nextFn = 0, nextModule = 0,
 
         -- Budget counters, reset per compilation.
+        instanceCount = 0,       -- map cardinality, including building/failed instances and module-init
         steps = 0, maxSteps = limits.steps or 1000000,
         -- Three separate budgets, because they bound three different recursions. Specialization
         -- nesting is the depth of nested instance building; static depth is nested compile-time
@@ -59,6 +60,16 @@ function Session.new(options)
         run = false,      -- the reference interpreter: reads and writes module storage
         demanding = false, -- a module initializer is being demanded
     }, Session)
+end
+
+-- Reserve before building, so recursive requests see the instance and failed builds still count.
+-- Module initialization uses this registry too, but keeps its existing admission policy: it is a
+-- compiler-owned entry, not a source specialization subject to the keys check. Replacing its key
+-- does not add another map entry, even though the build-order list records that construction.
+function Session:registerInstance(instance)
+    if self.instances[instance.key] == nil then self.instanceCount = self.instanceCount + 1 end
+    self.instances[instance.key] = instance
+    self.order[#self.order + 1] = instance
 end
 
 function Session:step(span)
