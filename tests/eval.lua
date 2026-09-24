@@ -468,6 +468,29 @@ readSession:compile(Parse.source("let step(n: U32, x: U32): U32 = do\n"
 local _, reads = A.dump(readSession.order[1].fn):gsub("Read", "")
 check(reads == 2, "a loop-carried parameter is read once, not per mention (found " .. reads .. ")")
 
+-- A tail call that forwards a parameter unchanged omits that slot's back-edge copy: the storage
+-- already holds the value, so storing it back would be a self-copy. Only slots the call rebinds are
+-- stored. The unchanged slot's `Var` then has no store, so emission drops it and the header read
+-- aliases the input directly.
+local forwardSession = Eval.new()
+forwardSession:compile(Parse.source("let count(n: U32, k: U32): U32 = do\n"
+    .. "  if n == 0 then return k end\n"
+    .. "  return count(n - 1, k)\n"
+    .. "end\nreturn { functions = { count } }", "forward.let"))
+local _, forwardStores = A.dump(forwardSession.order[1].fn):gsub("Store", "")
+check(forwardStores == 1,
+    "an unchanged forwarded parameter is not copied on the back edge (found " .. forwardStores .. ")")
+
+-- The same shape where both slots change keeps both stores, so the elision is not over-eager.
+local changedSession = Eval.new()
+changedSession:compile(Parse.source("let count(n: U32, acc: U32): U32 = do\n"
+    .. "  if n == 0 then return acc end\n"
+    .. "  return count(n - 1, acc + n)\n"
+    .. "end\nreturn { functions = { count } }", "changed.let"))
+local _, changedStores = A.dump(changedSession.order[1].fn):gsub("Store", "")
+check(changedStores == 2,
+    "a changed parameter still gets a back-edge store (found " .. changedStores .. ")")
+
 -- A tail call with different static arguments is a different instance, so it is a real call.
 local staticSession = Eval.new()
 staticSession:compile(Parse.source("let scale(k, x: U32) : U32 = if k == 0 then x else scale(0, x + 1)\n"
@@ -1798,6 +1821,84 @@ do
     compile(table.concat(lines, "\n"))
     local elapsed = os.clock() - start
     check(elapsed < 2, "a 400-binding chain compiles in linear time (took " .. elapsed .. " s)")
+end
+
+-- Expression conditionals join logical vectors, including erased Unit and common static types.
+do
+    local program = [[
+let pair(x: U32): (Unit,U32,Unit,U32) = do return Unit(),x,Unit(),x+1 end
+let choose(flag: Bool,x: U32): (Unit,U32,Unit,U32) = if flag then pair(x) else pair(x+10)
+let total(flag: Bool,x: U32): U32 = do let u,a,v,b=choose(flag,x) return a*100+b end
+let typed(flag: Bool,x: U32): U32 = do let T=if flag then U32 else U32 let y:T=x return y end
+return {functions={choose,total,typed}}
+]]
+    check(interpret("total",{true,2},program)[1]==203,"true arm forwards its complete result vector")
+    check(interpret("total",{false,2},program)[1]==1213,"false arm forwards its complete result vector")
+    compile(program)
+    rejects("branch-result", [[
+let pair(x: U32): (U32,U32) = do return x,x end
+let bad(flag: Bool,x: U32): U32 = if flag then x else pair(x)
+return {functions={bad}}
+]])
+    rejects("branch-result", [[
+let pair(x: U32): (U32,Bool) = do return x,true end
+let other(x: U32): (U32,U32) = do return x,x end
+let bad(flag: Bool,x: U32): (U32,Bool) = if flag then pair(x) else other(x)
+return {functions={bad}}
+]])
+    rejects("branch-result", "let f(b:Bool):U32=do let T=if b then U32 else Bool let x:T=1 return 1 end return {functions={f}}")
+    rejects("borrow-escape", [[
+let Box={value:U32}
+let use(c:Box):U32=do
+  let f=|b:Bool|->if b then Ref(c) else Ref(c)
+  let r=f(true)
+  return r.value
+end
+return {functions={use}}
+]])
+    compile([[let Box={value:U32} let shared=Box{value=1}
+let pick(b:Bool):Ref(Box)=if b then Ref(shared) else Ref(shared)
+return {functions={pick}}]])
+end
+
+-- Code construction must mask execution permissions, even inside an initializer/interpreter run.
+-- The initializer really executes bump; merely constructing the callback must not execute it again.
+do
+    local program = [[
+let Counter={value:U32}
+let shared=Counter{value=0}
+let bump():U32=do shared.value+=1 return shared.value end
+let seed=bump()
+let callback:():U32=||->bump()
+let direct():U32=shared.value
+let literal(x:U32):U32=shared.value+x
+let main(n:U32):U32=do
+  let before=direct()
+  let after=callback()
+  return before*100+after*10+literal(seed)
+end
+return {functions={main}}
+]]
+    check(interpret("main",{0},program)[1]==123,"only executing a callback mutates module state")
+    local generated=compile(program):unit()
+    check(generated:find("wordletmodule_1",1,true)~=nil,"nullary and literal calls retain module reads")
+end
+
+-- Both inner tail arms must survive, and a statically selected condition keeps its tail context.
+do
+    local program = [[
+let nested(n,a:U32):U32=if n==0 then a else if n%2==0 then nested(n-1,a+1) else nested(n-1,a+2)
+let known(n,a:U32):U32=if true then if n==0 then a else known(n-1,a+1) else 0
+return {functions={nested,known}}
+]]
+    check(interpret("nested",{10,0},program)[1]==15,"both nested tail branches execute")
+    local artifact=compile(program)
+    local Walk=require("wordlet.walk")
+    for _, exported in ipairs(artifact.compilation.functions) do
+        local loops=0
+        Walk.walk(exported.instance.fn,{enter=function(node) if node.kind=="Loop" then loops=loops+1 end end})
+        check(loops>0,"conditional preserves self-tail Loop: "..exported.name)
+    end
 end
 
 print(("PASS: evaluator semantics (%d checks)"):format(checks))

@@ -817,7 +817,10 @@ function Eval:sameKnownScalar(a, b)
         return a.n == b.n
     end
     if tag == "bool" then return a.b == b.b end
-    if tag == "float" then return a.n == b.n end
+    if tag == "float" then
+        -- Signed zeros compare equal but are observably different under division.
+        return a.n == b.n and (a.n ~= 0 or 1 / a.n == 1 / b.n)
+    end
     if tag == "unit" then return true end
     if tag == "string" then return a.bytes == b.bytes end
     return false
@@ -2354,12 +2357,12 @@ function Eval:evalReferenceCPS(machine, ctx, expr, k)
     if not slot then self:unknownName(name, expr.name.span) end
     if slot.kind == "value" then
         return self:demandCPS(machine, slot, expr.name.span, function(m, demanded)
-            if slot.atTop and ctx.residual
+            if slot.atTop and (ctx.residual or not (ctx.session.run or ctx.session.demanding))
                 and (V.tag(demanded.value) == "record"
                     or (V.tag(demanded.value) == "array" and demanded.value.place == nil)) then
-                -- Runtime code reaches a *file-scope* binding through its named storage. A local
-                -- aggregate keeps its value and spills to local storage only when demanded. Normalize
-                -- code keeps the value itself, so it can still specialise a call that reads one.
+                -- Both residual code and normalization must see this as module storage, not its
+                -- initial contents. Only initialization and the reference interpreter execute over
+                -- the concrete state. readFieldValue/indexing enforce the storage permission.
                 return k(m, self:moduleObject(demanded, expr.name.span))
             end
             return k(m, demanded.value)
@@ -2840,6 +2843,7 @@ function Eval:evalConditionCPS(machine, ctx, expr, expected, k)
     return self:evalExprCPS(machine, ctx, expr.test, function(m, test)
         self:requireType(test, S.Bool, expr.test.span)
         if V.tag(test) == "bool" then
+            ctx.tail = tail
             return self:evalExpectedCPS(m, ctx, test.b and expr.yes or expr.no, expected, k)
         end
         local builder = ctx.builder
@@ -2861,81 +2865,93 @@ function Eval:evalConditionCPS(machine, ctx, expr, expected, k)
     end)
 end
 
--- What a conditional does once both continuing arms have their values: join callable arms, compare the
--- result types, and either use a known scalar or allocate the join slot. It is a method of its own
--- because the two arm evaluations are continuations, and a continuation cannot be re-indented away.
--- What a conditional does once both continuing arms have their values: join callable arms, compare the
--- result types, and either use a known scalar or allocate the join slot. It is a method of its own
--- because the two arm evaluations are continuations, and a continuation cannot be re-indented away.
--- What a conditional does once both continuing arms have their values: join callable arms, compare the
--- result types, and either use a known scalar or allocate the join slot. It is a method of its own
--- because the two arm evaluations are continuations, and a continuation cannot be re-indented away.
+-- Join a logical result vector, preserving equal static components and erasing Unit. Materialize
+-- under each arm's own context, then emit the control once (not once per result component).
 function Eval:evalConditionJoin(m, ctx, expr, yesCtx, noCtx, yesValue, yesTerminated, noValue,
         noTerminated, yesList, noList, testExpr, builder, k)
+    local function emit()
+        if #yesList > 0 or #noList > 0 then
+            builder:emit(ctx.body, Ir.If(testExpr, S.list(yesList), S.list(noList)))
+        end
+    end
     if yesTerminated and noTerminated then
+        emit() -- Both paths transfer, but their stores/effects/back edges must still run.
         ctx.terminated = true
         return k(m, V.unit())
     end
-    -- The join slot: one storage cell, written by whichever arm runs. The arm's own statements must
-    -- receive any reads materialising its result, which belongs to the arm, not to the continuation.
-    local function joined(m2)
-        local ty = yesTerminated and noValue.ty or yesValue.ty
-        local storage = builder:var(ctx.body, ty, nil)
-        local place = Ir.Local(storage)
-        local function emit(m3)
-            builder:emit(ctx.body, Ir.If(testExpr, S.list(yesList), S.list(noList)))
-            return k(m3, V.runtime(builder:ref(builder:read(ctx.body, ty, place), ty), ty))
+    local yes, no = self:expand(yesValue), self:expand(noValue)
+    if not yesTerminated and not noTerminated and #yes ~= #no then
+        D.reject("branch-result", "Conditional arms return different numbers of results: "
+            .. #yes .. " and " .. #no, expr.span)
+    end
+    local count = yesTerminated and #no or #yes
+    local result, slots = {}, {}
+    local function finish(mm)
+        emit()
+        for index = 1, count do
+            local slot = slots[index]
+            if slot then
+                local read = builder:read(ctx.body, slot.ty, slot.place)
+                result[index] = V.runtime(builder:ref(read, slot.ty), slot.ty, slot.borrowed)
+            end
         end
-        local function second(m3)
-            if noTerminated then return emit(m3) end
-            return self:expressionCPS(m3, noCtx, noValue, nil, function(m4, noExpr)
-                builder:store(noList, place, noExpr)
-                return emit(m4)
+        if count == 0 then return k(mm, V.unit()) end
+        if count == 1 then return k(mm, result[1]) end
+        return k(mm, V.results(result))
+    end
+    local component
+    component = function(mm, index)
+        if index > count then return finish(mm) end
+        local a, b = yes[index], no[index]
+        local function bind(m2)
+            local value = yesTerminated and b or a
+            local other = noTerminated and a or b
+            local sameTypeValue = V.tag(value) == "type" and V.tag(other) == "type"
+                and value.value == other.value
+            local oneArm = yesTerminated or noTerminated
+            local known = oneArm and (V.tag(value) == "type" or self:sameKnownScalar(value, value))
+                or (not oneArm and (sameTypeValue or self:sameKnownScalar(a, b)))
+            if known then
+                result[index] = value
+                return component(m2, index + 1)
+            end
+            local ty = value.ty
+            if not ty or ty == S.Type then
+                D.reject("branch-result", "Conditional static results need one common value", expr.span)
+            end
+            local place = Ir.Local(builder:var(ctx.body, ty, nil))
+            slots[index] = {ty = ty, place = place,
+                borrowed = (not yesTerminated and self:isBorrowed(a))
+                    or (not noTerminated and self:isBorrowed(b))}
+            local function second(m3)
+                if noTerminated then return component(m3, index + 1) end
+                return self:expressionCPS(m3, noCtx, b, nil, function(m4, valueExpr)
+                    builder:store(noList, place, valueExpr)
+                    return component(m4, index + 1)
+                end)
+            end
+            if yesTerminated then return second(m2) end
+            return self:expressionCPS(m2, yesCtx, a, nil, function(m3, valueExpr)
+                builder:store(yesList, place, valueExpr)
+                return second(m3)
             end)
         end
-        if yesTerminated then return second(m2) end
-        return self:expressionCPS(m2, yesCtx, yesValue, nil, function(m3, yesExpr)
-            builder:store(yesList, place, yesExpr)
-            return second(m3)
-        end)
-    end
-    local function afterChecks(m2)
-        -- When both continuing arms agree on one known scalar, the value is that scalar whatever the
-        -- test. The arms still run for their effects, but there is no join slot to allocate and no read
-        -- to copy back out.
-        if not yesTerminated and not noTerminated and self:sameKnownScalar(yesValue, noValue) then
-            -- The test expression is pure, so an arm list that is empty on both sides has no effect to
-            -- keep: there is no `If` to emit at all.
-            if #yesList > 0 or #noList > 0 then
-                builder:emit(ctx.body, Ir.If(testExpr, S.list(yesList), S.list(noList)))
-            end
-            return k(m2, yesValue)
+        if yesTerminated or noTerminated then return bind(mm) end
+        local ac, bc = self:isCallableValue(a), self:isCallableValue(b)
+        if ac and bc and not (a.ty and a.ty == b.ty) then
+            return self:joinCallablesCPS(mm, a, b, expr.span, function(m2, _, joinedA, joinedB)
+                a, b = joinedA, joinedB
+                return bind(m2)
+            end)
         end
-        return joined(m2)
+        if a.ty ~= b.ty then
+            D.reject("branch-result", "Conditional arms have different types: "
+                .. (a.ty and S.encode(a.ty) or "a bare callable") .. " and "
+                .. (b.ty and S.encode(b.ty) or "a bare callable"), expr.span)
+        end
+        return bind(mm)
     end
-    -- An arm that transfers control (a tail back edge) never reaches the continuation, so with one such
-    -- arm there is nothing to compare: the other arm's value is the result.
-    if yesTerminated or noTerminated then return afterChecks(m) end
-    -- Two callable arms whose types differ join into one tagged callable, unless they are the same code
-    -- identity, in which case their callable type already agrees.
-    local yesCallable, noCallable = self:isCallableValue(yesValue), self:isCallableValue(noValue)
-    local sameCallable = yesCallable and noCallable and yesValue.ty ~= nil and yesValue.ty == noValue.ty
-    if yesCallable and noCallable and not sameCallable then
-        return self:joinCallablesCPS(m, yesValue, noValue, expr.span, function(m2, _, joinedYes, joinedNo)
-            yesValue, noValue = joinedYes, joinedNo
-            return afterChecks(m2)
-        end)
-    end
-    if (yesCallable or noCallable) and yesValue.ty ~= noValue.ty then
-        local other = yesCallable and noValue or yesValue
-        D.reject("branch-result", "One arm is a callable and the other is "
-            .. (other.ty and S.encode(other.ty) or "a bare word with no callable type"), expr.span)
-    end
-    if yesValue.ty ~= noValue.ty then
-        D.reject("branch-result", "Conditional arms have different types: "
-            .. S.encode(yesValue.ty) .. " and " .. S.encode(noValue.ty), expr.span)
-    end
-    return afterChecks(m)
+    return component(m, 1)
 end
 -- Schemas and records -------------------------------------------------------------------------
 
@@ -3987,7 +4003,11 @@ end
 -- `pcall` pair did, without a host frame per attempt.
 function Eval:buildCallableInstanceCPS(machine, key, callable, args, span, k)
     machine:checkDepth("build", span, key)
+    -- Building code is not executing it, even when requested during initialization/interpretation.
+    local savedRun, savedDemand = self.run, self.demanding
+    self.run, self.demanding = false, false
     machine:push("build", span, key, function(_, diagnostic)
+        self.run, self.demanding = savedRun, savedDemand
         local instance = self.instances[key]
         if instance then
             instance.failure = diagnostic
@@ -3997,6 +4017,7 @@ function Eval:buildCallableInstanceCPS(machine, key, callable, args, span, k)
     end)
     return self:constructCallableInstanceCPS(machine, key, callable, args, span, function(m, instance)
         machine:pop()
+        self.run, self.demanding = savedRun, savedDemand
         return k(m, instance)
     end)
 end
@@ -5126,7 +5147,11 @@ function Eval:loopBackCPS(machine, ctx, instance, values, span, k)
     local function targetAt(index)
         if index > #instance.loopTargets then
             for position, target in ipairs(instance.loopTargets) do
-                builder:store(ctx.body, Ir.Local(target.storage), temporaries[position])
+                -- A slot the tail call forwards unchanged already holds its value: storing it back
+                -- would be a self-copy. Only slots the call actually rebinds get a back-edge store.
+                if temporaries[position] then
+                    builder:store(ctx.body, Ir.Local(target.storage), temporaries[position])
+                end
             end
             builder:emit(ctx.body, Ir.Next)
             instance.loopBack = true
@@ -5136,6 +5161,10 @@ function Eval:loopBackCPS(machine, ctx, instance, values, span, k)
         local target = instance.loopTargets[index]
         local value = values[target.position]
         self:requireType(value, target.ty, span)
+        -- The argument is exactly the binding this slot already carries, and the parameter is
+        -- immutable, so nothing between the header and here could have changed it. No temp, no
+        -- store; the loop edge leaves the slot alone.
+        if value == target.binding then return targetAt(index + 1) end
         local id = builder:valueId()
         return self:expressionCPS(machine, ctx, value, nil, function(m, expr)
             builder:emit(ctx.body, Ir.Let(id, target.ty, expr))
@@ -5238,9 +5267,12 @@ function Eval:instanceForCPS(machine, def, span, values, receiver, k)
     end
     return self:buildInstanceCPS(machine, key, def, values, span, receiver, k)
 end
-function Eval:loopTarget(instance, position, storage, ty)
+function Eval:loopTarget(instance, position, storage, ty, binding)
     instance.loopTargets = instance.loopTargets or {}
-    instance.loopTargets[#instance.loopTargets + 1] = { position = position, storage = storage, ty = ty }
+    -- `binding` is the frontend value the parameter name denotes this iteration. Identity with a
+    -- forwarded argument is what lets the back edge skip a slot that already holds it.
+    instance.loopTargets[#instance.loopTargets + 1] =
+        { position = position, storage = storage, ty = ty, binding = binding }
 end
 
 -- A failed build leaves the half-made instance remembered as failed, so a later attempt re-raises
@@ -5249,7 +5281,10 @@ end
 -- Building a word or method instance, one `Build` descriptor per attempt.
 function Eval:buildInstanceCPS(machine, key, def, values, span, receiver, k)
     machine:checkDepth("build", span, key)
+    local savedRun, savedDemand = self.run, self.demanding
+    self.run, self.demanding = false, false
     machine:push("build", span, key, function(_, diagnostic)
+        self.run, self.demanding = savedRun, savedDemand
         local instance = self.instances[key]
         if instance then
             instance.failure = diagnostic
@@ -5259,6 +5294,7 @@ function Eval:buildInstanceCPS(machine, key, def, values, span, receiver, k)
     end)
     return self:constructInstanceCPS(machine, key, def, values, span, receiver, function(m, instance)
         machine:pop()
+        self.run, self.demanding = savedRun, savedDemand
         return k(m, instance)
     end)
 end
@@ -5439,9 +5475,10 @@ function Eval:constructInstanceCPS(machine, key, def, values, span, receiver, k)
                     if def.tailSelf then
                         local storage = builder:storageId()
                         setup[#setup + 1] = Ir.Var(storage, ty, builder:ref(value, ty))
+                        local binding = V.object(ty, Ir.Local(storage), fields)
+                        self:loopTarget(instance, index, storage, ty, binding)
                         declare(sc, param.name.text, { kind = "value", name = param.name.text,
-                            value = V.object(ty, Ir.Local(storage), fields) }, param.span)
-                        self:loopTarget(instance, index, storage, ty)
+                            value = binding }, param.span)
                     else
                         declare(sc, param.name.text, { kind = "value", name = param.name.text,
                             value = V.object(ty, nil, fields, nil, false, builder:ref(value, ty), setup) },
@@ -5451,15 +5488,16 @@ function Eval:constructInstanceCPS(machine, key, def, values, span, receiver, k)
                     -- Loop-carried parameters need mutable storage so a back edge can rebind them.
                     local storage = builder:storageId()
                     setup[#setup + 1] = Ir.Var(storage, ty, builder:ref(value, ty))
-                    self:loopTarget(instance, index, storage, ty)
                     -- A value parameter is immutable, so one read per iteration is equivalent to reading at
                     -- every mention. Sharing the read is what lets expressions built from the parameter be
                     -- shared too, because reads are never interned.
                     local read = builder:valueId()
                     instance.loopHeader = instance.loopHeader or {}
                     instance.loopHeader[#instance.loopHeader + 1] = Ir.Read(read, ty, Ir.Local(storage))
+                    local binding = V.runtime(builder:ref(read, ty), ty)
+                    self:loopTarget(instance, index, storage, ty, binding)
                     declare(sc, param.name.text, { kind = "value", name = param.name.text,
-                        value = V.runtime(builder:ref(read, ty), ty) }, param.span)
+                        value = binding }, param.span)
                 else
                     declare(sc, param.name.text, { kind = "value", name = param.name.text,
                         value = V.runtime(builder:ref(value, ty), ty) }, param.span)
