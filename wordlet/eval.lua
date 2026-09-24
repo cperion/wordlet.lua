@@ -756,12 +756,14 @@ end
 -- `value { case = handler, ... }`: every alternative must be covered. A value whose tag is known
 -- selects one handler; an opaque variant tests the tag and joins the arms.
 
--- A sum match. The handlers are evaluated in written order, one CPS step each, and only a *known* tag
--- evaluates a handler at all -- the tag decides, which is why the handlers are values here rather than
--- expressions. `supply` and `matchResidual` are still direct, so their answers are one frame each.
+-- A sum match. Handler expressions are evaluated in written order, except that a known tag skips
+-- unselected lambda literals entirely: constructing a closure would otherwise elaborate its base
+-- instance before selection. Non-lambda expressions retain their evaluation/checking behavior.
+-- Only the selected handler is invoked for a known tag; an opaque tag elaborates every arm.
 function Eval:evalMatchCPS(machine, ctx, base, expr, span, k)
     span = span or expr.span
     local handlers, order = {}, {}
+    local selected = V.tag(base) == "variant" and base.case or nil
     local function handler(index)
         if index > #expr.fields then
             for _, name in ipairs(S.casesOf(base.ty)) do
@@ -771,16 +773,15 @@ function Eval:evalMatchCPS(machine, ctx, base, expr, span, k)
                 end
             end
             for _, name in ipairs(order) do
-                if not (V.tag(handlers[name]) == "word" or V.tag(handlers[name]) == "closure"
-                    or V.tag(handlers[name]) == "method") then
+                if handlers[name] ~= false and not (V.tag(handlers[name]) == "word"
+                    or V.tag(handlers[name]) == "closure" or V.tag(handlers[name]) == "method") then
                     D.reject("callable-required", "A match handler must be callable", expr.span)
                 end
             end
-            if V.tag(base) == "variant" then
-                -- The tag is known here, so the other alternatives are not evaluated at all.
+            if selected then
                 local payload = base.payload
                 if payload == nil then payload = V.unit() end
-                return self:supplyCPS(machine, ctx, handlers[base.case], { payload }, span, k)
+                return self:supplyCPS(machine, ctx, handlers[selected], { payload }, span, k)
             end
             if not ctx.residual then
                 D.reject("runtime-in-normalization", "Matching an opaque variant needs runtime code", span)
@@ -794,6 +795,13 @@ function Eval:evalMatchCPS(machine, ctx, base, expr, span, k)
         end
         if handlers[name] ~= nil then
             D.reject("duplicate", "Alternative " .. name .. " is handled twice", entry.name.span)
+        end
+        if selected and name ~= selected and entry.value.kind == "Lambda" then
+            -- false records syntactic coverage, without capture planning, annotations or body work.
+            -- It is distinct from nil (missing), including for duplicate detection above.
+            handlers[name] = false
+            order[#order + 1] = name
+            return handler(index + 1)
         end
         return self:evalExprCPS(machine, ctx, entry.value, function(m, value)
             handlers[name] = value

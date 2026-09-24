@@ -322,6 +322,28 @@ return { types = { Circle, Rect, Shape }, functions = { via_shape, direct, via_o
         inputs = { { 0 }, { 1 }, { 2 }, { 3 }, { 4 }, { 100 }, { 4294967295 } },
     },
     {
+        name = "known-match-lambdas",
+        source = [[
+let T=OneOf({a:U32,b:U32})
+let U=OneOf({a:Unit,b:Unit})
+let choose(x:U32):U32=T.a(x){a=|v:U32|->v+1,b=|v:U32|->1+true}
+let unit(x:U32):U32=U.a(){a=|u:Unit|->x+2,b=|u|->missing_capture}
+let reversed(x:U32):U32=T.b(x){a=|v:MissingType|->0,b=|v:U32|->v+3}
+let Counter={value:U32}
+let state=Counter{value=0}
+let effect(x:U32):U32=do state.value+=1 return x end
+let discarded(x:U32):U32=do
+  state.value=0
+  let unused=T.a(effect(x))
+  return state.value
+end
+return {functions={choose,unit,reversed,discarded}}
+]],
+        entries = {{entry="choose",arity=1},{entry="unit",arity=1},
+            {entry="reversed",arity=1},{entry="discarded",arity=1}},
+        inputs = {{0},{7},{4294967295}},
+    },
+    {
         -- A record-valued conditional used to leak the arms' reads into the continuation.
         name = "recordbranch",
         source = [==[

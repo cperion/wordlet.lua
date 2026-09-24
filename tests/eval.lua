@@ -718,6 +718,71 @@ check(interpret("id", { 3 },
     "let Opt = OneOf({ some: U32 })\nlet id(n: U32): U32 = Opt.some(n) { some = |v: U32| -> v }\n"
     .. "return { functions = { id } }")[1] == 3, "a non-record alternative is applied to one value")
 
+-- Known matches must not construct unselected lambda literals: construction elaborates a base
+-- instance, so waiting until invocation to select the arm is already too late.
+do
+    local prefix = "let T=OneOf({a:U32,b:U32})\n"
+    local function known(arm)
+        return prefix .. "let choose(x:U32):U32=T.a(x){a=|v:U32|->v+1,b=" .. arm
+            .. "}\nreturn {functions={choose}}"
+    end
+    for _, arm in ipairs({
+        "|v:U32|->1+true", "|v:U32|->missing_capture", "|v:MissingType|->0",
+        "|v|->0", "(|v:U32|->[0][1])", "|v:U32|->true",
+    }) do
+        local program = known(arm)
+        local artifact = compile(program)
+        local plans = 0
+        for _ in pairs(artifact.compilation.session.plans) do plans = plans + 1 end
+        check(plans == 1, "a dead literal creates no closure plan: " .. arm)
+        check(interpret("choose", {5}, program)[1] == 6, "known tag invokes only its selected handler")
+    end
+    -- Selection is per occurrence, not a permanent exemption for that source lambda.
+    local arms = "{a=|v:U32|->v,b=|v:U32|->1+true}"
+    rejects("type-mismatch", prefix .. "let choose(x:U32):U32=T.b(x)" .. arms
+        .. " return {functions={choose}}")
+    rejects("type-mismatch", prefix .. "let choose(s:T):U32=s" .. arms
+        .. " return {functions={choose}}")
+    rejects("lambda-annotation", prefix
+        .. "let choose(s:T):U32=s{a=|v:U32|->v,b=|v|->0} return {functions={choose}}")
+    -- Skipping a literal does not erase its field name from syntactic validation.
+    for _, case in ipairs({
+        {"duplicate", "{a=|v:U32|->v,b=|v|->0,b=|v|->0}"},
+        {"variant-match", "{a=|v:U32|->v}"},
+        {"variant-match", "{b=|v|->0}"},
+        {"unknown-member", "{a=|v:U32|->v,b=|v|->0,c=|v|->0}"},
+    }) do
+        rejects(case[1], prefix .. "let choose(x:U32):U32=T.a(x)" .. case[2]
+            .. " return {functions={choose}}")
+    end
+    -- Non-lambda expressions still evaluate and must produce callable values.
+    rejects("callable-required", known("false"))
+    rejects("division-zero", known("1/0"))
+end
+
+-- Static instruction selection must cut off dead handler elaboration before it walks off the
+-- program. The selected lambda instances can then form a finite residual tail component.
+do
+    local program = [[
+let Op=OneOf({step:Unit,branch:Unit,halt:Unit})
+let instruction(pc:U32):Op=[Op.step(),Op.branch(),Op.halt()][pc]
+let vm(pc,n,a:U32):U32=instruction(pc){
+  step=|u:Unit|->vm(pc+1,n,a+3),
+  branch=|u:Unit|->if n==0 then vm(pc+1,n,a) else vm(0,n-1,a),
+  halt=|u:Unit|->a,
+}
+let run(n,a:U32):U32=vm(0,n,a)
+return {functions={run}}
+]]
+    local artifact = compile(program)
+    local jumps = 0
+    for _, report in ipairs(artifact.layouts.contextual.reports) do jumps = jumps + report.jumps end
+    check(jumps > 0, "static-pc VM and selected lambda handlers form a tail component")
+    for _, n in ipairs({0,1,3}) do
+        check(interpret("run", {n,7}, program)[1] == 7+3*(n+1), "static-pc VM result")
+    end
+end
+
 -- Rejections -----------------------------------------------------------------------------------
 rejects("variant-match", [==[
 let A = { x: U32 }

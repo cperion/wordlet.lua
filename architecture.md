@@ -306,6 +306,11 @@ Short-circuit and/or elaborate the right operand only in the appropriate arm, ne
 Both operands and the result are Bool; and binds tighter than or. A known left operand may avoid
 evaluating the right operand entirely. There is no operand-valued truthiness.
 
+Known sum matches likewise skip unselected lambda literals before capture planning or base-instance
+construction. A skipped literal still counts for coverage and duplicate checks. Non-lambda handler
+expressions retain written-order evaluation and callable checks; only the selected handler is invoked.
+Opaque matches elaborate every handler. This cutoff does not make closure construction generally lazy.
+
 ### 6.2 Recursion
 
 The target requires an explicit runtime result contract for every member of a RESIDUAL recursive
@@ -452,7 +457,9 @@ builds one alternative; the payload expression is absent for a `Unit` alternativ
 matching arm has already established, defining a value of that alternative's type. All three name
 their `Ty.Sum`, so the checker can reject a tag or a projection that does not belong to the type,
 and a match on a value that is not of that type. Nothing in the IR reads a tag without a matching
-test in an enclosing arm, which is what keeps payload projection sound.
+test in an enclosing arm, which is what keeps payload projection sound. Emission omits an unused
+`ConstructVariant` box (common after a known match), retaining payload expression uses for the current
+template analysis. This is not general sum scalarization or dead-IR removal before tail eligibility.
 
 There is no separate receiver operand: a receiver is a `PlaceParam`, so `Place.Local` names it. This
 replaces the earlier `Receiver(parameter_id)` sketch, which duplicated `Place.Local`.

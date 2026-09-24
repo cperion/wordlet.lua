@@ -37,27 +37,38 @@ compiled to check mixed-recursive linkage.
 
 The five-million-step witnesses include scalar mutual tails, nested diamonds, heterogeneous
 three-member swaps, expression/statement tuple results, and nullary Unit cycles driven both by a
-foreign function and by mutable module state. Existing self-tail loops are checked independently.
+foreign function and by mutable module state. A static-`pc` dispatch regression includes selected
+lambda-handler instances in its tail cycle. Existing self-tail loops are checked independently.
 Additional cases cover borrowed receivers and cleanup that must retain calls; foreign/opaque/local
 and discarded returns; erased Unit components; exact-once vector-branch effects; signed zeros;
 module-reading/mutating closures constructed without executing their bodies; aliases, imports and
 separate headers; runtime aborts, template immutability, deterministic output, a 12,000-node SCC
 stress case and expansion/total-size limits. The evaluator suite also checks vector arity/type errors
-and initialization/interpreter permissions.
+and initialization/interpreter permissions. Known-match regressions cover dead lambda bodies,
+captures and annotations; per-occurrence selection; opaque-arm checking; missing/duplicate/unknown
+alternatives; and the unchanged evaluation of non-lambda handler expressions. C tests also check
+unused sum boxes without losing payload effects.
 
 Production validation on GCC 13.3 / Clang 18.1:
 
-- Full `tests/run.lua`: **PASS, 36.31 s**; evaluator 638 checks, C differential/distribution
-  1327 checks across 41 programs, contextual 4654 checks, plus schema/parser/kernel, SHA-256, JIT
+- Full `tests/run.lua`: **PASS, 35.15 s**; evaluator 690 checks, C differential/distribution
+  1355 checks across 42 programs, contextual 5115 checks, plus schema/parser/kernel, SHA-256, JIT
   and isolated deterministic distribution acceptance.
-- `CC=clang luajit tests/contextual.lua`: **PASS, 4654 checks, 2.54 s**.
-- `CC=clang luajit tests/c.lua`: **PASS, 1327 checks / 41 programs, 19.81 s**.
+- `CC=clang luajit tests/contextual.lua`: **PASS, 5115 checks, 3.49 s**.
+- `CC=clang luajit tests/c.lua`: **PASS, 1355 checks / 42 programs, 21.08 s**.
+- An additional static-`pc`/known-match/payload-effect witness passed **12 compile/run combinations
+  in 1.89 s**: GCC, Clang and tcc, C99/C11, credits 0/256, five million iterations on a 256 KiB stack.
+  GCC/Clang used `-O0 -fno-inline -fno-optimize-sibling-calls -Wall -Wextra -Wpedantic -Werror`;
+  tcc used `-Wall -Werror` without unsupported GCC warning/optimization flags.
 
 These are validation wall times, not benchmark speedups.
 
 The guarantee is only for recognized safe tail components. Unproved aggregate/borrowed ownership
 and remaining opaque or non-tail recursion retain ordinary calls. Nonzero residual credit is an
-optional code-size policy, not evidence of a general speedup.
+optional code-size policy, not evidence of a general speedup. Static-call memoization and closure
+base-construction costs are unchanged: the static-`pc` test interprets only counts 0, 1 and 3; count 10
+currently exhausts the `keys` budget during closure construction. Its deep-run acceptance is compiled
+C, not a claim that large fully static interpreter invocations are now cheap.
 
 ## Source examples (executable)
 

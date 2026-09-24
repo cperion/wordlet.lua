@@ -167,6 +167,11 @@ Key points:
   block ended, and `ctx.terminated` records that the current evaluation already transferred control
   (a tail back edge, emitted as `Ir.Next`), which the enclosing `return` then reports. A body with
   no returning path rejects (`no-return`).
+- **Known match selection precedes lambda construction.** `evalMatchCPS` records an unselected
+  lambda literal as `false` in its local handler table: present for coverage/duplicate checks, but
+  neither a closure plan nor a callable to invoke. Only a known tag may introduce this marker;
+  opaque matches elaborate all arms. Non-lambda handler expressions keep their evaluation order
+  and callable validation.
 - **One law for application.** `Eval:supply(ctx, callee, args, span)` is the only entry point: it
   appends the arguments to the callee's bound arguments, tests saturation, and hands a saturated
   call to the one owner for its kind — `invokeBuiltin`, `invokeForeign`, `invokeSource`,

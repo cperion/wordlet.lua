@@ -471,7 +471,13 @@ function Emitter:statements(list)
             self.layouts.usesAbort = true
             self:line("if (" .. self:expr(stmt.failure) .. ") abort();")
         elseif kind == "ConstructVariant" then
-            if not (self.inline and self.inline[stmt.value.id]) then self:construct(stmt) end
+            if not self.usedValues[stmt.value.id] then
+                -- A known match can consume the payload without ever using the boxed sum. Keep
+                -- payload uses expected by template analysis, but do not declare an unused box.
+                if stmt.payload then self:line("(void)(" .. self:expr(stmt.payload) .. ");") end
+            elseif not (self.inline and self.inline[stmt.value.id]) then
+                self:construct(stmt)
+            end
         elseif kind == "VariantMatches" then
             if not (self.inline and self.inline[stmt.value.id]) then
                 local tag = S.tagIndex(stmt.sum, stmt.tag)

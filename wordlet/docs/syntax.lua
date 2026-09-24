@@ -496,11 +496,16 @@ let area(s: Shape): U32 = s {
 }
 ```
 
-Every alternative must be handled exactly once; a missing or duplicated alternative rejects. Every
-handler must be callable, and every handler must produce the same result type. A value whose
-alternative is known selects its handler directly and evaluates no other handler, so an unreachable
-handler body is not compiled for that occurrence. A value whose alternative is only known at run time
-becomes a tag test per alternative with the payload projected inside the matching arm.
+Every alternative must be handled exactly once; missing, duplicated or unknown alternatives reject,
+including for a known tag. Handler expressions are evaluated in written order, with one exception:
+an unselected lambda literal for a known tag is not constructed at all, so its captures, parameter
+annotations and body are not elaborated for that occurrence. Other handler expressions still evaluate
+and must produce callable values; only the selected handler is invoked. This is not general lazy
+evaluation of arbitrary expressions that produce handlers.
+
+A value whose alternative is only known at run time requires every handler to be elaborated and
+callable, with matching result types. It becomes a tag test per alternative with the payload projected
+inside the matching arm.
 
 A sum value is immutable like a record; its alternatives have no selectable members. A payload is
 reached by matching, not by naming an alternative in a member select. Sum values copy by value on

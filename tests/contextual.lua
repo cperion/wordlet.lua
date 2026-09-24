@@ -139,6 +139,14 @@ let mixed_choose(flag: Bool,x: U32): (Unit,U32,Unit,U32) = if flag then mixed_pa
 let effect_pair(n: U32): (U32,U32) = do state.n=state.n*10+n return state.n,state.n+1 end
 let effect_choose(flag: Bool): (U32,U32) = if flag then effect_pair(2) else effect_pair(3)
 let signed_zero(flag: Bool): F64 = if flag then 0.0 else -0.0
+let VMOp=OneOf({step:Unit,branch:Unit,halt:Unit})
+let instruction(pc:U32):VMOp=[VMOp.step(),VMOp.branch(),VMOp.halt()][pc]
+let vm(pc,n,a:U32):U32=instruction(pc){
+  step=|u:Unit|->vm(pc+1,n,a+3),
+  branch=|u:Unit|->if n==0 then vm(pc+1,n,a) else vm(0,n-1,a),
+  halt=|u:Unit|->a,
+}
+let static_pc(n,a:U32):U32=vm(0,n,a)
 extern let host_more(): Bool
 let null_a(): Unit = do
   if not host_more() then return end
@@ -181,7 +189,7 @@ let quotient(n: U32): U32 = 100/n
 let guarded(n: U32): U32 = quotient(n)+5
 return {functions={even,odd,nested_a,cycle_a,pair_a,set,get,null_a,mixed_a,walk,defer_a,
   helper_a,helper_b,use_host,discard,via,guarded,alias=even,module_a,via_callback,via_delayed,
-  nested_self,known_self,mixed_choose,effect_choose,signed_zero}}
+  nested_self,known_self,mixed_choose,effect_choose,signed_zero,static_pc}}
 ]]
 
 -- Snapshot reflected nodes/lists before lower.close. Contextual emission may build side tables and
@@ -262,6 +270,7 @@ int main(int argc, char **argv) {
   wordlet_set(5000000); wordlet_module_5Fa(); assert(wordlet_get()==0);
   assert(wordlet_nested_5Fself(5000000,0)==7500000);
   assert(wordlet_known_5Fself(5000000,0)==5000000);
+  assert(wordlet_static_5Fpc(5000000,7)==15000010);
   assert(!signbit(wordlet_signed_5Fzero(true)));
   assert(signbit(wordlet_signed_5Fzero(false)));
   TUPLE mixed = wordlet_mixed_5Fchoose(false,2);
