@@ -44,6 +44,8 @@ this section states exactly how much of it runs today.
 | Two different callables selected by one conditional | implemented as a tagged callable: a tag plus a union of the arm environments. A call tests the tag and runs that arm's own code directly, so it needs no function pointer. The same code identity in both arms needs no tag |
 | Erasing a runtime-tagged callable into a signature (`callable-erase`) | **rejected**: a view does not retain the environment that carries the tag. Call it where it was selected, or select the arm first |
 | Self-tail calls (`Loop`/`Next` back edges) | implemented; tails run at constant C stack depth |
+| Safe scalar mutual-tail components | implemented in the C backend, including private scalar join forwarding; internal transfers use labels even at `-O0`. Borrowing/aggregate cases outside the reuse proof retain calls |
+| Optional residual-body expansion | implemented: `residualInlineBudget` (default `0`) permits bounded contextual copies, independently of host inlining |
 | Module-level mutable records captured by runtime code | implemented as named file-scope storage plus an exported `wordlet_init()`. The host owns initialisation order; nothing is called implicitly |
 
 Working end to end today: U32/Bool/Unit, `let` bindings, named definitions with parameter and result
@@ -62,7 +64,10 @@ A result is written with `:` after the parameter list; `->` introduces a lambda 
 else; a signature's inputs are parenthesized, so `(U32): U32` is a word from U32 to U32.
 A call to the instance currently being built, in tail position, becomes a back edge: a `for (;;)`
 loop with a `continue`, with every next argument evaluated before any parameter is rebound. Calling
-it with different static arguments is a different instance and stays an ordinary call.
+it with different static arguments is a different instance, not that self-loop rewrite. The backend
+also closes cycles of recognized safe scalar tail calls between instances with labels. It reserves
+all member entries before emission and snapshots inputs before rebinding, so mutual tails do not
+rely on C compiler optimizations. Calls with pending work or unproved lifetime safety retain frames.
 
 A lambda becomes a closure: captures that are static join its code identity, and the remaining ones
 form a by-value environment passed to the compiled lambda as leading hidden inputs. Because the code
@@ -95,8 +100,9 @@ emits a local adapter that binds its hidden inputs, and the field stores the res
 adapter lives in the assigning activation, the record holding it is non-retaining: it may be used,
 copied and called locally, but returning it or storing it in module state is rejected.
 
-`tests/eval.lua` (612 checks) and `tests/c.lua` (675 checks, 40 programs, compiling and running the
-generated C11 under strict warnings) cover this. `tests/sha256.lua` runs a real program,
+`tests/eval.lua` and `tests/c.lua` cover these semantics, with the C corpus run at both zero and
+nonzero residual expansion credit. `tests/contextual.lua` additionally checks normalization, deep tail
+cycles with a small stack, retained borrows/cleanup, local returns, deterministic output and budgets. `tests/sha256.lua` runs a real program,
 `examples/sha256.let`, against the published NIST vector and against the interpreter for runtime
 seeds. `tests/jit.lua` exercises the LuaJIT FFI front end, building and loading an artifact with the
 host compiler.
@@ -158,9 +164,16 @@ declared `WORDLET_PRIVATE`, which is `static inline __attribute__((always_inline
 and plain `static` on another C11 compiler. The forced inlining is on by default because a residual
 specialization usually has one caller; `--no-inline` (or `inline = false`) leaves the choice to the
 compiler, and a host can define `WORDLET_NO_FORCED_INLINE` to do the same, which is what a debug
-build wants. A function with a non-tail direct self-call always keeps plain `static`, because GCC
-refuses to force-inline a genuinely recursive function; a self-tail call is a `Loop` back edge and is
-unaffected.
+build wants. A private root in a remaining known C-call cycle keeps plain `static`, because GCC
+refuses to force-inline genuinely recursive code. Self loops and safe mutual-tail component jumps
+are independent of those attributes.
+
+The separate Lua API option `residualInlineBudget` is a nonnegative integer (default `0`): optional
+IR-weight credit for residual helper copies per emitted C function. Mandatory tail components do not
+spend that optional credit. `limits.emittedNodes` (default `1000000`) bounds total contextual emitted
+weight and reports `c-size` on exhaustion. Neither option changes source evaluation or replays a
+specialization. Nonzero credit deliberately trades C size for local optimization opportunities; it
+is not an automatic speedup.
 The bootstrap has no LuaRocks, network, external Lua library or C compiler dependency. Its bit module
 is supplied by LuaJIT itself.
 

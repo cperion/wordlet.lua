@@ -29,6 +29,8 @@ return {
         ["wordlet.check"] = "wordlet/check.lua",
         ["wordlet.cabi"] = "wordlet/cabi.lua",
         ["wordlet.lower"] = "wordlet/lower.lua",
+        ["wordlet.tail"] = "wordlet/tail.lua",
+        ["wordlet.contextual"] = "wordlet/contextual.lua",
         ["wordlet.jit"] = "wordlet/jit.lua", -- the LuaJIT FFI front end (uses the host C compiler)
         ["wordletkit.u32"] = "wordletkit/u32.lua",
         ["wordletkit.u64"] = "wordletkit/u64.lua",

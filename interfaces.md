@@ -45,6 +45,8 @@ Lua-level signatures. `Diag` values are raised with `error`, not returned.
 | `wordlet/check.lua` | `program(fnList, modules, foreigns)` | raises `bug` diagnostics only |
 | `wordlet/cabi.lua` | `close(compilation) -> Layouts` | record layouts, callable ABIs, C names |
 | `wordlet/analysis.lua` | `analyze(fn) -> Analysis` | one walk per `Ir.Fn`: storage/value uses, mutations, the inlining rule and the sharing rule (structure.md §3.5) |
+| `wordlet/tail.lua` | `prepare(functions, modules, foreigns) -> plan`; `normalize(fn)`; `components(order, edges)` | checked copy-only join normalization, conservative scalar reuse, deterministic SCCs and costs |
+| `wordlet/contextual.lua` | `bodies(layouts, newEmitter) -> buffers`; `call`, `returnText`, `group` | static destinations, tail components, optional copies and actual C roots |
 | `wordlet/lower.lua` | `close(layouts)` then `unit(layouts)`, `cdef(layouts, ns)`, `source(layouts, headerName)`, `header(layouts, name)` | `close` computes the emission once; the four views read one closed artifact |
 | `wordlet/diag.lua` | `reject/bug/todo/resource/internal(...)`, `format(Diagnostic) -> string` | diagnostic construction |
 | `wordlet/init.lua` | `compile(options) -> Artifact`, `compile_file(path, options)` | public facade |
@@ -149,7 +151,13 @@ Key points:
 - **Initialization is eager and ordered.** `initializeModule` demands every top-level value binding
   once, in declaration order; a forward reference pulls a later initializer early. `demand` sets
   `session.demanding` while it runs, so an initializer may read and write module storage — it is
-  compile-time execution over concrete values. Residual specialization still rejects touching it.
+  compile-time execution over concrete values. Both instance-building boundaries suspend `run` and
+  `demanding`, restoring them on success or diagnostic unwinding: building code inside an initializer
+  or interpreter run does not execute that code. A nested initializer demand has its own permission.
+- **Conditional joins are logical vectors.** Continuing arms agree in arity and per-position type;
+  Unit and common known components need no storage. Other components get private typed slots,
+  preserving borrow flags. Materialization stays inside its selected arm; one `If` contains all arm
+  effects and transfers. Terminated arms contribute no result, but their control is still emitted.
 - The builder interns E per `Ir.Fn` (`Builder.memo`), as required by `architecture.md` §7. ASDL
   does not mark `Ir.Expr` unique because `Value` IDs are function-local, so the memo belongs to the
   function's builder rather than to the schema.
@@ -268,6 +276,22 @@ Instance = {
 Instance discovery order is deterministic: the export list in source order, then depth-first over
 newly requested keys. Function IDs are assigned on reservation.
 
+### 5.1 Contextual C closure
+
+`Lower.close` prepares normalized copies without mutating `Instance.fn`. Changed functions are
+rechecked and analyzed. Each real C root reserves every entry of its safe scalar tail component
+before emitting any body. Internal terminal identity calls install parallel argument snapshots and
+jump locally; they never spend optional credit. Other known calls may get fresh nested copies with
+static local return destinations, or remain ordinary calls. Active-component and depth cuts prevent
+unbounded expansion; an unproved lifetime retains the call.
+
+`layouts.signatures` retains logical interfaces. After body discovery, `layouts.instances` retains
+the conservative instance catalog and `layouts.order` is the actual root queue: exports/initializer,
+remaining direct targets and View adapter targets. `layouts.recursiveRoots` records SCC membership
+of remaining known C calls, so recursive private roots are not forced inline. Unknown calls keep
+existing ABIs and have no new stack guarantee. `layouts.contextual` holds the configured budget,
+total weighted size and per-root reports (mandatory/total weight, calls, jumps, expansions, reasons).
+
 ## 6. IR invariants the builder must maintain
 
 These are the obligations `check.lua` verifies; the builder should not rely on the verifier to fix them.
@@ -381,8 +405,9 @@ accepts that pre-loaded scope; `session:declareNamespace` puts a namespace in it
 cannot resolve an import, so `compile` rejects a `use` declaration (`import-input`).
 
 Options: `name` (defaults to the path), `limits` (section 9), `target = "c11"`, `inline` (defaults
-to `true`: a private function is asked to force-inline on GCC and clang, and is plain `static` on
-another C11 compiler), and `symbolPrefix` (defaults to `""`: a prefix for every exported symbol,
+to `true`: a nonrecursive private root is asked to force-inline on GCC and clang, and is plain
+`static` on another C11 compiler), `residualInlineBudget` (finite nonnegative integer, default `0`:
+optional residual-copy weight per C function, separate from mandatory tail closure), and `symbolPrefix` (defaults to `""`: a prefix for every exported symbol,
 which the FFI front end uses so several artifacts can be loaded in one process). Compilation errors
 raise `Diagnostic`; the facade never returns a partial artifact. `artifact:unit()` exists because the
 bundler's CLI defaults to one file, while `header`/`source` support separate compilation.
@@ -400,6 +425,9 @@ wordlet [--header NAME] [--unit] [--check] [-o OUT] FILE.let
 Start from the values in `VALIDATION.md` (static depth, evaluator steps, AST nesting, residual
 statements, keys, aggregate size) and make them `Options.limits` fields with those defaults. Limits
 are per root demand or per key and are reported as `resource` diagnostics naming the scope.
+`limits.emittedNodes` is a finite nonnegative integer (default `1000000`) bounding total contextual
+emission weight; exhaustion reports `resource [c-size]`, never a partial tail component. Optional
+copies additionally stop at 32 nested Groups. Invalid emission budgets report `compile-option`.
 
 ## 10. Determinism
 

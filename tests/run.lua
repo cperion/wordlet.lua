@@ -21,6 +21,7 @@ dofile(here .. "u64.lua")
 dofile(here .. "parse.lua")
 dofile(here .. "eval.lua")
 dofile(here .. "c.lua")
+dofile(here .. "contextual.lua")
 dofile(here .. "sha256.lua")
 dofile(here .. "jit.lua")
 

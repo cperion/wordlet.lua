@@ -19,11 +19,45 @@ The runner cleans its temporary directory and reports failures with nonzero exit
 The same command then runs the compiler suites in order: `tests/schemas.lua` (AST/IR schemas),
 `tests/u64.lua` (the exact 64-bit kernel), `tests/parse.lua` (lexer/parser), `tests/eval.lua`
 (evaluator semantics) and `tests/c.lua` (interpreter/C differential, compiling and running the
-generated C11 under `-Wall -Wextra -Werror -O2`), and `tests/jit.lua` (the LuaJIT FFI front end, which
+generated C11 under `-Wall -Wextra -Werror -O2` with residual expansion credit 0 and 256),
+`tests/contextual.lua` (contextual lowering and bounded tail-stack tests), `tests/sha256.lua` (real
+SHA-256 acceptance), and `tests/jit.lua` (the LuaJIT FFI front end, which
 builds and loads an artifact with the host compiler). A failure in any suite stops the run, so a passing
 bundle or ASDL constructor check alone is not a parser/evaluator/C correctness claim; the compiler
 suites are what make that claim. Tests need POSIX tools and a C11 compiler; they are not a sandbox
 for untrusted module source or manifest code.
+
+## Contextual C acceptance
+
+`tests/contextual.lua` compiles/runs production C at `-O0`, `-O2` and `-O3`, with
+`-fno-inline -fno-optimize-sibling-calls -DWORDLET_NO_FORCED_INLINE`, strict C11 warnings and a
+**256 KiB stack**, at optional residual credits **0 and 256**. Run with `CC=clang` to repeat the
+matrix under Clang; the default `cc` on the validation host is GCC. Normal host attributes are also
+compiled to check mixed-recursive linkage.
+
+The five-million-step witnesses include scalar mutual tails, nested diamonds, heterogeneous
+three-member swaps, expression/statement tuple results, and nullary Unit cycles driven both by a
+foreign function and by mutable module state. Existing self-tail loops are checked independently.
+Additional cases cover borrowed receivers and cleanup that must retain calls; foreign/opaque/local
+and discarded returns; erased Unit components; exact-once vector-branch effects; signed zeros;
+module-reading/mutating closures constructed without executing their bodies; aliases, imports and
+separate headers; runtime aborts, template immutability, deterministic output, a 12,000-node SCC
+stress case and expansion/total-size limits. The evaluator suite also checks vector arity/type errors
+and initialization/interpreter permissions.
+
+Production validation on GCC 13.3 / Clang 18.1:
+
+- Full `tests/run.lua`: **PASS, 36.31 s**; evaluator 638 checks, C differential/distribution
+  1327 checks across 41 programs, contextual 4654 checks, plus schema/parser/kernel, SHA-256, JIT
+  and isolated deterministic distribution acceptance.
+- `CC=clang luajit tests/contextual.lua`: **PASS, 4654 checks, 2.54 s**.
+- `CC=clang luajit tests/c.lua`: **PASS, 1327 checks / 41 programs, 19.81 s**.
+
+These are validation wall times, not benchmark speedups.
+
+The guarantee is only for recognized safe tail components. Unproved aggregate/borrowed ownership
+and remaining opaque or non-tail recursion retain ordinary calls. Nonzero residual credit is an
+optional code-size policy, not evidence of a general speedup.
 
 ## Source examples (executable)
 
@@ -254,6 +288,9 @@ resource diagnostic naming the scope. There is no exponential replay-path counte
 | static depth (`static-depth`) | 64 compiling, 1024 in the reference interpreter | nested compile-time folding. Folding is an optimization in residual code, so a fold that runs out of depth is compiled instead; the interpreter has no fallback and gets the largest bound it can have without reaching the host limit, measured at roughly 2500 |
 | residual body keys (`keys`) | 1024 per program | one instance per distinct specialization |
 | static evaluator steps (`steps`) | 1,000,000 | total compile-time evaluation work |
+| contextual emitted weight (`emittedNodes`, diagnostic `c-size`) | 1,000,000 total | copied template weight, counting expression DAG nodes once; not C bytes or stack-frame size |
+| optional residual credit (`residualInlineBudget`) | 0 per emitted C function | additional copied template weight; mandatory tail components do not spend it |
+| optional expansion nesting | 32 Groups | active-component/depth cuts retain ordinary calls, independently of credit |
 
 Still unimplemented: source size and token count, source/AST nesting, residual statements per
 instance, and aggregate depth and expanded components per value.

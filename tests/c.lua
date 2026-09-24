@@ -1000,8 +1000,9 @@ local function cLiteral(value, sliceType)
     return nil
 end
 
-local function runCase(case)
-    local artifact = wordlet.compile{ source = case.source, name = case.name .. ".let" }
+local function runCase(case, residualInlineBudget)
+    local artifact = wordlet.compile{ source = case.source, name = case.name .. ".let",
+        residualInlineBudget = residualInlineBudget }
     local unit = artifact:unit()
     local cPath, exePath = directory .. "/" .. case.name .. ".c", directory .. "/" .. case.name
     write(cPath, unit)
@@ -1070,7 +1071,10 @@ local function runCase(case)
     check(run == 0, "generated C failed its assertions for " .. case.name .. " (status " .. tostring(run) .. ")")
 end
 
-for _, case in ipairs(CASES) do runCase(case) end
+-- Exercise the same semantics both with host-only helper inlining and with contextual copies.
+for _, budget in ipairs({0, 256}) do
+    for _, case in ipairs(CASES) do runCase(case, budget) end
+end
 
 -- A residual instance that nothing calls or points at is dropped before ownership is computed, so a
 -- private function always has a caller and plain internal linkage satisfies -Werror.

@@ -226,6 +226,11 @@ errors, resource failures or static cycles are not caught as permission for this
 
 No runtime effect is performed speculatively and rolled back. Known operands do not authorize an
 effect during normalization. Calls with runtime bindings immediately request a residual instance.
+Module record/array names stay storage-backed during normalization, even for nullary calls; their
+initial values are not immutable call arguments. Instance construction suspends initialization and
+interpreter execution permissions until that build completes or unwinds. Thus constructing a closure
+inside an initializer cannot execute its module-state effects. Actual initializer demands and
+reference-interpreter invocations still read and write concrete module state.
 
 ### 5.3 Independent residual bodies
 
@@ -237,9 +242,9 @@ Normalization has no builder at all (`interfaces.md` §4), so an abandoned stati
 leave partial IR behind: it either yields a static value or raises a private signal before performing
 the operation. The residual body is then built from scratch.
 
-There is no outline policy, first-activation exception or source inliner. C may inline the generated
-functions, but compiler scalability must not depend on that optimization. A helper called twice in
-one caller still has one independently elaborated body.
+There is no source inliner or first-activation elaboration exception. A helper called twice still
+has one independently elaborated body. Contextual C emission may copy that checked residual body
+under a separate expansion budget (§10.2); it never replays the helper's source.
 
 For an acyclic dependency the compiler may finish the callee depth-first before continuing the
 caller. That execution belongs to the callee's own context, not to the caller's IR. Unknown-code
@@ -331,7 +336,8 @@ borrowed local receiver or callable environment.
 Evaluate every next argument and capture BEFORE assigning any parameter local. Unchanged forwarded
 values may omit a copy when proven unchanged. Then assign simultaneously and transfer to the loop
 header. Reinitialize source by-value parameter storage for the next iteration. Uncertain lifetime
-cases remain ordinary calls. Nonself tail calls are not guaranteed constant-stack by portable C11.
+cases remain ordinary calls. The C backend additionally closes recognized safe scalar tail components
+as described below; other nonself tail calls have no portable constant-stack guarantee.
 
 A loop-carried value parameter is read once at the top of the loop body, not at every mention. The
 parameter is immutable, so one read per iteration is equivalent; and because reads are never
@@ -341,6 +347,25 @@ element write must reach the instance the iteration owns.
 
 The compiler performs the safe self-loop rewrite itself. GCC's ability to optimize other tail calls
 is an optional benefit, not a semantic or resource guarantee.
+
+### 6.3.1 Residual tail components
+
+After checking, `wordlet/tail.lua` recognizes terminal Call/Return identity pairs. It first copies
+narrowly proven private join transports into ordinary If/Switch/Return IR, rechecks those functions,
+and analyses their normalized bodies. No read, call, guard or cleanup moves across a branch. The
+original independently elaborated functions remain unchanged.
+
+The initial reuse rule is conservative: by-value scalar inputs/results, scalar invocation-owned
+values/storage, and no address acquisition, borrowed argument, View or Indirect occurrence. A failed
+proof retains the call rather than rejecting the source. Module storage has independent lifetime.
+Pending cleanup or result arithmetic prevents an identity return. Wider borrowing/aggregate tail
+reuse is not claimed.
+
+Directed SCCs of eligible edges form tail components. Every member entry label and typed input
+carrier is reserved before any member is emitted; an internal transfer snapshots all inputs before
+writing carriers and jumping. Thus mutual cycles of these edges use bounded C stack even at `-O0`
+with host inlining and sibling-call optimization disabled. Required ABI entries may own separate
+copies of a component. Existing self-tail Loop/Next nodes remain intact.
 
 ### 6.4 The evaluator's control core
 
@@ -570,9 +595,9 @@ on GCC and clang and plain `static` on another C11 compiler. Forced inlining is 
 residual specialization usually has one caller, and it removes the out-of-line copies a cost model
 keeps for the larger bodies; a host that defines `WORDLET_NO_FORCED_INLINE`, or a caller that passes
 `inline = false`, gets plain `static` and the compiler's own decision instead. A function with a
-non-tail direct self-call keeps plain `static` whatever the option says: a self-tail call becomes a
-`Loop` back edge, so a remaining self-call is genuine recursion, and GCC refuses to force-inline a
-recursive function.
+remaining known C-call cycle keeps plain `static` whatever the option says. This includes mutual
+retaining recursion, not just a direct self-call. Linkage is finalized after actual root/call discovery,
+so GCC is never asked to force-inline a known recursive root.
 
 The same artifact is consumable without C glue: `artifact:cdef(namespace)` renders the type
 declarations and the exported prototypes for `ffi.cdef`, and a `symbolPrefix` namespaces every export
@@ -677,6 +702,41 @@ IR Trap records the reason and failure predicate. The emitter uses the specified
 behavior and includes the necessary C declarations. Adding library-configurable failure handling is
 a separate language/module-interface decision, not something the backend invents.
 
+### 10.2 Contextual emission and optional residual copies
+
+`wordlet/contextual.lua` owns Units (real C functions), Groups (one tail-component copy) and static
+return destinations. `lower.lua` remains the instruction, expression, place and ABI renderer. Source
+Value/Storage ids remain function-local; fresh C name prefixes isolate copied bodies, while module
+storage retains its global identity. Use/share facts can be reused per normalized Fn, but assigned
+names and storage aliases belong to each emission context.
+
+An internal safe tail edge binds inputs and jumps. An affordable known helper outside the active
+component path may instead be copied into a nested C block, with returns binding caller-local results
+and jumping to one fixed continuation. The caller's addressable objects remain live during the copy.
+Other invocations are ordinary C calls. Calls into an active component preserve overlapping
+activations rather than recursively expanding. There is no runtime PC, operand stack or return
+selector, and no new IR schema is required.
+
+`residualInlineBudget` defaults to zero and is independent of `inline`, which still controls host
+attributes. A required root component is mandatory regardless of optional credit. Every additional
+copy spends its complete base IR weight from the same per-Unit budget before nested expansion; the
+expression DAG is counted once, effects as occurrences. Optional nesting stops at 32 groups. The
+compilation-wide `limits.emittedNodes` default is 1,000,000 weighted nodes, including mandatory
+components; exhaustion is `resource [c-size]`, never permission to cut an internal tail edge.
+
+Roots are reserved before their bodies and closed through a deterministic work queue. Actual Calls
+and Views require C entries; local jumps do not. The ABI catalog retains non-root member signatures,
+while the emitted root order contains only required bodies. Existing alias wrappers and callback
+adapters remain. Header/source/cdef views read the same closed artifact.
+
+C-return fusion must honor the current destination: an outlined call inside an expanded helper must
+not return from the whole Unit. Discarded helper results still receive a void use at their return
+point so the template's definition-use analysis remains valid. Typed by-value copies, read snapshots,
+guards, implicit View environments and source effect order survive expansion.
+
+This policy permits modest duplication to expose local optimization opportunities; it does not
+promise faster machine code than the existing host inliner. Nonzero defaults need corpus measurements.
+
 ## 11. Limits and diagnostics
 
 The owned interpreter can count its own work without host debug hooks. Bound static call depth,
@@ -713,7 +773,9 @@ wordlet/analysis.lua per-Ir.Fn uses, mutations, inlining and sharing, in one wal
 wordlet/ir.lua       loading/building ir.asdl nodes, per-function interning, structural :each
 wordlet/check.lua    types, completion, scopes, initialization and borrow invariants
 wordlet/cabi.lua     representation closure, entry/adaptor layouts and names
-wordlet/lower.lua    ordered emission, local temporaries, header/source assembly
+wordlet/tail.lua     checked join normalization, scalar reuse eligibility and iterative SCCs
+wordlet/contextual.lua tail groups, static return destinations, expansion credit and real C roots
+wordlet/lower.lua    ordered instruction emission, local temporaries, header/source assembly
 wordlet/diag.lua     source diagnostics and resource reporting
 wordlet/jit.lua      the LuaJIT FFI front end: build and load an artifact at run time
 wordlet/cli.lua      command-line entry point (optional CLI module for the bundler)
@@ -766,7 +828,11 @@ The source rules are defined in syntax.md, not inferred from implementation conv
    Overapplication rejects rather than automatically applying a returned word.
 4. Expression bodies forward result vectors. Explicit-return blocks have no implicit final value.
    Expression conditionals require else; statement conditionals have end and may omit else.
-5. Multiple-result annotations use `(T1, T2)`; binding uses `let a, b = ...`. These are result lists,
+5. Expression conditionals join complete logical result vectors, checking arity and each type.
+   Unit and equal known components need no slot; other components keep typed private slots and
+   borrow flags. Arm effects/control are emitted once, including when both arms tail-transfer.
+   F64 signed zeros are not interchangeable known constants.
+   Multiple-result annotations use `(T1, T2)`; binding uses `let a, b = ...`. These are result lists,
    not general tuple values/patterns. Scalar contexts and explicit grouping select the first result.
    Final expressions expand in argument/return/binding lists; bindings alone fill missing slots with
    Unit. Preserve source slots separately from runtime Unit erasure.

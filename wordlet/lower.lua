@@ -5,7 +5,7 @@ local M = {}
 
 local Ir = S.Ir
 local U64Kernel = require("wordletkit.u64")
-local Analysis = require("wordlet.analysis")
+local Contextual = require("wordlet.contextual")
 
 -- Same injective escape as the ABI layer: every non-alphanumeric byte becomes _XX.
 function M.escape(name)
@@ -65,8 +65,9 @@ local function newEmitter(layouts, signature, analysis)
 end
 function Emitter:line(text) self.lines[#self.lines + 1] = string.rep("    ", self.indent) .. text end
 function Emitter:raw(text) self.lines[#self.lines + 1] = text end
-function Emitter:value(id) return "v" .. id end
-function Emitter:storage(id) return "s" .. id end
+function Emitter:name(kind, id) return (self.prefix or "") .. kind .. id end
+function Emitter:value(id) return self:name("v", id) end
+function Emitter:storage(id) return self:name("s", id) end
 
 -- A shared expression is declared once and referenced by name; every other expression renders inline.
 function Emitter:expr(expr)
@@ -116,7 +117,7 @@ end
 
 function Emitter:tempName()
     self.nextTemp = self.nextTemp + 1
-    return "e" .. self.nextTemp
+    return self:name("e", self.nextTemp)
 end
 
 -- Emits one local for a shared expression. Shared descendants are declared first so operands are
@@ -525,6 +526,10 @@ function Emitter:construct(stmt)
 end
 
 function Emitter:call(stmt, list, index)
+    if self.unit then
+        local consumed = Contextual.call(self, stmt, list, index)
+        if consumed then return consumed end
+    end
     local signature = self.layouts.signatures[stmt.target]
     if not signature then D.bug("c-target", "Call to unknown function " .. stmt.target) end
     local args = {}
@@ -551,6 +556,7 @@ function Emitter:call(stmt, list, index)
         local fuse = nextStatement ~= nil
             and ((nextStatement.kind == "Store" and referenced(nextStatement.value, results[1].id))
                 or (nextStatement.kind == "Return" and #nextStatement.values == 1
+                    and (not self.destination or self.destination.exit)
                     and referenced(nextStatement.values[1], results[1].id)))
         if fuse then
             local pending = self.decls and self.decls[list] and self.decls[list][index + 1]
@@ -584,7 +590,7 @@ function Emitter:call(stmt, list, index)
             local layout = self.layouts.resultLayout(types)
             if not layout.name then D.bug("c-results", "Multiple results need a tuple layout") end
             -- The call produces one aggregate temporary; each used result becomes its own value.
-            local packed = "t" .. results[1].id
+            local packed = self:name("t", results[1].id)
             self:line(layout.name .. " " .. packed .. " = " .. call .. ";")
             for resultIndex = 1, #results do
                 if self.usedValues and self.usedValues[results[resultIndex].id] then
@@ -655,16 +661,18 @@ function Emitter:indirect(stmt)
     elseif #stmt.results == 1 then
         self:declare(layout.results.type, self:value(stmt.results[1].id), call)
     else
-        self:line(layout.results.name .. " t" .. stmt.results[1].id .. " = " .. call .. ";")
+        local packed = self:name("t", stmt.results[1].id)
+        self:line(layout.results.name .. " " .. packed .. " = " .. call .. ";")
         for index = 1, #stmt.results do
             self:declare(layout.results.fields[index].type, self:value(stmt.results[index].id),
-                "t" .. stmt.results[1].id .. ".f_" .. index)
+                packed .. ".f_" .. index)
         end
     end
 end
 
 -- Binds a callable's hidden inputs in a local adapter and takes its address.
 function Emitter:makeView(stmt)
+    if self.unit then self.unit.requireRoot(stmt.entry) end
     local types = stmt.type
     -- Either an erased callable view, or pure code: an owned callable with an empty environment.
     if not types:isView() and not (types:isOwned() and S.environmentOf(types) == S.Unit) then
@@ -695,7 +703,7 @@ function Emitter:makeView(stmt)
             .. ", .environment = NULL };")
         return
     end
-    local adapterName = "a" .. stmt.value.id
+    local adapterName = self:name("a", stmt.value.id)
     local fields = {}
     for index, field in ipairs(adapter.bound) do
         fields[#fields + 1] = "." .. field.name .. " = " .. args[index]
@@ -706,6 +714,10 @@ function Emitter:makeView(stmt)
 end
 
 function Emitter:returnText(values)
+    if self.destination then
+        local localReturn = Contextual.returnText(self, values)
+        if localReturn then return localReturn end
+    end
     if #values == 0 then return "return;" end
     if #values == 1 then return "return " .. self:expr(values[1]) .. ";" end
     local types = {}
@@ -917,42 +929,6 @@ function M.typeDeclarations(layouts)
     return lines
 end
 
--- A function that calls itself directly cannot be `always_inline`: GCC refuses to inline a
--- non-tail self-recursion, which fails the whole translation unit under `-Werror`. A self-tail call
--- becomes a `Loop`/`Next` back edge, so a remaining direct `Call` to the function's own target is a
--- non-tail recursive call. Such a function keeps internal `static` linkage without forced inlining.
-local recursiveCache = setmetatable({}, { __mode = "k" })
-local function selfRecursive(fn)
-    if not fn or not fn.body then return false end
-    local cached = recursiveCache[fn]
-    if cached ~= nil then return cached end
-    local found = false
-    local function walk(list)
-        for _, stmt in ipairs(list) do
-            if stmt.kind == "Call" and stmt.target == fn.id then
-                found = true
-                return
-            end
-            if stmt.kind == "If" then
-                walk(stmt.yes)
-                if found then return end
-                walk(stmt.no)
-            elseif stmt.kind == "Loop" then
-                walk(stmt.body)
-            elseif stmt.kind == "Switch" then
-                for _, case in ipairs(stmt.cases) do
-                    walk(case.body)
-                    if found then return end
-                end
-            end
-            if found then return end
-        end
-    end
-    walk(fn.body)
-    recursiveCache[fn] = found
-    return found
-end
-
 function M.signatureText(layouts, signature)
     local parameters = {}
     if #signature.params == 0 then parameters[1] = "void" end
@@ -970,7 +946,7 @@ function M.signatureText(layouts, signature)
     local linkage = ""
     -- A foreign prototype is a plain declaration: external linkage, and no body to emit.
     if not signature.exported and not signature.foreign then
-        if layouts.privateInline == false or selfRecursive(signature.fn) then
+        if layouts.privateInline == false or (layouts.recursiveRoots and layouts.recursiveRoots[signature.fn.id]) then
             linkage = "static "
         else
             linkage = "WORDLET_PRIVATE "
@@ -1051,24 +1027,12 @@ end
 
 function M.bodies(layouts)
     local lines = {}
-    for _, instance in ipairs(layouts.order) do
-        local signature = layouts.signatures[instance.target]
-        local analysis = Analysis.analyze(instance.fn)
-        local emitter = newEmitter(layouts, signature, analysis)
-        emitter:raw(M.signatureText(layouts, signature) .. " {")
-        emitter:statements(instance.fn.body)
-        -- A residual base case keeps the full ABI, so a parameter it never reads still appears in
-        -- the signature. Whether the body names it is a fact of the IR, not of the emitted text: a
-        -- value parameter is named by a `Ref`, a place parameter by a `Local` place, and those are
-        -- exactly the sets the emitter already consulted.
-        for _, param in ipairs(signature.params) do
-            local used
-            if param.pointer then used = analysis.storageUses[param.binding]
-            else used = analysis.valueUses[param.binding] end
-            if param.name and not used then emitter:line("(void)" .. param.name .. ";") end
-        end
-        emitter:raw("}")
-        lines[#lines + 1] = table.concat(emitter.lines, "\n")
+    -- Discover actual roots/call cycles before rendering linkage. A logical function copied into
+    -- a tail component is not necessarily a remaining C function.
+    for _, body in ipairs(Contextual.bodies(layouts, newEmitter)) do
+        local signature = body.signature
+        lines[#lines + 1] = M.signatureText(layouts, signature) .. " {\n"
+            .. table.concat(body.lines, "\n") .. "\n}"
         for _, alias in ipairs(signature.aliases) do
             local args = {}
             for index, param in ipairs(signature.params) do args[index] = param.name end
