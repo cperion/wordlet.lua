@@ -41,9 +41,7 @@ function M.function_(fn, definitions, seeded)
     end
 
     -- The storage a place reads or writes through: a projection or an index reaches the same cell,
-
     -- so the local at the end of the base chain is what must have a value. A view element names a
-
     -- view value rather than a cell, so it roots nowhere.
 
     -- The storages every one of these arm sets established. Each arm set starts from the incoming
@@ -67,28 +65,17 @@ function M.function_(fn, definitions, seeded)
     end
 
     local function rootOf(place)
-
         while place do
-
             if place.kind == "Local" then return place.storage.id end
-
             if place.kind == "Project" or place.kind == "Deref" or place.kind == "Index" then
-
                 place = place.base
-
             else
-
                 return nil
-
             end
-
         end
-
         return nil
-
     end
     -- `initialized` is the set of storages that have a value on every path to the current
-
     -- statement; it is narrowed by an `If` or a `Switch` and never widened by a `Loop`.
 
     local function checkList(list, visible, storages, inLoop, initialized)

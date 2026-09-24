@@ -1282,8 +1282,7 @@ function Eval:evalArrayCPS(machine, ctx, expr, expected, k)
 end
 
 -- One element per step. The recursive call is a method like any other, and it is named `*CPS`
--- because it follows the protocol: it answers a pair through `k` in tail position, which is what
--- `tools/cpslint.lua` checks for by name.
+-- because it follows the protocol: it answers a pair through `k` in tail position.
 function Eval:evalArrayElementsCPS(machine, ctx, expr, expected, items, index, k)
     if index > #expr.items then
         return self:finishArrayCPS(machine, ctx, expr, expected, items, k)

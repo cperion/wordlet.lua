@@ -342,6 +342,27 @@ element write must reach the instance the iteration owns.
 The compiler performs the safe self-loop rewrite itself. GCC's ability to optimize other tail calls
 is an optional benefit, not a semantic or resource guarantee.
 
+### 6.4 The evaluator's control core
+
+The evaluator is written in continuation-passing style and driven by `wordlet/machine.lua`, so an
+elaboration depth costs heap rather than host stack. Lua guarantees proper tail calls, so an edge
+written `return self:stepCPS(m, ..., k)` reuses its host frame, while `local a = eval(left) ...
+eval(right)` cannot. Every recursive edge now has the first shape, and protection moved from a `pcall`
+around each fold attempt to one `pcall` per step in the driver.
+
+A step is a pair: a continuation is called as `k(machine, ...)` and answers with the next pair
+`(continuation, values...)`, or `nil` as the continuation to mean "these are the final values". The
+value channel is a vector, because the language's own answers are: a value definition produces one
+value per binder, and a store target produces a slot and a place. Closures are the stack; descriptors
+are its inspectable shadow, kept only for frames that must be counted, reported or unwound through. A
+diagnostic is not unwound -- the pending chain is simply not called -- but it must find the nearest
+handler descriptor, whose continuation resumes the machine, which is how a fold that cannot finish
+becomes a compiled instance instead.
+
+`Eval:drive` is the single boundary that starts the loop for a direct-style caller, and it keeps one
+machine per session. The module contract is in `interfaces.md` section 4.3; `tests/machine.lua` pins
+constant host stack over a 100 000-step chain, handler unwinding, counted depth and the boundary.
+
 ## 7. IR vocabulary and invariants
 
 The concrete schemas are `ast.asdl` and `ir.asdl`, both parsed by the vendored ASDL and covered by
@@ -515,9 +536,9 @@ It checks:
 2. call operands against the TARGET interface, including hidden receiver/environment bindings;
 3. immutable value definitions, scope and availability at every use;
 4. distinct storage identities and valid, typed receiver/capture roots;
-5. definite initialization of join storage on every continuing path before Read, which the builder
-   establishes by construction and the C compiler's own definite-initialization analysis confirms
-   (an independent dataflow re-check is a section 14 obligation);
+5. definite initialization of join storage on every continuing path before Read, proven over the
+   statement tree (a `Var` with an initializer or a `Store` establishes its root; an `If` or
+   `Switch` keeps only what every arm that reaches the continuation established);
 6. return vector agreement and explicit completion of every reachable function path;
 7. Next only under its owning Loop, with safe simultaneous parameter updates;
 8. no use of a branch-local value outside its scope and no code after unconditional termination;
@@ -779,7 +800,7 @@ bootstrap toolkit.
 - Compile a branching helper called twice into one independently elaborated specialization.
 - Preserve a scalar/record snapshot across direct stores and receiver-mutating calls.
 - Put a receiver call inside one conditional arm and observe exactly the selected effects.
-- Check early-return arms, nested expression conditionals and definite initialization of join slots.
+- Check early-return arms and nested expression conditionals.
 - Share equivalent explicit/automatic static bindings; distinguish known implementations and captures.
 - Reject an unannotated residual recursive component; compile annotated mutual and self recursion.
 - Preserve swapped tail arguments; refuse tail replacement when a local receiver/environment remains live.

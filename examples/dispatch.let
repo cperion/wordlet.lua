@@ -1,8 +1,8 @@
 -- Threaded dispatch by reified continuations. An opcode is one alternative of a sum, a step decodes
 -- it with an exhaustive keyed match, and the handlers return the next machine rather than calling the
 -- loop. One tail self-call drives it, so the recursive call is `run`'s own body and lowers to a back
--- edge (`for (;;) { ... continue; }`) instead of a call: dispatch is constant stack.
 --
+-- edge (`for (;;) { ... continue; }`) instead of a call: dispatch is constant stack.
 -- A handler that called `run` instead would be a different code instance, so that call would be an
 -- ordinary call and the stack would grow one frame per instruction. Return the state instead.
 --

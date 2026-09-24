@@ -51,16 +51,11 @@ end
 
 -- The nearest boundary that can swallow a diagnostic, with everything above it dropped: those steps
 -- are not state to unwind, they are continuations that will never be called.
---
--- `floor` is the descriptor depth this run started at, and it is what keeps two runs apart. A
--- converted method reached through a boundary helper runs inside a *nested* `run`, while the chain
--- that entered the helper is suspended below it; without the floor, a diagnostic raised in the
--- nested run would pop to a handler belonging to that suspended chain and resume it in the wrong
--- loop. Below the floor the diagnostic belongs to the caller, so it is raised there instead.
-function Machine:popToHandler(floor)
-    while #self.descriptors > (floor or 0) do
-        local descriptor = self:pop()
+function Machine:popToHandler()
+    local descriptor = self:pop()
+    while descriptor do
         if descriptor.handler then return descriptor end
+        descriptor = self:pop()
     end
     return nil
 end
@@ -72,8 +67,8 @@ function Machine:checkDepth(kind, span, name)
     -- fold is an optimization in residual code, so it is bounded by `maxStaticDepth` and its refusal is
     -- `static-depth` (a residual fold compiles instead); the reference interpreter has no fallback and
     -- gets `maxInterpretDepth`. Specialization nesting is bounded by `maxBuildDepth` and reports
-    -- `depth`. These are the session's own numbers and messages, moved to the machine because the
-    -- The descriptors are what count the depth, so the two bounds live here rather than in a wrapper.
+    -- `depth`. These are the session's own numbers and messages; the descriptors are what count the
+    -- depth, so the two bounds live here rather than in a wrapper.
     local allowed, code
     if kind == "static" then
         allowed = self.session.run and self.session.maxInterpretDepth or self.session.maxStaticDepth
@@ -118,17 +113,14 @@ function Machine:step(k, ...)
     end
     local diagnostic = results[2]
     if not D.is(diagnostic) then error(diagnostic, 0) end
-    local descriptor = self:popToHandler(self.floor)
+    local descriptor = self:popToHandler()
     if not descriptor then error(diagnostic, 0) end
     return { n = 2, descriptor.handler, diagnostic }
 end
 
 -- Drive until a continuation answers `nil`: the closure chain is the stack, and this loop is the only
--- host frame it needs. The floor is taken here because a nested run must not unwind into the chain that
--- entered it, and the value vector is repacked per step so an answer of any arity survives.
+-- host frame it needs. The value vector is repacked per step so an answer of any arity survives.
 function Machine:run(k, ...)
-    local outer = self.floor
-    self.floor = #self.descriptors
     local values = { n = select("#", ...), ... }
     while k do
         self.session.steps = self.session.steps + 1
@@ -140,7 +132,6 @@ function Machine:run(k, ...)
         values = { n = results.n - 1 }
         for index = 2, results.n do values[index - 1] = results[index] end
     end
-    self.floor = outer
     return unpack(values, 1, values.n)
 end
 

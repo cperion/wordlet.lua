@@ -219,8 +219,7 @@ The conventions:
 - **Closures are the stack; descriptors are its shadow.** Only the frames that must be counted,
   reported or unwound through become descriptors: a static fold, a `Build`, a `demand`, a call. A
   diagnostic needs no unwinding -- the pending chain is simply not called -- but it must find the
-  nearest *handler*, which is what `Machine:popToHandler` walks. The floor it stops at is the descriptor
-  depth the current `run` started at, so a nested run can never resume a chain that entered it.
+  nearest *handler*, which is what `Machine:popToHandler` walks.
 - **Depth is counted, not inherited.** `Machine:checkDepth(kind, ...)` bounds the descriptors: a static
   fold is bounded by `maxStaticDepth` (or `maxInterpretDepth` in a reference-interpreter run) and
   refuses with `static-depth`, a build by `maxBuildDepth` and refuses with `depth`. A refused fold in
@@ -232,10 +231,8 @@ The conventions:
   `initializeModule`, `resolveExportItem`, `compile`) are its only callers. Nothing inside the
   evaluator uses it; a converted method is called by name, with its continuation.
 
-`tools/cpslint.lua` checks the two ways the protocol breaks silently: a converted method that returns a
-bare value (the driver treats the value as the next continuation) and one that falls off the end without
-answering. `tests/machine.lua` covers the core: constant host stack over a 100 000-step chain, handler
-unwinding, counted depth, and the boundary.
+`tests/machine.lua` covers the core: constant host stack over a 100 000-step chain, handler unwinding,
+counted depth, and the boundary.
 
 ## 5. Instances, keys and module storage
 

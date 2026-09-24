@@ -76,7 +76,7 @@ it must not attach per-use state to interned nodes.
 `L{...}` wraps the provided table; it does NOT copy it. Standard table helpers and map/filter/fold,
 indexed variants, concatenation, partition and related helpers are provided. Higher-order methods
 accept functions or selector/operator strings. Prefer explicit functions in compiler-critical logic.
-The local equality selector correction is recorded in THIRD_PARTY.md and checked by tests/run.lua.
+The local equality selector correction is recorded in THIRD_PARTY.md.
 
 ## Working check versus future compiler
 
