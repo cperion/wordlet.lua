@@ -18,27 +18,27 @@ a hard edge, the section says so rather than promising more than the implementat
 - 7. CPS without callback hell
 - 8. Continuations first, real input last
 - 9. Components are wired words
-- 10. Parent/child architecture becomes continuation wiring
-- 11. Use sums when the choice is data
-- 12. Partial supply is specialization
-- 13. There is no separate comptime programming style
-- 14. The program is the outermost word
-- 15. Runtime values should have runtime provenance
-- 16. `ptr` marks the edge of the runtime world
-- 17. Unsafe is capability-shaped, not scope-shaped
-- 18. `ref`, `defer` and CPS form the safe-facing resource pattern
-- 19. Arity is still part of the contract
-- 20. Tail position matters architecturally
-- 21. The fastest abstraction is the one that disappears
-- 22. The text editor as a complete Wordlet architecture
-- 23. Design from the user inward
-- 24. Design so binding time is visible without annotations
-- 25. Avoid importing foreign abstractions literally
+- 10. Use sums when the choice is data
+- 11. Partial supply is specialization
+- 12. There is no separate comptime programming style
+- 13. The program is the outermost word
+- 14. Runtime values should have runtime provenance
+- 15. `ptr` marks the edge of the runtime world
+- 16. Unsafe is capability-shaped, not scope-shaped
+- 17. `ref`, `defer` and CPS form the safe-facing resource pattern
+- 18. Arity is still part of the contract
+- 19. Tail position matters architecturally
+- 20. The fastest abstraction is the one that disappears
+- 21. The text editor as a complete Wordlet architecture
+- 22. Design from the user inward
+- 23. Design so binding time is visible without annotations
+- 24. Avoid importing foreign abstractions literally
+- 25. Modules should expose vocabulary, not implementation debris
 - 26. A Wordlet code review should ask semantic questions
 - 27. Wordlet naming rules
-- 28. Modules should expose vocabulary, not implementation debris
-- 29. Handlers as requirements: hierarchical continuation wiring
-- 30. The central Wordlet instinct
+- 28. Handlers as requirements: hierarchical continuation wiring
+- 29. The central Wordlet instinct
+- 30. Reading the examples
 
 ---
 
@@ -58,7 +58,7 @@ That simple model is the center of the language. The syntax contract describes t
 these terms: words have ordered or keyed requirements, an optional result contract and an optional
 terminal; signatures describe requirements without an implementation; a schema is a word with keyed
 requirements and a construction terminal; a method is an executable word with an implicitly bound
-receiver (`syntax.md` §2, §3, §4).
+receiver (`syntax.md` §2, §3, §4, §8).
 
 The important consequence is that many things which are separate mechanisms elsewhere become
 different uses of one idea:
@@ -244,7 +244,7 @@ and the name is what stops a real mistake from looking plausible. But where a di
 There is a fifth answer that costs nothing, and it is usually the right one inside a large program:
 **move the arithmetic behind a boundary**. If one component is the only code allowed to add two
 offsets, the distinction is enforced by the structure of the program rather than by the type. That is
-the same move section 17 makes for `ptr`, applied to a unit of measure: keep the raw representation
+the same move section 16 makes for `ptr`, applied to a unit of measure: keep the raw representation
 inside the layer entitled to it, and let everything above speak in domain words.
 
 So the two halves of this section pull in the same direction:
@@ -359,6 +359,24 @@ let connect(c, p, t, r) = ...
 is poor if the parameters actually mean `configuration`, `port`, `transport` and `retry_policy`.
 
 > The wider the scope and the more architectural the concept, the more explicit its name should be.
+
+### Let the containing type supply the context
+
+An alternative lives inside its sum, so it does not need to repeat it:
+
+```text
+editor_mode.normal
+editor_mode.insert
+```
+
+not `EDITOR_MODE_NORMAL`, `NormalMode` or `EditorModeNormal`. The containing type already said which
+mode this is, and a name that repeats its container is spending characters to say nothing.
+
+### Let scope decide how much qualification is needed
+
+`column` inside terminal-specific code is clearer than `terminal_column` repeated everywhere;
+`terminal_column` is better when the file also deals with document columns. Qualify against a
+confusion the reader could actually make, not against one the surrounding module already removed.
 
 ### Specialized words should name what has been fixed
 
@@ -575,9 +593,11 @@ The control graph is expressed in the architecture rather than in indentation:
 > **Name continuations by domain transition, and wire them where components are composed.**
 
 Use CPS because controlling where computation continues is clearer than transferring ownership of
-intermediate state — not because it is fashionable. The compiler uses the same shape for its own
-recursion: `search`-style passes and threaded dispatch are CPS because the state belongs to the
-enclosing owner.
+intermediate state — not because it is fashionable. This compiler is written that way: every evaluator rule in `wordlet/eval.lua` takes its continuation
+`k` and answers through it, so a nested walk keeps its pending work in the machine rather than in host
+frames. `tests/run.lua`'s control-core suite checks that the driver runs at constant host stack and
+unwinds through its handlers, which is what lets a diagnostic be raised deep inside a nested walk and
+still become a source span at the boundary.
 
 ---
 
@@ -643,7 +663,8 @@ are independent enough that ordering them is artificial, use keys and let them b
 
 ## 9. Components are wired words
 
-For stateful software, keyed supply gives the same pattern a cleaner form. First wire the outward
+For stateful software, keyed supply gives the same pattern a cleaner form. The contract here is the
+`editor_component` of section 5. First wire the outward
 contract; those supplied fields belong to the specialized component and their values are statically
 known:
 
@@ -696,52 +717,7 @@ let identity_u32 = identity(u32)   -- export this, not `identity`
 
 ---
 
-## 10. Parent/child architecture becomes continuation wiring
-
-A larger application can be organized as nested stateful words. The parent owns its children, children
-own local mutable state, and a child does not need global access to the parent. Instead, the parent
-supplies exactly the continuations each child may invoke:
-
-```text
-let search_component = {
-    search_match_found: (search_match): unit,
-    search_not_found: (): unit,
-    search_cancelled: (): unit,
-
-    query: search_query,
-
-    handle_input(input: editor_input): unit = ...
-}
-
-let editor_search = search_component {
-    search_match_found = editor_move_to_search_match,
-    search_not_found = editor_show_search_not_found,
-    search_cancelled = editor_restore_search_origin,
-}
-```
-
-The child therefore does not need `application`, `global_event_bus`, `service_locator`,
-`parent_pointer` or `editor_manager`. Its outward authority is exactly its requirements.
-
-```text
-parent
- ├─ owns child state
- ├─ supplies child capabilities
- └─ supplies child continuations
-
-child
- ├─ owns local state
- ├─ consumes local input
- └─ transfers meaningful outcomes outward
-```
-
-Downward flow is requirements, configuration, capabilities and input. Upward flow is named
-continuation transfer. The topology is explicit and local, and section 29 works out the details —
-including the capability property that follows, and the places where it is honest about its limits.
-
----
-
-## 11. Use sums when the choice is data
+## 10. Use sums when the choice is data
 
 CPS does not replace sums; they answer different questions.
 
@@ -783,7 +759,7 @@ handler while compiling, an opaque tag becomes a C `switch` on the tag with the 
 
 ---
 
-## 12. Partial supply is specialization
+## 11. Partial supply is specialization
 
 Partial application in Wordlet is not primarily a closure convenience. It is specialization:
 
@@ -839,7 +815,7 @@ which leads to the design instinct:
 
 ---
 
-## 13. There is no separate comptime programming style
+## 12. There is no separate comptime programming style
 
 Wordlet does not make the programmer continually classify code as compile-time or runtime code. The
 compiler follows what is actually known.
@@ -878,7 +854,7 @@ Ask:
 
 ---
 
-## 14. The program is the outermost word
+## 13. The program is the outermost word
 
 Taken far enough, the entire application is a progressively supplied word.
 
@@ -914,7 +890,7 @@ provenance.
 
 ---
 
-## 15. Runtime values should have runtime provenance
+## 14. Runtime values should have runtime provenance
 
 In ordinary application software, genuine runtime uncertainty has surprisingly few roots. For a text
 editor:
@@ -943,7 +919,7 @@ algorithm does not need to be runtime.
 
 > **Stable structure specializes. Evolving state residualizes.**
 
-That is the whole of section 13 stated as a slogan, and it is also a review test. For any value, ask
+That is the whole of section 12 stated as a slogan, and it is also a review test. For any value, ask
 where it came from. If the answer is a chain of twelve steps ending in "a key event", fine — but if it
 ends in "a configuration decision made before the program started", the value is probably a
 specialization that has not been noticed yet.
@@ -955,7 +931,7 @@ that crosses that boundary is runtime by construction, which is exactly why the 
 
 ---
 
-## 16. `ptr` marks the edge of the runtime world
+## 15. `ptr` marks the edge of the runtime world
 
 There is an interesting convergence here. Unsafe memory enters from the same places as runtime
 uncertainty: operating systems and foreign libraries hand the program addresses, buffers, mappings,
@@ -1000,7 +976,7 @@ is missing.
 
 ---
 
-## 17. Unsafe is capability-shaped, not scope-shaped
+## 16. Unsafe is capability-shaped, not scope-shaped
 
 Wordlet does not use an `unsafe { ... }` block as its primary safety model. The unsafe thing is the
 `ptr`, and that is valuable: the dangerous capability has a concrete type and a spelling, so it can be
@@ -1039,7 +1015,7 @@ that there is exactly one place to check.
 
 ---
 
-## 18. `ref`, `defer` and CPS form the safe-facing resource pattern
+## 17. `ref`, `defer` and CPS form the safe-facing resource pattern
 
 A raw pointer may be needed internally while higher-level code should interact through a constrained
 borrowed interface. The resource owner can acquire the pointer, schedule cleanup with `defer`, expose
@@ -1075,7 +1051,7 @@ containment argument as section 6, applied to memory instead of capability.
 
 ---
 
-## 19. Arity is still part of the contract
+## 18. Arity is still part of the contract
 
 Partial supply does not mean Wordlet gives up useful arity errors. The semantics distinguish three
 cases:
@@ -1100,12 +1076,13 @@ changes the *shape* of the resulting value. If the surrounding context expects
 `(editor_input): unit` and the programmer produced a word that still requires one more value, the
 mismatch appears at the contract boundary — when that word is used, not where it was supplied.
 
-That is what gives partial supply its flexibility without turning calls into unchecked variadic
-behaviour: the compiler is not counting arguments, it is checking shapes.
+So under-application is not an arity error at all: it produced a different word. The mistake is not
+hidden, only delayed to the boundary where that word is used, and it is caught there as a contract
+mismatch rather than by counting arguments.
 
 ---
 
-## 20. Tail position matters architecturally
+## 19. Tail position matters architecturally
 
 CPS encourages code where one computation transfers control to another rather than returning through
 many suspended callers. That makes tail position meaningful: if a word has no work remaining after
@@ -1162,7 +1139,7 @@ ABI.
 
 ---
 
-## 21. The fastest abstraction is the one that disappears
+## 20. The fastest abstraction is the one that disappears
 
 Wordlet's performance philosophy follows from the same architecture.
 
@@ -1186,11 +1163,11 @@ Rich architecture at the source level is not opposed to low-level output when th
 is known early enough to specialize away. But be honest about the boundary: this only holds while the
 knowledge reaches the point of use. Once a handler crosses an export, once a value arrives from the
 host, once a policy comes from mutable storage, the abstraction is real and the runtime
-representation is real. That is the binding-time lever, and it is the subject of section 24.
+representation is real. That is the binding-time lever, and it is the subject of section 23.
 
 ---
 
-## 22. The text editor as a complete Wordlet architecture
+## 21. The text editor as a complete Wordlet architecture
 
 A Wordlet text editor can be designed almost entirely from domain types, stateful words and
 continuation contracts before any low-level implementation appears.
@@ -1238,22 +1215,10 @@ let editor_mode = oneof {
 ```
 
 Define the components. Each is a keyed word whose continuation requirements are its outward
-authority, and whose remaining keys are its owned state:
+authority, and whose remaining keys are its owned state. The editor's own contract is section 5's
+`editor_component`; the three below are its children:
 
 ```text
-let editor_component = {
-    document_changed: (editable_document): unit,
-    save_requested: (editable_document): unit,
-    quit_requested: (): unit,
-
-    document: editable_document,
-    cursor: document_cursor_position,
-    viewport: document_viewport,
-    mode: editor_mode,
-
-    handle_input(input: editor_input): unit = ...
-}
-
 let search_component = {
     search_match_found: (search_match): unit,
     search_not_found: (): unit,
@@ -1286,22 +1251,9 @@ let terminal_renderer_component = {
 }
 ```
 
-Then wire the application. The child contracts are supplied where the components are composed, so the
-control graph is written down rather than implied:
-
-```text
-let application_search = search_component {
-    search_match_found = editor_move_to_search_match,
-    search_not_found = editor_show_search_not_found,
-    search_cancelled = editor_restore_search_origin,
-}
-
-let application_editor = editor_component {
-    document_changed = application_document_changed,
-    save_requested = application_save_requested,
-    quit_requested = application_quit_requested,
-}
-```
+Each child is wired the way section 9 wires an application and section 28 wires a child, so that
+wiring is not repeated here, and nothing about it is specific to the editor: the same three steps
+apply to the search box, the command line and the renderer.
 
 And only much further down does the architecture reach the operating system:
 
@@ -1311,7 +1263,7 @@ extern let terminal_write(fd: u32, buffer: ptr(u8), length: u32): u32
 extern let file_read(fd: u32, buffer: ptr(u8), capacity: u32): u32
 ```
 
-Those `ptr(u8)` values should be wrapped immediately in domain vocabulary, as in section 17:
+Those `ptr(u8)` values should be wrapped immediately in domain vocabulary, as in section 16:
 
 ```text
 terminal_input_memory
@@ -1329,7 +1281,7 @@ program takes when the sections above are followed in order.
 
 ---
 
-## 23. Design from the user inward
+## 22. Design from the user inward
 
 The practical workflow is to begin with what the user can observe. For the editor, ask:
 
@@ -1377,7 +1329,7 @@ category of object.
 
 ---
 
-## 24. Design so binding time is visible without annotations
+## 23. Design so binding time is visible without annotations
 
 Good Wordlet architecture naturally exposes which things change frequently and which do not:
 
@@ -1387,17 +1339,7 @@ editor                    state that changes throughout execution
 editor.handle_input(input)  the genuinely new runtime information
 ```
 
-The source mirrors the binding-time hierarchy:
-
-```text
-component definition
-        ↓
-application wiring
-        ↓
-runtime instance
-        ↓
-runtime input
-```
+The source mirrors the component stages of section 9: contract, then wiring, then instance, then input.
 
 That is preferable to sprinkling staging keywords through the program. The programmer expresses
 meaning, and binding time follows from meaning.
@@ -1409,7 +1351,7 @@ real runtime cost, not a detail.
 
 ---
 
-## 25. Avoid importing foreign abstractions literally
+## 24. Avoid importing foreign abstractions literally
 
 Many familiar abstractions are solutions to constraints Wordlet does not necessarily have. Before
 introducing a conventional pattern, ask what problem it was originally solving.
@@ -1422,16 +1364,40 @@ introducing a conventional pattern, ask what problem it was originally solving.
 | a resource object with a destructor to delimit lifetime | an owner word, a borrowed interface, a CPS body and `defer` |
 | a template system because types could not be ordinary compile-time values | a requirement of type `type` |
 | a runtime strategy object because configuration was assumed dynamic | supply the policy before runtime input |
-| an `unsafe { ... }` block as the safety boundary | the `ptr` type itself (section 17) |
-| a listener or event-bus hierarchy for upward notification | named continuation requirements (section 29) |
+| an `unsafe { ... }` block as the safety boundary | the `ptr` type itself (section 16) |
+| a listener or event-bus hierarchy for upward notification | named continuation requirements (section 28) |
 
 Do not translate patterns mechanically. Translate the **problem** into Wordlet's ontology, and if the
 problem does not exist here, do not import its solution.
 
 An important special case: model–view–update works well in its own setting, but its single global
 model and untyped message routing are a poor fit. Wordlet's equivalent is hierarchical
-continuation wiring under lexical ownership (section 29), and it is worth reading that section before
+continuation wiring under lexical ownership (section 28), and it is worth reading that section before
 reaching for an event bus.
+
+---
+
+## 25. Modules should expose vocabulary, not implementation debris
+
+A module exports exactly the names it chooses to expose; non-exported names stay private. Used modules
+are reached as namespaces, and modules compiled together share one translation unit and initialization
+machinery (`syntax.md` §11).
+
+Treat a module's export list as the public vocabulary of a subsystem:
+
+```text
+parse  validate  compile  document  compilation_error
+```
+
+not every helper introduced during implementation. A module boundary should make the system easier to
+speak about, and the names at that boundary become the language other modules use to describe the
+subsystem.
+
+Two practical reminders:
+
+- a generic word taking `type` cannot itself be exported; export a specialization (section 9);
+- the export configuration is compile-time module metadata, not a runtime record, and its sections are
+  only `types`, `functions` and `results`.
 
 ---
 
@@ -1471,103 +1437,48 @@ binding time and the domain meaning to all be visible in the same source.
 
 ## 27. Wordlet naming rules
 
-A compact checklist.
+A compact checklist for review. The reasoning and the worked examples are in sections 1 to 3.
 
-### Spell names in lowercase `snake_case`
-
-Wordlet's own words are lowercase, and so are the names a program introduces. Capitalization is not
-carrying a category, so there is no reason to spend it: a name spelled `DocumentByteOffset` would
-suggest a type/value distinction the language does not make.
-
-### Name the meaning, not the representation
-
-Two values can share a machine representation and still be different ideas. Even when an alias
-resolves to the same `u32`, the name is what keeps them from being substituted by mistake — and
-section 2 explains when the distinction also needs to be checked.
-
-### Let the containing type supply the context
-
-An alternative lives inside its sum, so it does not need to repeat it:
-
-```text
-editor_mode.normal
-editor_mode.insert
-```
-
-not `EDITOR_MODE_NORMAL`, `NormalMode` or `EditorModeNormal`. The containing type already said which
-mode this is.
-
-### Name outcomes for why control arrived
-
-`save_requested`, `document_saved`, `document_save_failed` — not `on_save`, `callback` or
-`save_handler`. The first group describes the occurrence; the second describes the plumbing.
-
-### Let scope decide how much qualification is needed
-
-`column` inside terminal-specific code is clearer than `terminal_column` repeated everywhere;
-`terminal_column` is better when the file also deals with document columns. Qualify against a
-confusion the reader could actually make.
-
-### Avoid machinery suffixes
-
-`manager`, `factory`, `impl`, `interface`, `base`, `abstract`, `dto`, `controller`, `service`,
-`callback`, `handler`, `object`, `class` describe the implementation language, not the domain. Use
-them only when they are genuinely part of the domain architecture; prefer a capability name —
-`load_customer` and `store_customer` over `customer_repository`.
-
-### Prefer domain names over technical wrappers
-
-`validated_order` over `order_result_record`.
-
-### Name keyed requirements for what they mean
-
-`retry_policy`, `database`, `clock`, `on_inventory_unavailable` — not `config1`, `service2`,
-`handler`, `callback`.
-
-### Name specializations for the knowledge they contain
-
-`production_renderer`, `jpeg_thumbnail_encoder`, `strict_json_parser`.
-
-### Do not be afraid of long names
-
-Wordlet removes a great deal of structural ceremony. Use some of that saved visual space for names
-that communicate meaning.
-
-### A descriptive name is not a guarantee
-
-Naming is architecture, but it is not checking. A callable field named `save_requested` is still just
-a callable that may return normally; its name does not make it asynchronous, nor does it prove it
-never returns to its caller. A `ptr(u8)` called `terminal_input_buffer` is named better and is exactly
-as unchecked as before. Use names to make intent obvious, and use types, ownership rules and tests to
-make it true.
+- **Spell names in lowercase `snake_case`.** Capitalization carries no category (section 1).
+- **Name the meaning, not the representation.** A name that still says `array` or `u8` has not been
+  used yet (section 1).
+- **Name the domain, not the machinery.** Avoid `callback`, `handler`, `manager`, `factory`, `impl`,
+  `interface`, `base`, `abstract`, `dto`, `controller`, `service`, `object` and `class` unless the word
+  is genuinely the domain's; prefer `load_customer` to `customer_repository` (section 3).
+- **Name outcomes for why control arrived.** `save_requested`, `document_saved`,
+  `document_save_failed` — not `on_save`, `callback` or `save_handler` (section 3).
+- **Name specializations for the knowledge they contain.** `production_renderer`,
+  `jpeg_thumbnail_encoder`, `strict_json_parser` (section 3).
+- **Let the containing type supply the context.** `editor_mode.normal`, not `EDITOR_MODE_NORMAL`
+  (section 3).
+- **Let scope decide the qualification.** `column` inside terminal code, `terminal_column` when the
+  file also has document columns (section 3).
+- **Prefer domain names over technical wrappers.** `validated_order`, not `order_result_record`
+  (section 3).
+- **Name keyed requirements for what they mean.** `retry_policy`, `database`, `clock` — not
+  `config1`, `service2` (section 4).
+- **Do not be afraid of long names.** Wordlet removed the structural ceremony; spend some of the space
+  on meaning.
+- **A descriptive name is not a guarantee.** Naming is not checking, and section 2 says what is
+  actually enforced.
 
 ---
 
-## 28. Modules should expose vocabulary, not implementation debris
+## 28. Handlers as requirements: hierarchical continuation wiring
 
-A module exports exactly the names it chooses to expose; non-exported names stay private. Used modules
-are reached as namespaces, and modules compiled together share one translation unit and initialization
-machinery (`syntax.md` §11).
-
-Treat a module's export list as the public vocabulary of a subsystem:
+The parent supplies exactly the continuations a child may invoke, and nothing else:
 
 ```text
-parse  validate  compile  document  compilation_error
+let editor_search = search_component {
+    search_match_found = editor_move_to_search_match,
+    search_not_found = editor_show_search_not_found,
+    search_cancelled = editor_restore_search_origin,
+}
 ```
 
-not every helper introduced during implementation. A module boundary should make the system easier to
-speak about, and the names at that boundary become the language other modules use to describe the
-subsystem.
-
-Two practical reminders:
-
-- a generic word taking `type` cannot itself be exported; export a specialization (section 9);
-- the export configuration is compile-time module metadata, not a runtime record, and its sections are
-  only `types`, `functions` and `results`.
-
----
-
-## 29. Handlers as requirements: hierarchical continuation wiring
+`search_component` is defined with the rest of the editor in section 21. The child therefore does not
+need `application`, `global_event_bus`, `service_locator`, `parent_pointer` or `editor_manager`; its
+outward authority is exactly its requirements.
 
 An Elm-style architecture centers on one global model, messages and an update function:
 
@@ -1579,14 +1490,14 @@ That predicts beautifully and converges on a fairly global notion of state and m
 Wordlet's shape is different:
 
 ```text
-Parent word
-├── owns parent state
-├── owns and wires ChildA
-├── owns and wires ChildB
+parent word
+├── owns its state
+├── owns and wires child_a
+├── owns and wires child_b
 ├── supplies requirements downward
 └── supplies continuations downward
 
-Child
+child word
 ├── owns its local state
 ├── computes locally
 └── reaches the outside only through supplied continuations
@@ -1669,9 +1580,9 @@ otherwise keeps out — which is why they should be deliberate.
 
 - **Componentized source, connected control flow — while handlers are known.** Once a handler crosses
   an export or arrives from the host it becomes the callable ABI, an invocation pointer. The design
-  survives; the erasure does not. That is the same binding-time lever as section 24.
+  survives; the erasure does not. That is the same binding-time lever as section 23.
 - **Continuation chains are stack, not loops.** Parent → child → parent is mutual recursion between
-  instances. A recognized safe tail component reuses one activation (section 20), but a deeply nested
+  instances. A recognized safe tail component reuses one activation (section 19), but a deeply nested
   synchronous chain that is *not* recognized still needs a trampoline.
 - **Sums are closed, which is both the point and the limit.** A child's outcome set is exhaustively
   handled, which is what makes the wiring readable. Open extension — plugins, third-party messages —
@@ -1693,7 +1604,7 @@ and the backend.
 
 ---
 
-## 30. The central Wordlet instinct
+## 29. The central Wordlet instinct
 
 The deepest Wordlet design instinct can be summarized as:
 
@@ -1719,4 +1630,32 @@ precisely because Wordlet understood it.
 > **Names carry meaning.**
 > **Contracts carry architecture.**
 > **Only what is runtime is runtime.**
+## 30. Reading the examples
+
+`examples/*.let` are small programs written in this style, and `VALIDATION.md` records the values the
+reference interpreter must produce for each one. When a claim here seems abstract, read the program
+that exercises it:
+
+| Idea | Program | What to look for |
+| --- | --- | --- |
+| partial supply as specialization | `arithmetic.let` | `transform = affine(4, 3)`, then `divmod` and `consume` |
+| closures and borrowed captures | `captures.let` | `run(5, 7) = 12`; the returned `make_adder` stays callable |
+| methods borrow their receiver | `receivers.let` | `observe(7, true) = (7, 8)` |
+| fixed-length arrays copy | `arrays.let` | `literal_sum() = 60`, `aliased(3) = 99099` |
+| slices and strings | `strings.let` | `byte_at("A", 0) = 65`, `count_a("banana", 0) = 3` |
+| sums and keyed handlers | `sums.let` | `area_of_circle(5) = 25`, `unwrap_or(0, 9) = 9` |
+| references and recursive types | `references.let` | `read_shared(1) = 6`, `following() = 10` |
+| threaded dispatch over record state | `dispatch.let` | one back edge; `main() = 7` |
+| threaded dispatch over `ptr` state | `interpreter.let` | no per-step copy; `main() = 7` |
+| both continuation directions | `pipeline.let` | `settle` returns a scalar, `summarize` dispatches a sum |
+| tagged callables | `tagged.let` | `pick(true) = 11`, `across(false, 4) = 12` |
+| module vocabulary and namespaces | `modules.let`, `modules_util.let` | `modules_util.point`, `twice(4) = 8` |
+| a real program with an external oracle | `sha256.let` | `abc()` equals the published SHA-256 digest |
+
+Three suites keep those claims honest: `tests/eval.lua` (the documented values of `strings.let` and
+`dispatch.let`), `tests/c.lua` (interpreter/C differential, including `arithmetic.let` and
+`interpreter.let`) and `tests/sha256.lua` (the NIST vector and runtime seeds). Section 21's editor is
+a design sketch, not one of these programs.
+
+---
 ]]

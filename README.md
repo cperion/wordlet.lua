@@ -112,7 +112,8 @@ host compiler.
 - [syntax.md](syntax.md): Wordlet source syntax and semantic decisions.
 - [GUIDE.md](GUIDE.md): how to design, name and structure software in Wordlet — words and their
   requirements, keyed wiring and components, binding time, CPS, the runtime boundary, `ptr`
-  provenance, a worked editor architecture, code-review questions and a naming checklist.
+  provenance, a worked editor architecture, code-review questions, a naming checklist, and a map from
+  each idea to the example program that exercises it.
 - [architecture.md](architecture.md): structured evaluator/IR implementation contract.
 - [interfaces.md](interfaces.md): pass order, module APIs, side tables, builder state, facade API.
 - `ast.asdl`, `ir.asdl`: concrete ASDL schemas, parsed and checked by `tests/schemas.lua`.
