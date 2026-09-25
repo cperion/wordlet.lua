@@ -97,8 +97,8 @@ changes and test their aliasing/coercion semantics independently. If a remaining
 be proved isolated, affected calls must bypass memoization; silently changing semantics only on hits
 is not an acceptable shortcut.
 
-Initial key/result data: integer atoms with exact widths and high/low words, Bool, Unit, F64 other
-than NaN, immutable strings, and complete logical result vectors of these. Preserve explicit Unit
+Initial key/result data: integer atoms with exact widths and high/low words, bool, unit, f64 other
+than NaN, immutable strings, and complete logical result vectors of these. Preserve explicit unit
 positions. Distinguish `+0.0`/`-0.0`; encode infinities explicitly. Finite double encodings must round
 trip exactly. NaNs bypass initially rather than collapsing payload/sign distinctions.
 
@@ -307,7 +307,7 @@ Required adversarial tests include:
 - a hit on a pure child cannot hide a dependency from its parent;
 - private mutation allowed only relative to the correct owning candidate, including shallow aliases;
 - ambient shadowing, changed callable captures, keyed supplies, module identity and type-cell sealing;
-- integer widths, literal adoption, signed zero, infinities, NaN bypass, strings and Unit vectors;
+- integer widths, literal adoption, signed zero, infinities, NaN bypass, strings and unit vectors;
 - mutating a returned Value cannot corrupt another return or the cache, with memo on and off;
 - selected-only handlers, closure base construction and constructor validation failures;
 - same-key stateful recursion, pure active recursion, decreasing recursion and all resource failures;

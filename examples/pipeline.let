@@ -5,56 +5,60 @@
 -- `summarize` dispatches it -- the upward dual of a supplied capability.
 --
 -- `admit` owns its local state (`attempts`) and mutates its receiver directly; nothing global is in
--- scope, so it can only affect the outside world through `on_admitted` and `on_denied`. The `R: Type`
+-- scope, so it can only affect the outside world through `on_admitted` and `on_denied`. The `r: type`
 -- parameter lets one child serve both boundaries by specialization.
+--
+-- The type names carry their role: `admission_session` is the child contract, `rejection_reason` and
+-- `admission_outcome` are the sums it reports, and `session` is the runtime instance. A local value
+-- may share a word with the type it is built from; the type is what the inner name resolves to.
 --
 -- Expected: settle(1,50)=50, settle(0,50)=0, settle(1,500)=0,
 --           summarize(1,50)=50, summarize(1,500)=0
 
-let Request = { user: U32, amount: U32 }
-let Accepted = { user: U32, amount: U32 }
-let Rejected = OneOf({ unauthenticated: U32, over_limit: U32 })
-let Outcome = OneOf({ accepted: Accepted, rejected: Rejected })
+let request = { user: u32, amount: u32 }
+let accepted = { user: u32, amount: u32 }
+let rejection_reason = oneof { unauthenticated: u32, over_limit: u32 }
+let admission_outcome = oneof { accepted: accepted, rejected: rejection_reason }
 
-let Session = {
-  attempts: U32,
-  limit: U32,
+let admission_session = {
+  attempts: u32,
+  limit: u32,
   admit(
-      R: Type,
-      request: Request,
-      on_admitted: (Accepted): R,
-      on_denied: (Rejected): R,
-  ): R = do
+      r: type,
+      request: request,
+      on_admitted: (accepted): r,
+      on_denied: (rejection_reason): r,
+  ): r = do
     attempts += 1
-    if request.user == 0 then return on_denied(Rejected.unauthenticated(attempts)) end
-    if request.amount > limit then return on_denied(Rejected.over_limit(request.amount)) end
-    return on_admitted(Accepted { user = request.user, amount = request.amount })
+    if request.user == 0 then return on_denied(rejection_reason.unauthenticated(attempts)) end
+    if request.amount > limit then return on_denied(rejection_reason.over_limit(request.amount)) end
+    return on_admitted(accepted { user = request.user, amount = request.amount })
   end,
 }
 
 -- Downward: the parent owns the session and supplies what each exit means; the result is a scalar.
-let settle(user: U32, amount: U32): U32 = do
-  let session = Session { attempts = 0, limit = 100 }
-  return session.admit(U32, Request { user = user, amount = amount },
-    |accepted: Accepted| -> accepted.amount,
-    |rejected: Rejected| -> 0,
+let settle(user: u32, amount: u32): u32 = do
+  let session = admission_session { attempts = 0, limit = 100 }
+  return session.admit(u32, request { user = user, amount = amount },
+    |accepted: accepted| -> accepted.amount,
+    |reason: rejection_reason| -> 0,
   )
 end
 
 -- Upward: the same child returns the outcome as a sum for a caller to dispatch.
-let evaluate(user: U32, amount: U32): Outcome = do
-  let session = Session { attempts = 0, limit = 100 }
-  return session.admit(Outcome, Request { user = user, amount = amount },
-    |accepted: Accepted| -> Outcome.accepted(accepted),
-    |rejected: Rejected| -> Outcome.rejected(rejected),
+let evaluate(user: u32, amount: u32): admission_outcome = do
+  let session = admission_session { attempts = 0, limit = 100 }
+  return session.admit(admission_outcome, request { user = user, amount = amount },
+    |accepted: accepted| -> admission_outcome.accepted(accepted),
+    |reason: rejection_reason| -> admission_outcome.rejected(reason),
   )
 end
 
-let summarize(user: U32, amount: U32): U32 =
+let summarize(user: u32, amount: u32): u32 =
   evaluate(user, amount) {
-    accepted = |accepted: Accepted| -> accepted.amount,
-    rejected = |rejected: Rejected| -> 0,
+    accepted = |accepted: accepted| -> accepted.amount,
+    rejected = |reason: rejection_reason| -> 0,
   }
 
-return { types = { Request, Session, Accepted, Rejected, Outcome },
+return { types = { request, admission_session, accepted, rejection_reason, admission_outcome },
     functions = { settle, evaluate, summarize } }

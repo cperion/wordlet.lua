@@ -1,6 +1,6 @@
 # Working on this standalone Wordlet project
 
-Read README.md, syntax.md, architecture.md, interfaces.md, ast.asdl, ir.asdl, ASDL.md, U32.md and
+Read README.md, syntax.md, architecture.md, interfaces.md, ast.asdl, ir.asdl, ASDL.md, u32.md and
 VALIDATION.md before implementing
 compiler components. These files are local authorities, not links to an old checkout. THIRD_PARTY.md
 records verified Terra origins and local changes. The project and vendored code use MIT; preserve
@@ -11,9 +11,9 @@ LICENSE and vendor/LICENSE, including in generated bundles.
 The compiler is implemented and works end to end for the subset listed in README.md's status
 table: lexer, parser and AST (`ast.asdl`), semantic types and structured IR (`ir.asdl`), a
 static/normalization/residual evaluator, verification, and a C11 backend. Implemented and covered
-by tests: records, schemas, methods and field stores; the integer types (`U8`..`I64`) and `F64`
+by tests: records, schemas, methods and field stores; the integer types (`u8`..`i64`) and `f64`
 as IEEE-754 double with float literals; arrays, slices and strings; references and recursive
-types; `Ptr` and `Null`; sum types; closures, borrowed captures and tagged callables; `defer`;
+types; `ptr` and `null`; sum types; closures, borrowed captures and tagged callables; `defer`;
 foreign declarations (`extern`); imports; and self-tail calls. Some shapes are deliberately
 rejected rather than miscompiled: nested borrowed closures, erasing a runtime-tagged callable
 into a signature, and the `ref-target`/`ref-escape` rules raise diagnostics.

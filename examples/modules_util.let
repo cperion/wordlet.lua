@@ -3,9 +3,9 @@
 --
 -- Expected: helper(4) = 8   secret(4) = 9
 
-let Point = { x: U32, y: U32 }
-let private_scale(n: U32): U32 = n * 2
-let helper(n: U32): U32 = private_scale(n)
-let secret(n: U32): U32 = helper(n) + 1
+let point = { x: u32, y: u32 }
+let private_scale(n: u32): u32 = n * 2
+let helper(n: u32): u32 = private_scale(n)
+let secret(n: u32): u32 = helper(n) + 1
 
-return { types = { Point }, functions = { helper, secret } }
+return { types = { point }, functions = { helper, secret } }

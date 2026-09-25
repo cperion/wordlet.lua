@@ -17,21 +17,21 @@ this section states exactly how much of it runs today.
 | Semantic types, structured IR (`ir.asdl`) | implemented |
 | Evaluator: static, normalization and residual execution | implemented for the subset below |
 | Verification (`check.lua`) | implemented: types, scope, definite initialisation, fall-through |
-| C ABI closure and C11 emission | implemented for scalars, Bool, Unit and multiple results |
+| C ABI closure and C11 emission | implemented for scalars, bool, unit and multiple results |
 | Single-file bundle and CLI | implemented; `dist/wordlet.lua` |
 | Records, schemas, methods and field stores | implemented, including compound stores and by-value copy |
-| Integers (`U8`, `U16`, `U32`, `I32`, `U64`, `I64`) | implemented: a literal that does not fit a word is 64-bit, arithmetic wraps at the width its type names, a literal adapts to another operand's type when it fits, mixed widths of one signedness widen, mixing signed and unsigned rejects, changing signedness reinterprets, and a width-changing conversion rejects a known value that does not fit and aborts a run-time one that does not. `I32` is two's complement with truncating division and an arithmetic shift |
-| `F64` | implemented as IEEE-754 double: division by zero is an infinity or a NaN rather than a trap, a NaN comparison is false while `!=` holds, an integer rounds to nearest with ties to even (`F64(x)`) and a float truncates toward zero (`U32(f)`) with the range checked when known and guarded when not. `+ - * /` and the comparisons apply; remainder, power, shift and bitwise do not. A 32-bit or narrower integer converts implicitly when the double is exact |
-| Arrays (`Array(T, N)`, `[e, ...]`, `a[i]`) | implemented: the length is part of the type, so a known index is checked while compiling and a run-time index is guarded. A struct holding a C array, so an array copies by value on pass, return and field store, while a local binding aliases |
-| Slices (`Slice(T)`, `Slice(a)`) | implemented: a runtime-length view of storage someone else owns, so the length is *not* part of the type and one word accepts a sequence of any extent. Lowered to a pointer and a length; indexing is bounds-guarded when it runs. A view borrows, so a view of a local rejects when it escapes (`borrow-escape`), and a view is read-only, so a store through one rejects (`not-a-place`) |
-| Strings (`"..."`, `String`) | implemented: `String` is `Slice(U8)`, so text and bytes are one mechanism rather than two. A literal's bytes are the bytes of the source (a multi-byte character needs no escape), the bytes live in read-only static storage, escapes decode, identical literals share one buffer, and `==` compares content |
+| Integers (`u8`, `u16`, `u32`, `i32`, `u64`, `i64`) | implemented: a literal that does not fit a word is 64-bit, arithmetic wraps at the width its type names, a literal adapts to another operand's type when it fits, mixed widths of one signedness widen, mixing signed and unsigned rejects, changing signedness reinterprets, and a width-changing conversion rejects a known value that does not fit and aborts a run-time one that does not. `i32` is two's complement with truncating division and an arithmetic shift |
+| `f64` | implemented as IEEE-754 double: division by zero is an infinity or a NaN rather than a trap, a NaN comparison is false while `!=` holds, an integer rounds to nearest with ties to even (`f64(x)`) and a float truncates toward zero (`u32(f)`) with the range checked when known and guarded when not. `+ - * /` and the comparisons apply; remainder, power, shift and bitwise do not. A 32-bit or narrower integer converts implicitly when the double is exact |
+| Arrays (`array(T, N)`, `[e, ...]`, `a[i]`) | implemented: the length is part of the type, so a known index is checked while compiling and a run-time index is guarded. A struct holding a C array, so an array copies by value on pass, return and field store, while a local binding aliases |
+| Slices (`slice(T)`, `slice(a)`) | implemented: a runtime-length view of storage someone else owns, so the length is *not* part of the type and one word accepts a sequence of any extent. Lowered to a pointer and a length; indexing is bounds-guarded when it runs. A view borrows, so a view of a local rejects when it escapes (`borrow-escape`), and a view is read-only, so a store through one rejects (`not-a-place`) |
+| Strings (`"..."`, `string`) | implemented: `string` is `slice(u8)`, so text and bytes are one mechanism rather than two. A literal's bytes are the bytes of the source (a multi-byte character needs no escape), the bytes live in read-only static storage, escapes decode, identical literals share one buffer, and `==` compares content |
 | Literals | implemented: decimal, hexadecimal (`0x`) and binary (`0b`) integers, with a separator allowed between digits; **float** literals `1.5`, `1e5`, `1.5e-3`; a **byte literal** `'a'` that is a numeric literal and takes the same escapes; a **long string** `[=[ ... ]=]` that is raw, spans lines and drops one newline after its opening bracket, leveled so its body may contain a lower level's close; a **long comment** `--[[ ... ]]` at any level. Editing `syntax.md` regenerates the embedded reference (`luajit tools/embed.lua`) |
 | `defer` | implemented: a call statement whose callee and arguments are evaluated where it is written and whose invocation happens when the block is left, in reverse order, on every exit — including a `return` inside a statement conditional's arm. A block with a pending action does not become a loop, because the action has to run after a call returns and before the value leaves. It is a statement form, not a destructor: it tracks nothing and an abort skips it |
-| Foreign declarations (`extern`) | implemented: `extern let name(a: U32) : T` declares a host function with no body, so its result and every requirement are written down. The C symbol is the name as written; the artifact emits a prototype with external linkage and calls it directly. A foreign call is an effect, so it is never folded and the reference interpreter rejects it (`foreign-effect`); a `Unit` result erases |
-| `Ptr(T)` and `Null(T)` | implemented: an address the compiler does not track, deliberately a different type from `Ref`. `Ptr(place)` is the one place a lifetime is written off; `Ref(p)` rejects. `p[i]` reads and writes the element with no bounds check, `p.field` selects through `Ptr(Record)`, `Null(T)` is the null pointer and `==`/`!=` compare addresses. Ordering and pointer arithmetic are not offered |
+| Foreign declarations (`extern`) | implemented: `extern let name(a: u32) : T` declares a host function with no body, so its result and every requirement are written down. The C symbol is the name as written; the artifact emits a prototype with external linkage and calls it directly. A foreign call is an effect, so it is never folded and the reference interpreter rejects it (`foreign-effect`); a `unit` result erases |
+| `ptr(T)` and `null(T)` | implemented: an address the compiler does not track, deliberately a different type from `ref`. `ptr(place)` is the one place a lifetime is written off; `ref(p)` rejects. `p[i]` reads and writes the element with no bounds check, `p.field` selects through `ptr(Record)`, `null(T)` is the null pointer and `==`/`!=` compare addresses. Ordering and pointer arithmetic are not offered |
 | Scoped resources | implemented as a shape, not a built-in: a word taking a callable requirement acquires, calls the body and releases. A known body is specialized, so the generic combinator does not survive and the call site is direct; a body of pure arithmetic folds away entirely. See `syntax.md` section 8.7 for exactly what it does not enforce |
-| References (`Ref(T)`) and recursive types | implemented: a reference names a place and lowers to `T *`. Legal targets are module storage (untied) and a place belonging to an enclosing activation (tied, so `ref-escape` rejects an escape); a local, a copy or a temporary rejects (`ref-target`). A recursive definition reserves its own identity while its layout is computed, so a knot compares by identity, a by-value cycle rejects (`type-cycle`), and a cycle through a reference is finite |
-| Sum types (variants) | implemented: `OneOf(schema)` builds one, `T.case {...}` constructs, `value { case = handler }` matches. A known tag selects its handler statically; an opaque tag becomes a C tag test with the payload projected inside the arm. C layout is a tag plus a union, and a `Unit` alternative carries no payload |
+| References (`ref(T)`) and recursive types | implemented: a reference names a place and lowers to `T *`. Legal targets are module storage (untied) and a place belonging to an enclosing activation (tied, so `ref-escape` rejects an escape); a local, a copy or a temporary rejects (`ref-target`). A recursive definition reserves its own identity while its layout is computed, so a knot compares by identity, a by-value cycle rejects (`type-cycle`), and a cycle through a reference is finite |
+| Sum types (variants) | implemented: `oneof { ... }` on a keyed schema builds one, `T.case {...}` constructs, `value { case = handler }` matches. A known tag selects its handler statically; an opaque tag becomes a C tag test with the payload projected inside the arm. C layout is a tag plus a union, and a `unit` alternative carries no payload |
 | Closures and higher-order words | implemented: by-value environments, direct calls, and capture-free lambdas as pure code — an invocation pointer with a null environment, which may cross a boundary but needs no adapter |
 | Passing a method to a callable parameter | implemented: the parameter takes a view whose local adapter holds the borrowed receiver |
 | Borrowed captures (a captured receiver or method) | implemented as a non-retaining place input. Such a closure cannot escape, be stored or be captured again (`borrow-escape`), but it may be passed to a callable parameter, where a local adapter holds the borrowed place |
@@ -49,7 +49,7 @@ this section states exactly how much of it runs today.
 | Immediate static lambda execution | implemented for saturated known atom arguments with no runtime/borrowed captures: direct literals and selected known-match handlers execute without first building an unused base; no result memoization |
 | Module-level mutable records captured by runtime code | implemented as named file-scope storage plus an exported `wordlet_init()`. The host owns initialisation order; nothing is called implicitly |
 
-Working end to end today: U32/Bool/Unit, `let` bindings, named definitions with parameter and result
+Working end to end today: u32/bool/unit, `let` bindings, named definitions with parameter and result
 annotations, arithmetic/comparison/bitwise/logical operators, expression and statement conditionals,
 multiple results and result-list binding, static partial application, automatic static
 specialisation, calls compiled to independently elaborated bodies, recursion with an explicit result
@@ -58,11 +58,11 @@ exhaustive matching, callables that borrow or are selected at run time, referenc
 types, deferred actions, and foreign declarations.
 types.
 
-A `Unit` parameter is erased rather than represented: it produces no ABI slot, exactly like a `Unit`
-result, so a handler for a `Unit` alternative takes no C argument.
+A `unit` parameter is erased rather than represented: it produces no ABI slot, exactly like a `unit`
+result, so a handler for a `unit` alternative takes no C argument.
 
 A result is written with `:` after the parameter list; `->` introduces a lambda body and nothing
-else; a signature's inputs are parenthesized, so `(U32): U32` is a word from U32 to U32.
+else; a signature's inputs are parenthesized, so `(u32): u32` is a word from u32 to u32.
 A call to the instance currently being built, in tail position, becomes a back edge: a `for (;;)`
 loop with a `continue`, with every next argument evaluated before any parameter is rebound. Calling
 it with different static arguments is a different instance, not that self-loop rewrite. The backend
@@ -76,8 +76,8 @@ identity lives in the value's type, calling a closure stays a **direct call** �
 needed while the code is known.
 
 An unannotated lambda takes its parameter types from the context it is written in — a binding
-annotation (`let inc: (U32): U32 = |x| -> x + 1`), a parameter requirement
-(`twice(|y| -> y + 1, x)`) or a result contract (`let adder(n: U32): (U32): U32 = |x| -> x + n`,
+annotation (`let inc: (u32): u32 = |x| -> x + 1`), a parameter requirement
+(`twice(|y| -> y + 1, x)`) or a result contract (`let adder(n: u32): (u32): u32 = |x| -> x + n`,
 where the signature also becomes a checked requirement on what the body returns).
 
 A lambda that captures a mutable instance or a method view keeps a **borrow** rather than a copy, so
@@ -117,8 +117,8 @@ host compiler.
 - `vendor/asdl.lua`, `vendor/terralist.lua`: working ASDL and list implementation.
 - `tools/bundle.lua`: working manifest-driven single-file Lua bundler.
 - `wordlet/jit.lua`: the LuaJIT FFI front end that compiles, builds and loads an artifact at run time.
-- `wordletkit.lua`: a tooling API exporting ASDL, List and U32, NOT the Wordlet compiler.
-- `wordletkit/u32.lua`: checked exact concrete U32 operations; [U32.md](U32.md) explains host/C rules.
+- `wordletkit.lua`: a tooling API exporting ASDL, List and u32, NOT the Wordlet compiler.
+- `wordletkit/u32.lua`: checked exact concrete u32 operations; [u32.md](u32.md) explains host/C rules.
 - `examples/*.let`: source acceptance fixtures; they type-check and run today, and VALIDATION.md lists
   their expected values.
 - `tests/run.lua`: runs every suite — the bootstrap/relocation checks and the compiler tests.
@@ -134,7 +134,7 @@ host compiler.
 - [AGENTS.md](AGENTS.md): local implementation and validation instructions for coding agents.
 
 The `wordlet` namespace is the compiler. `wordletkit` remains the bootstrap toolkit (ASDL, List and
-the U32 reference kernel) and is not the compiler. `wordlet.syntax` is the language reference and
+the u32 reference kernel) and is not the compiler. `wordlet.syntax` is the language reference and
 `wordlet.guide` is the design and naming guide, generated from [syntax.md](syntax.md) and
 [GUIDE.md](GUIDE.md) into `wordlet/docs/syntax.lua` and `wordlet/docs/guide.lua` by `tools/embed.lua`
 and listed in the bundle manifest, so a host that loads only `dist/wordlet.lua` can still show both.
@@ -160,7 +160,7 @@ luajit dist/wordlet.lua -o /tmp/arithmetic.c examples/arithmetic.let
 ```
 
 The default bundle is `dist/wordlet.lua`: the compiler facade and its CLI. `wordletkit.lua` remains
-the bootstrap toolkit (ASDL, List and U32) and does not compile Wordlet.
+the bootstrap toolkit (ASDL, List and u32) and does not compile Wordlet.
 Running tests requires `cp`, `mkdir`, `rm`, and GNU-compatible `timeout`. `LUAJIT` may name the LuaJIT
 executable. The C differential tests need a C11 compiler, selected through `CC` (default `cc`); the
 generated code is clean under `-Wall -Wextra -Werror` with both GCC and clang. A private function is

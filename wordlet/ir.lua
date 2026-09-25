@@ -140,10 +140,10 @@ function Builder:const(ty, literal)
         return Ir.Const(ty, literal)
     end)
 end
-function Builder:u32(n) return self:const(S.U32, Ir.UInt(n)) end
+function Builder:u32(n) return self:const(S.u32, Ir.UInt(n)) end
 function Builder:int(ty, n) return self:const(ty, Ir.UInt(n)) end
 function Builder:int64(ty, high, low) return self:const(ty, Ir.UInt64(high, low)) end
-function Builder:bool(b) return self:const(S.Bool, Ir.Boolean(b)) end
+function Builder:bool(b) return self:const(S.bool, Ir.Boolean(b)) end
 -- A float constant. Its intern key is the value's own exact encoding, so two equal doubles share a
 -- node and two unequal ones do not.
 function Builder:float(ty, n) return self:const(ty, Ir.Float(n)) end
@@ -207,7 +207,7 @@ function Builder:sliceLength(view, ty)
     end)
 end
 
--- The null pointer of a Ptr type. Pure, and interned by its type, so every null of one type is one
+-- The null pointer of a ptr type. Pure, and interned by its type, so every null of one type is one
 -- node, and two nulls of that type are the same object.
 function Builder:nullPtr(ty)
     return self:intern("null|" .. S.encode(ty), function() return Ir.Null(ty) end)

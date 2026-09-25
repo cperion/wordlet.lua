@@ -43,13 +43,13 @@ weighted emission defaults to **1,000,000 nodes**. See `interfaces.md` for the o
 and `VALIDATION.md` for production test evidence, distinct from the historical prototype below.
 
 Production regressions also exposed and fixed evaluator bugs: vector-valued expression conditionals,
-Unit/common-value joining, missing control when both nested arms tail-transfer, tail context under a
+unit/common-value joining, missing control when both nested arms tail-transfer, tail context under a
 known condition, signed-zero comparison, and module-state reads folded during nullary calls or code
 construction inside initialization. Existing self-tail parameter-alias work is preserved. These are
 focused semantic fixes, not a replacement frontend or source replay in the backend.
 
 The full corpus runs at zero/nonzero credit. Dedicated tests exercise expression/statement tuple
-cycles, foreign-driven and module-state-driven nullary Unit cycles, retained borrowed receivers and
+cycles, foreign-driven and module-state-driven nullary unit cycles, retained borrowed receivers and
 cleanup, local/opaque returns, discarded results, effects, imports/header separation, deterministic
 output, template immutability and bounds. Deep cycles run at five million steps under GCC/Clang
 O0/O2/O3 with host inlining/sibling calls disabled and a 256 KiB stack. No runtime speedup is claimed.
@@ -132,13 +132,13 @@ Do not change these to implement this feature:
 - `constructInstanceCPS` / `constructCallableInstanceCPS` source elaboration;
 - runtime argument evaluation and immediate read snapshots;
 - `value.body` construction homes and demand-driven spilling;
-- source closure/capture checks, Unit erasure and tagged-callable dispatch;
+- source closure/capture checks, unit erasure and tagged-callable dispatch;
 - existing self-tail `Loop`/`Next` generation;
 - defer capture and source scope-exit semantics.
 
 The emitter consumes compiler data. It never re-evaluates AST expressions or infers a static/effect-free
 call merely from a known code identity. Preserve the existing fixes in `wordlet/eval.lua` and
-`tests/eval.lua`, including self-tail aliases, lambda laziness and Unit behavior. Focused frontend
+`tests/eval.lua`, including self-tail aliases, lambda laziness and unit behavior. Focused frontend
 bug fixes discovered during validation are described in the production status above.
 
 ## 3. Tail preparation over the current IR
@@ -152,7 +152,7 @@ Within a statement list, recognize its final two statements:
 
 ```text
 Call([r1, ...], target, arguments)
-Return([Ref(r1), ...])
+Return([ref(r1), ...])
 ```
 
 Require positional identity of the entire runtime result vector and equal target/owner result types.
@@ -175,17 +175,17 @@ Common expression bodies currently transport results through join storage:
 ```text
 Var(join, T, nil)
 If(test,
-   [Call(r, f, args), Store(Local(join), Ref(r))],
+   [Call(r, f, args), Store(Local(join), ref(r))],
    [Store(Local(join), base)])
 Read(v, T, Local(join))
-Return([Ref(v)])
+Return([ref(v)])
 ```
 
 For a proven private transport slot, rewrite to ordinary existing IR:
 
 ```text
 If(test,
-   [Call(r, f, args), Return([Ref(r)])],
+   [Call(r, f, args), Return([ref(r)])],
    [Return([base])])
 ```
 
@@ -220,7 +220,7 @@ scope exited. A slice, raw address, borrowed receiver or closure environment may
 
 Use a deliberately sufficient first rule, matching the prototype's limited proof:
 
-- all formal inputs are by-value scalar integers, Bool or F64;
+- all formal inputs are by-value scalar integers, bool or f64;
 - all runtime results and invocation-owned storage/value representations are scalar;
 - the body contains no Addr, BorrowArg, View or Indirect occurrence, and no operation exposing an owned
   object through another representation.
@@ -266,7 +266,7 @@ Plan = {
     costs,                      -- base component weight, without transitive expansion
 }
 
-Unit = {
+unit = {
     root, lines, remaining, nextName,
     active = {},                -- component ids on the current emission nesting path
     calls = {},                 -- actual remaining C-call edges and their reasons
@@ -356,7 +356,7 @@ the reserved group; optional expansion stops before revisiting an active compone
 
 A member Return either uses the current `returnText` for CExit, or snapshots its used results, assigns
 the destination's result locals, and jumps to its fixed label. Return vectors retain their order and
-runtime types; no Unit value is invented to fill an empty vector.
+runtime types; no unit value is invented to fill an empty vector.
 
 **Audit `Emitter:call` as well as `Emitter:returnText`.** The current call/Return fusion emits
 `return callee(...)` directly. Inside a locally returning helper that would incorrectly return from
@@ -465,7 +465,7 @@ depth-first growth case is a required policy regression, not an example to celeb
 | File / anchor | Change |
 | --- | --- |
 | new `wordlet/tail.lua` | Normalize narrowly proven return transport using existing constructors; index functions; recognize terminal pairs; compute scalar reuse safety, SCCs and base costs. |
-| `wordlet/lower.lua`, `newEmitter` | Add context namespace, Unit/Group references and destination; retain existing expression/place lowering. |
+| `wordlet/lower.lua`, `newEmitter` | Add context namespace, unit/Group references and destination; retain existing expression/place lowering. |
 | `Emitter:value`, `storage`, `tempName`, `placeC` | Contextual names, with module lookup retaining global identity. Audit raw tuple/adapter temporary names for scope collisions. |
 | `Emitter:call` | The three-way lowering in §5; typed parallel input transfer; destination-aware remaining-call fusion. |
 | `Emitter:returnText` | CExit versus local result binding/goto, with narrow fall-through elision. |
@@ -513,7 +513,7 @@ Required targeted tests include:
 - a tail-looking call with pending cleanup, result work or observable owned storage stays retaining;
 - two calls to one helper get distinct local destinations, no runtime return selector and no value-id
   collision; interleaved effects occur exactly once and in source order;
-- typed by-value aggregate copies, borrowed receivers, tagged callables, View environments, Unit,
+- typed by-value aggregate copies, borrowed receivers, tagged callables, View environments, unit,
   selected-only lambda elaboration and guard/payload dominance survive expansion;
 - malformed preparation facts (wrong result vector, escaping owner, foreign target, wrong component)
   are rejected as compiler bugs instead of producing unchecked gotos;

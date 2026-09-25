@@ -22,20 +22,20 @@ assert(program.export.results ~= nil and #program.declarations == 0)
 
 -- ir.asdl parses and constructs. Structural types intern; occurrences do not.
 local i = context("ir.asdl")
-local record = i.Ty.Record("Counter", L{i.Ty.Field("value", i.Ty.U32)})
-assert(record == i.Ty.Record("Counter", L{i.Ty.Field("value", i.Ty.U32)}))
-assert(record ~= i.Ty.Record("Other", L{i.Ty.Field("value", i.Ty.U32)}))
+local record = i.Ty.Record("Counter", L{i.Ty.Field("value", i.Ty.u32)})
+assert(record == i.Ty.Record("Counter", L{i.Ty.Field("value", i.Ty.u32)}))
+assert(record ~= i.Ty.Record("Other", L{i.Ty.Field("value", i.Ty.u32)}))
 assert(i.Ir.Value(1) ~= i.Ir.Value(1) and i.Ir.Storage(1) ~= i.Ir.Storage(1))
-assert(i.Ir.Const(i.Ty.U32, i.Ir.UInt(3)) ~= i.Ir.Const(i.Ty.U32, i.Ir.UInt(3)))
+assert(i.Ir.Const(i.Ty.u32, i.Ir.UInt(3)) ~= i.Ir.Const(i.Ty.u32, i.Ir.UInt(3)))
 
 -- A place parameter and a value parameter both build an Ir.Fn; Input distinguishes value from place.
 local place_param = i.Ir.PlaceParam(0, i.Ir.Storage(1), record)
 local fn = i.Ir.Fn("wordletfn_1", i.Ir.Body, 1,
-    L{i.Ty.InPlace(record), i.Ty.InValue(i.Ty.U32)}, L{i.Ty.U32},
-    L{place_param, i.Ir.ValueParam(1, i.Ir.Value(1), i.Ty.U32)},
-    L{i.Ir.Return(L{i.Ir.Ref(i.Ir.Value(1), i.Ty.U32)})})
+    L{i.Ty.InPlace(record), i.Ty.InValue(i.Ty.u32)}, L{i.Ty.u32},
+    L{place_param, i.Ir.ValueParam(1, i.Ir.Value(1), i.Ty.u32)},
+    L{i.Ir.Return(L{i.Ir.Ref(i.Ir.Value(1), i.Ty.u32)})})
 assert(fn.role.kind == "Body" and fn.hidden == 1 and fn.params[1].input == 0)
 assert(i.Ir.Fn.kind == nil and i.Ir.ValueParam.kind == "ValueParam")
-assert(not pcall(i.Ir.Fn, "bad", i.Ir.Body, 0, L{i.Ty.U32}, L{}, L{}, L{}))
+assert(not pcall(i.Ir.Fn, "bad", i.Ir.Body, 0, L{i.Ty.u32}, L{}, L{}, L{}))
 
 print("PASS: ast.asdl/ir.asdl parse and construct; spans, interning and occurrences behave")

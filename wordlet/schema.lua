@@ -12,12 +12,12 @@ M.Ty = M.ctx.Ty
 M.Ir = M.ctx.Ir
 
 local Ty = M.Ty
-M.U32, M.U8, M.U16, M.I32 = Ty.U32, Ty.U8, Ty.U16, Ty.I32
-M.U64, M.I64 = Ty.U64, Ty.I64
+M.u32, M.u8, M.u16, M.i32 = Ty.u32, Ty.u8, Ty.u16, Ty.i32
+M.u64, M.i64 = Ty.u64, Ty.i64
 -- IEEE-754 double. It is a scalar like the integers, but it follows IEEE 754 rather than the
 -- integer rules, so it is never an integer width and never wraps.
-M.F64 = Ty.F64
-M.Bool, M.Unit, M.Type = Ty.Bool, Ty.Unit, Ty.Type
+M.f64 = Ty.f64
+M.bool, M.unit, M.type = Ty.bool, Ty.unit, Ty.type
 
 function M.list(items) return ASDL.List(items) end
 
@@ -25,13 +25,13 @@ function M.list(items) return ASDL.List(items) end
 -- The integer widths this version has. An integer wraps at its own width, and a conversion that
 -- changes width is checked. A signed integer is two's complement, so its range is the same width
 -- shifted by half.
-local WIDTHS = { [Ty.U8] = 8, [Ty.U16] = 16, [Ty.U32] = 32, [Ty.I32] = 32,
-    [Ty.U64] = 64, [Ty.I64] = 64 }
+local WIDTHS = { [Ty.u8] = 8, [Ty.u16] = 16, [Ty.u32] = 32, [Ty.i32] = 32,
+    [Ty.u64] = 64, [Ty.i64] = 64 }
 -- A 64-bit bound is not a Lua number, so the bounds of every width are held as two words and the
 -- exact kernel compares them. MAXIMA and MINIMA therefore only describe the widths that fit one.
-local MAXIMA = { [Ty.U8] = 255, [Ty.U16] = 65535, [Ty.U32] = 4294967295, [Ty.I32] = 2147483647 }
-local MINIMA = { [Ty.I32] = -2147483648 }
-local SIGNED = { [Ty.I32] = true, [Ty.I64] = true }
+local MAXIMA = { [Ty.u8] = 255, [Ty.u16] = 65535, [Ty.u32] = 4294967295, [Ty.i32] = 2147483647 }
+local MINIMA = { [Ty.i32] = -2147483648 }
+local SIGNED = { [Ty.i32] = true, [Ty.i64] = true }
 -- The arithmetic and comparison operators accept an integer or a float, but one operation still
 -- needs one type on both sides; only a literal adopts the other side's type.
 
@@ -47,9 +47,9 @@ local SIGNED = { [Ty.I32] = true, [Ty.I64] = true }
 function Ty.V:isInteger() return WIDTHS[self] ~= nil end
 function Ty.V:isWide() return WIDTHS[self] == 64 end
 function Ty.V:isSigned() return SIGNED[self] == true end
-function Ty.V:isF64() return self == Ty.F64 end
-function Ty.V:isBool() return self == Ty.Bool end
-function Ty.V:isUnit() return self == Ty.Unit end
+function Ty.V:isF64() return self == Ty.f64 end
+function Ty.V:isBool() return self == Ty.bool end
+function Ty.V:isUnit() return self == Ty.unit end
 
 -- The schema is the discriminant: `self.kind` is the constructor name the sum assigned, so one kind
 -- test answers for every variant that has no field to inspect (structure.md §0.1).
@@ -58,21 +58,21 @@ function Ty.V:isSig() return self.kind == "Sig" end
 function Ty.V:isSum() return self.kind == "Sum" end
 function Ty.V:isTagged() return self.kind == "Tagged" end
 function Ty.V:isTaggedType() return self.kind == "Sum" or self.kind == "Tagged" end
-function Ty.V:isRef() return self.kind == "Ref" end
-function Ty.V:isPtr() return self.kind == "Ptr" end
-function Ty.V:isArray() return self.kind == "Array" end
-function Ty.V:isSlice() return self.kind == "Slice" end
+function Ty.V:isRef() return self.kind == "ref" end
+function Ty.V:isPtr() return self.kind == "ptr" end
+function Ty.V:isArray() return self.kind == "array" end
+function Ty.V:isSlice() return self.kind == "slice" end
 function Ty.V:isNamed() return self.kind == "Named" end
 function Ty.V:isOwned() return self.kind == "Owned" end
 function Ty.V:isView() return self.kind == "View" end
--- Ref | Ptr | Slice: a representation that stops, so what it reaches through is not embedded. A
+-- ref | ptr | slice: a representation that stops, so what it reaches through is not embedded. A
 -- predicate over three variants, not a fourth variant (structure.md §0.1).
 function Ty.V:isIndirection()
-    return self.kind == "Ref" or self.kind == "Ptr" or self.kind == "Slice"
+    return self.kind == "ref" or self.kind == "ptr" or self.kind == "slice"
 end
 
 -- The byte slice: text and bytes are one mechanism rather than two, so they are one type.
-function Ty.V:isString() return self == M.String end
+function Ty.V:isString() return self == M.string end
 
 -- The width facts the predicates and the fences ask about, by identity.
 function M.widthOf(t) return WIDTHS[t] end
@@ -154,7 +154,7 @@ end
 -- A concrete executable value: `key` names the compiled lambda instance whose environment this
 -- value carries. The code identity lives in the type, so an IR value of this type is callable.
 function M.owned(key, visible, environment)
-    return Ty.Owned(key, visible, environment or Ty.Unit)
+    return Ty.Owned(key, visible, environment or Ty.unit)
 end
 function M.view(sig) return Ty.View(sig) end
 
@@ -212,22 +212,22 @@ function M.tagIndex(t, name)
 end
 -- A reference is a checked borrow of a place: its representation is a pointer, its meaning is the
 -- lifetime rule in section 8.2 of the syntax contract.
-function M.ref(target) return Ty.Ref(target) end
+function M.ref(target) return Ty.ref(target) end
 
 -- A raw pointer is an address with no lifetime attached. It has the same C representation as a
 -- reference and none of the same guarantee, which is why it is a separate kind rather than a flag on
--- one: a signature that asks for `Ptr(T)` is asking for an unchecked address.
-function M.ptr(target) return Ty.Ptr(target) end
+-- one: a signature that asks for `ptr(T)` is asking for an unchecked address.
+function M.ptr(target) return Ty.ptr(target) end
 
 -- An array is a fixed-length sequence of one element type. Its length is part of the type, so a
 -- static index is checked while compiling and only a run-time index needs a bounds guard.
-function M.array(element, length) return Ty.Array(element, length) end
+function M.array(element, length) return Ty.array(element, length) end
 
 -- A slice is a runtime-length view of storage someone else owns: a pointer and a length. Its
 -- length is not part of its type, which is what lets one word accept arrays of any extent. A
--- `String` is the byte slice, so text and bytes are one mechanism rather than two.
-function M.slice(element) return Ty.Slice(element) end
-M.String = Ty.Slice(Ty.U8)
+-- `string` is the byte slice, so text and bytes are one mechanism rather than two.
+function M.slice(element) return Ty.slice(element) end
+M.string = Ty.slice(Ty.u8)
 
 -- A named cell is the identity a recursive type definition reserves for itself while its own layout
 -- is still being computed. It may only appear as a reference target, so it is deliberately not a
@@ -327,7 +327,7 @@ function M.encode(value)
     local mt = getmetatable(value)
     local name = value.kind or (mt and mt.__tostring and mt.__tostring(value)) or "?"
     local fields = mt and mt.__fields
-    -- Fieldless variants (U32, Unit, Ir.Add, ...) carry only their constructor name.
+    -- Fieldless variants (u32, unit, Ir.Add, ...) carry only their constructor name.
     if not fields then return name end
     local parts = {}
     for _, field in ipairs(fields) do
@@ -342,8 +342,8 @@ function M.runtime(t, visiting)
     -- Only a type can have a runtime representation; a result slot a signature requirement has yet to
     -- fix is `false`.
     if type(t) ~= "table" then return false end
-    if t:isInteger() or t == Ty.F64 or t == Ty.Bool or t == Ty.Unit then return true end
-    if t == Ty.Type then return false end
+    if t:isInteger() or t == Ty.f64 or t == Ty.bool or t == Ty.unit then return true end
+    if t == Ty.type then return false end
     if t:isRef() then
         -- A pointer is a runtime value whatever it points at; a named cell is always a data type
         -- that was sealed, so the target's own runtime-ness was checked when it was defined.
@@ -359,8 +359,8 @@ function M.runtime(t, visiting)
     end
     if t:isSlice() then
         -- The element is reached through a pointer, so it needs a representation of its own. A
-        -- slice of Unit reaches no bytes at all, so it is not a value.
-        if t.element == Ty.Unit then return false end
+        -- slice of unit reaches no bytes at all, so it is not a value.
+        if t.element == Ty.unit then return false end
         -- The element is reached through the pointer, so it needs a representation of its own.
         return t.element:isNamed() or M.runtime(t.element, visiting)
     end
@@ -418,7 +418,7 @@ function M.representable(t)
     if t:isView() then return M.runtime(t) end
     if t:isTaggedType() then return M.runtime(t) end
     if t:isOwned() then
-        if t.environment == Ty.Unit then return M.runtime(M.view(t.visible)) end
+        if t.environment == Ty.unit then return M.runtime(M.view(t.visible)) end
         return M.runtime(t.environment)
     end
     return M.runtime(t)
@@ -429,9 +429,9 @@ end
 function M.display(t)
     if type(t) ~= "table" then return M.encode(t) end
     if t:isRecord() then return "{" .. M.encodeFields(t.fields) .. "}" end
-    if t:isSum() then return "OneOf({" .. M.encodeFields(t.cases) .. "})" end
-    if t:isPtr() then return "Ptr(" .. M.display(t.target) .. ")" end
-    if t:isRef() then return "Ref(" .. M.display(t.target) .. ")" end
+    if t:isSum() then return "oneof {" .. M.encodeFields(t.cases) .. "}" end
+    if t:isPtr() then return "ptr(" .. M.display(t.target) .. ")" end
+    if t:isRef() then return "ref(" .. M.display(t.target) .. ")" end
     return M.encode(t)
 end
 

@@ -40,14 +40,14 @@ local function diamond(extraUse)
     local v = b:valueId()
     local yes = {Ir.Store(Ir.Local(slot), b:u32(11))}
     if extraUse then
-        yes[#yes + 1] = Ir.Read(b:valueId(), S.U32, Ir.Local(slot))
+        yes[#yes + 1] = Ir.Read(b:valueId(), S.u32, Ir.Local(slot))
         yes[#yes + 1] = Ir.Store(Ir.Local(slot), b:u32(11))
     end
-    local fn = Ir.Fn("diamond", Ir.Entry, 0, S.list{S.inValue(S.Bool)}, S.list{S.U32},
-        S.list{Ir.ValueParam(0, p, S.Bool)}, S.list{
-            Ir.Var(slot, S.U32, nil),
-            Ir.If(b:ref(p, S.Bool), S.list(yes), S.list{Ir.Store(Ir.Local(slot), b:u32(22))}),
-            Ir.Read(v, S.U32, Ir.Local(slot)), Ir.Return(S.list{b:ref(v, S.U32)})})
+    local fn = Ir.Fn("diamond", Ir.Entry, 0, S.list{S.inValue(S.bool)}, S.list{S.u32},
+        S.list{Ir.ValueParam(0, p, S.bool)}, S.list{
+            Ir.Var(slot, S.u32, nil),
+            Ir.If(b:ref(p, S.bool), S.list(yes), S.list{Ir.Store(Ir.Local(slot), b:u32(22))}),
+            Ir.Read(v, S.u32, Ir.Local(slot)), Ir.Return(S.list{b:ref(v, S.u32)})})
     return fn
 end
 do
@@ -62,8 +62,8 @@ do
     check(Tail.normalize(blocked) == blocked, "unaccounted slot use prevents normalization")
     local b = IR.builder()
     local value = b:valueId()
-    check(Tail.identityReturn(Ir.Call(S.list{value}, "f", S.list{}), Ir.Return(S.list{b:ref(value, S.U32)})), "exact identity return")
-    check(not Tail.identityReturn(Ir.Call(S.list{value}, "f", S.list{}), Ir.Return(S.list{b:bin("Add", b:ref(value,S.U32), b:u32(1), S.U32)})), "result work is not a tail")
+    check(Tail.identityReturn(Ir.Call(S.list{value}, "f", S.list{}), Ir.Return(S.list{b:ref(value, S.u32)})), "exact identity return")
+    check(not Tail.identityReturn(Ir.Call(S.list{value}, "f", S.list{}), Ir.Return(S.list{b:bin("Add", b:ref(value,S.u32), b:u32(1), S.u32)})), "result work is not a tail")
 end
 
 -- Multiple-result join transport is checked directly as IR as well as source expression/statement tails.
@@ -72,121 +72,121 @@ do
     local p = b:valueId()
     local a, z = b:storageId(), b:storageId()
     local x, y = b:valueId(), b:valueId()
-    local fn = Ir.Fn("pair_join", Ir.Entry, 0, S.list{S.inValue(S.Bool)}, S.list{S.U32,S.U32},
-        S.list{Ir.ValueParam(0,p,S.Bool)}, S.list{
-            Ir.Var(a,S.U32,nil), Ir.Var(z,S.U32,nil),
-            Ir.If(b:ref(p,S.Bool),
+    local fn = Ir.Fn("pair_join", Ir.Entry, 0, S.list{S.inValue(S.bool)}, S.list{S.u32,S.u32},
+        S.list{Ir.ValueParam(0,p,S.bool)}, S.list{
+            Ir.Var(a,S.u32,nil), Ir.Var(z,S.u32,nil),
+            Ir.If(b:ref(p,S.bool),
                 S.list{Ir.Store(Ir.Local(a),b:u32(1)),Ir.Store(Ir.Local(z),b:u32(2))},
                 S.list{Ir.Store(Ir.Local(z),b:u32(4)),Ir.Store(Ir.Local(a),b:u32(3))}),
-            Ir.Read(x,S.U32,Ir.Local(a)),Ir.Read(y,S.U32,Ir.Local(z)),
-            Ir.Return(S.list{b:ref(x,S.U32),b:ref(y,S.U32)})})
+            Ir.Read(x,S.u32,Ir.Local(a)),Ir.Read(y,S.u32,Ir.Local(z)),
+            Ir.Return(S.list{b:ref(x,S.u32),b:ref(y,S.u32)})})
     Check.program({fn})
     local normalized = Tail.normalize(fn)
     Check.program({normalized})
     check(#normalized.body==1 and #normalized.body[1].no[1].values==2, "vector join normalization")
     check(normalized.body[1].no[1].values[1].literal.value==3, "return order is independent of slot store order")
     local aggregate = Ir.Fn("unsafe_owner",Ir.Body,0,S.list{},S.list{},S.list{},
-        S.list{Ir.Var(b:storageId(),S.array(S.U32,2),nil),Ir.Return(S.list{})})
+        S.list{Ir.Var(b:storageId(),S.array(S.u32,2),nil),Ir.Return(S.list{})})
     check(not Tail.scalarOwner(aggregate), "aggregate-owned activation cannot reuse scalar carriers")
 end
 
 local program = [[
-let even(n: U32): Bool = if n==0 then true else odd(n-1)
-let odd(n: U32): Bool = if n==0 then false else even(n-1)
-let nested_a(n: U32): Bool = if n==0 then true else if n==1 then false else nested_b(n-1)
-let nested_b(n: U32): Bool = if n==0 then false else nested_a(n-1)
-let cycle_a(n,a,b: U32): U32 = do
+let even(n: u32): bool = if n==0 then true else odd(n-1)
+let odd(n: u32): bool = if n==0 then false else even(n-1)
+let nested_a(n: u32): bool = if n==0 then true else if n==1 then false else nested_b(n-1)
+let nested_b(n: u32): bool = if n==0 then false else nested_a(n-1)
+let cycle_a(n,a,b: u32): u32 = do
   if n==0 then return a*100+b end
   return cycle_b(b,a,n-1,n!=0)
 end
-let cycle_b(a,b,n: U32, unused: Bool): U32 = do
+let cycle_b(a,b,n: u32, unused: bool): u32 = do
   if n==0 then return a*100+b end
   return cycle_c(n-1,b,a)
 end
-let cycle_c(n,a,b: U32): U32 = do
+let cycle_c(n,a,b: u32): u32 = do
   if n==0 then return a*100+b end
   return cycle_a(n-1,b,a)
 end
-let pair_base(a,b: U32): (U32,U32) = do return a,b end
-let pair_a(n,a,b: U32): (U32,U32) = if n==0 then pair_base(a,b) else pair_b(n-1,b,a)
-let pair_b(n,a,b: U32): (U32,U32) = do
+let pair_base(a,b: u32): (u32,u32) = do return a,b end
+let pair_a(n,a,b: u32): (u32,u32) = if n==0 then pair_base(a,b) else pair_b(n-1,b,a)
+let pair_b(n,a,b: u32): (u32,u32) = do
   if n==0 then return pair_base(a,b) end
   return pair_a(n-1,b,a)
 end
-let State = {n: U32}
+let State = {n: u32}
 let state = State {n=0}
-let set(n: U32): Unit = do state.n=n return end
-let get(): U32 = state.n
-let read_callback: (): U32 = || -> get()
-let via_callback(): U32 = read_callback()
-let bump(): U32 = do state.n+=1 return state.n end
-let delayed: (): U32 = || -> bump()
-let via_delayed(): U32 = delayed()
-let module_a(): Unit = do
+let set(n: u32): unit = do state.n=n return end
+let get(): u32 = state.n
+let read_callback: (): u32 = || -> get()
+let via_callback(): u32 = read_callback()
+let bump(): u32 = do state.n+=1 return state.n end
+let delayed: (): u32 = || -> bump()
+let via_delayed(): u32 = delayed()
+let module_a(): unit = do
   if get()==0 then return end
   state.n-=1
   return module_b()
 end
-let module_b(): Unit = do
+let module_b(): unit = do
   if get()==0 then return end
   state.n-=1
   return module_a()
 end
-let nested_self(n,a: U32): U32 = if n==0 then a else if n%2==0 then nested_self(n-1,a+1) else nested_self(n-1,a+2)
-let known_self(n,a: U32): U32 = if true then if n==0 then a else known_self(n-1,a+1) else 0
-let mixed_pair(x: U32): (Unit,U32,Unit,U32) = do return Unit(),x,Unit(),x+1 end
-let mixed_choose(flag: Bool,x: U32): (Unit,U32,Unit,U32) = if flag then mixed_pair(x) else mixed_pair(x+10)
-let effect_pair(n: U32): (U32,U32) = do state.n=state.n*10+n return state.n,state.n+1 end
-let effect_choose(flag: Bool): (U32,U32) = if flag then effect_pair(2) else effect_pair(3)
-let signed_zero(flag: Bool): F64 = if flag then 0.0 else -0.0
-let VMOp=OneOf({step:Unit,branch:Unit,halt:Unit})
-let instruction(pc:U32):VMOp=[VMOp.step(),VMOp.branch(),VMOp.halt()][pc]
-let vm(pc,n,a:U32):U32=instruction(pc){
-  step=|u:Unit|->vm(pc+1,n,a+3),
-  branch=|u:Unit|->if n==0 then vm(pc+1,n,a) else vm(0,n-1,a),
-  halt=|u:Unit|->a,
+let nested_self(n,a: u32): u32 = if n==0 then a else if n%2==0 then nested_self(n-1,a+1) else nested_self(n-1,a+2)
+let known_self(n,a: u32): u32 = if true then if n==0 then a else known_self(n-1,a+1) else 0
+let mixed_pair(x: u32): (unit,u32,unit,u32) = do return unit(),x,unit(),x+1 end
+let mixed_choose(flag: bool,x: u32): (unit,u32,unit,u32) = if flag then mixed_pair(x) else mixed_pair(x+10)
+let effect_pair(n: u32): (u32,u32) = do state.n=state.n*10+n return state.n,state.n+1 end
+let effect_choose(flag: bool): (u32,u32) = if flag then effect_pair(2) else effect_pair(3)
+let signed_zero(flag: bool): f64 = if flag then 0.0 else -0.0
+let VMOp=oneof {step:unit,branch:unit,halt:unit}
+let instruction(pc:u32):VMOp=[VMOp.step(),VMOp.branch(),VMOp.halt()][pc]
+let vm(pc,n,a:u32):u32=instruction(pc){
+  step=|u:unit|->vm(pc+1,n,a+3),
+  branch=|u:unit|->if n==0 then vm(pc+1,n,a) else vm(0,n-1,a),
+  halt=|u:unit|->a,
 }
-let static_pc(n,a:U32):U32=vm(0,n,a)
-extern let host_more(): Bool
-let null_a(): Unit = do
+let static_pc(n,a:u32):u32=vm(0,n,a)
+extern let host_more(): bool
+let null_a(): unit = do
   if not host_more() then return end
   return null_b()
 end
-let null_b(): Unit = do
+let null_b(): unit = do
   if not host_more() then return end
   return null_a()
 end
-let mixed_a(n: U32): U32 = if n==0 then 0 else n+mixed_b(n-1)
-let mixed_b(n: U32): U32 = if n==0 then 0 else mixed_a(n-1)
-let Box = {value: U32, read(): U32 = value}
-let through {f: (): U32, n: U32}: U32 = if n==0 then f() else walk(n-1)+f()
-let walk(n: U32): U32 = do
+let mixed_a(n: u32): u32 = if n==0 then 0 else n+mixed_b(n-1)
+let mixed_b(n: u32): u32 = if n==0 then 0 else mixed_a(n-1)
+let Box = {value: u32, read(): u32 = value}
+let through {f: (): u32, n: u32}: u32 = if n==0 then f() else walk(n-1)+f()
+let walk(n: u32): u32 = do
   let b = Box {value=n}
   return through {f=b.read,n=n}
 end
-let record(n: U32): Unit = do state.n+=n return end
-let defer_a(n: U32): U32 = do
+let record(n: u32): unit = do state.n+=n return end
+let defer_a(n: u32): u32 = do
   defer record(n)
   if n==0 then return 0 end
   return defer_b(n-1)
 end
-let defer_b(n: U32): U32 = do
+let defer_b(n: u32): u32 = do
   defer record(n)
   if n==0 then return 0 end
   return defer_a(n-1)
 end
-let j(x: U32): U32 = x*3+1
-let h(x: U32): U32 = j(x)+j(x+1)
-let helper_a(x,y: U32): U32 = h(x)+h(y)
-let helper_b(x: U32): U32 = h(x)+3
-extern let host_value(n: U32): U32
-let after_host(n: U32): U32 = host_value(n)
-let use_host(n: U32): U32 = after_host(n)+7
-let discard(n: U32): U32 = do after_host(n) h(n) return n+1 end
-let opaque(f: (U32): U32,x: U32): U32 = f(x)
-let via(f: (U32): U32,x: U32): U32 = opaque(f,x)+3
-let quotient(n: U32): U32 = 100/n
-let guarded(n: U32): U32 = quotient(n)+5
+let j(x: u32): u32 = x*3+1
+let h(x: u32): u32 = j(x)+j(x+1)
+let helper_a(x,y: u32): u32 = h(x)+h(y)
+let helper_b(x: u32): u32 = h(x)+3
+extern let host_value(n: u32): u32
+let after_host(n: u32): u32 = host_value(n)
+let use_host(n: u32): u32 = after_host(n)+7
+let discard(n: u32): u32 = do after_host(n) h(n) return n+1 end
+let opaque(f: (u32): u32,x: u32): u32 = f(x)
+let via(f: (u32): u32,x: u32): u32 = opaque(f,x)+3
+let quotient(n: u32): u32 = 100/n
+let guarded(n: u32): u32 = quotient(n)+5
 return {functions={even,odd,nested_a,cycle_a,pair_a,set,get,null_a,mixed_a,walk,defer_a,
   helper_a,helper_b,use_host,discard,via,guarded,alias=even,module_a,via_callback,via_delayed,
   nested_self,known_self,mixed_choose,effect_choose,signed_zero,static_pc}}
@@ -325,11 +325,11 @@ int main(int argc, char **argv) {
     end
     -- Both facade paths reach contextual closure, and separately compiled headers preserve ABI.
     write(directory.."/helper.let", [[
-let even(n: U32): Bool = if n==0 then true else odd(n-1)
-let odd(n: U32): Bool = if n==0 then false else even(n-1)
+let even(n: u32): bool = if n==0 then true else odd(n-1)
+let odd(n: u32): bool = if n==0 then false else even(n-1)
 return {functions={even}}
 ]])
-    write(directory.."/entry.let", "use helper\nlet run(n: U32): Bool=helper.even(n)\nreturn {functions={run}}\n")
+    write(directory.."/entry.let", "use helper\nlet run(n: u32): bool=helper.even(n)\nreturn {functions={run}}\n")
     local imported = W.compile_file(directory.."/entry.let", {residualInlineBudget=256,inline=false})
     check(imported.layouts.contextual.reports[1].jumps>0 and imported.layouts.contextual.reports[1].calls==0,
         "file compilation expands an imported tail component")
@@ -340,13 +340,13 @@ return {functions={even}}
         ..q(directory.."/api.c").." "..q(directory.."/main.c").." -o "..q(directory.."/imported")), "separate header/source compilation")
     check(command("timeout 10s sh -c "..q("ulimit -s 256; exec "..q(directory.."/imported"))), "imported deep tail execution")
     for _, value in ipairs({-1,0.5,math.huge,"yes"}) do
-        local success, failure = pcall(W.compile,{source="let f(): U32=1 return {functions={f}}", residualInlineBudget=value})
+        local success, failure = pcall(W.compile,{source="let f(): u32=1 return {functions={f}}", residualInlineBudget=value})
         check(not success and failure.code == "compile-option", "invalid expansion credit rejected")
     end
-    local success, failure = pcall(W.compile,{source="let f(): U32=1 return {functions={f}}", limits={emittedNodes=0}})
+    local success, failure = pcall(W.compile,{source="let f(): u32=1 return {functions={f}}", limits={emittedNodes=0}})
     check(not success and failure.code == "c-size", "mandatory code respects hard output limit")
-    local chain={"let d0(x: U32): U32=x+1"}
-    for i=1,18 do chain[#chain+1]=("let d%d(x: U32): U32=d%d(x)+d%d(x+1)"):format(i,i-1,i-1) end
+    local chain={"let d0(x: u32): u32=x+1"}
+    for i=1,18 do chain[#chain+1]=("let d%d(x: u32): u32=d%d(x)+d%d(x+1)"):format(i,i-1,i-1) end
     chain[#chain+1]="return {functions={d18}}"
     local artifact=W.compile{source=table.concat(chain,"\n"),residualInlineBudget=64}
     for _, report in ipairs(artifact.layouts.contextual.reports) do

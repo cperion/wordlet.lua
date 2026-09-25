@@ -48,7 +48,7 @@ end
 -- where its value lives; a type that fits a Lua number also keeps a number.
 function become(value, ty, high, low)
     -- A conversion produces a value of the target type, not a source literal: a literal may adopt
-    -- another operand's type, but `I32(2)` is already I32, so `I32(2) + 3` must let 3 adopt I32
+    -- another operand's type, but `i32(2)` is already i32, so `i32(2) + 3` must let 3 adopt i32
     -- rather than treating both sides as literals and refusing to widen across signedness.
     value.literal = nil
     if V.tag(value) == "runtime" then
@@ -109,7 +109,7 @@ local ARITH = {
     ["+"] = "Add", ["-"] = "Sub", ["*"] = "Mul", ["/"] = "Div", ["%"] = "Rem", ["^"] = "Pow",
     ["<<"] = "Shl", [">>"] = "Shr", ["&"] = "BitAnd", ["|"] = "BitOr", ["~"] = "BitXor",
 }
--- F64 has no remainder, power, shift or bitwise operator: those are integer operations, and IEEE
+-- f64 has no remainder, power, shift or bitwise operator: those are integer operations, and IEEE
 -- division already answers an infinity or a NaN rather than trapping.
 local FLOAT_ARITH = { ["+"] = "Add", ["-"] = "Sub", ["*"] = "Mul", ["/"] = "Div" }
 local COMPARE = { ["=="] = "Eq", ["!="] = "Ne", ["<"] = "Lt", ["<="] = "Le", [">"] = "Gt", [">="] = "Ge" }
@@ -126,6 +126,28 @@ local function declare(sc, name, slot, span)
     if sc.names[name] then D.reject("duplicate", "Duplicate declaration of " .. name, span) end
     sc.names[name] = slot
     return slot
+end
+
+-- The language's own vocabulary. `PRIMITIVE_TYPES` are the fieldless types a source file names as
+-- spellings (`u32`, `bool`, ...); `PRIMITIVE_WORDS` are the type constructors and values built on
+-- them. They are ordinary words, not keywords, so the grammar needs no special case -- but a
+-- module-level declaration must not reuse one, because that would make the language's own words
+-- ambiguous with the program's. A local binding may still shadow any of them, as a local may shadow
+-- any outer name.
+local PRIMITIVE_TYPES = { "u8", "u16", "u32", "u64", "i32", "i64", "f64", "bool", "unit", "type" }
+local PRIMITIVE_WORDS = { "string", "null", "ref", "ptr", "array", "slice", "oneof" }
+local RESERVED = {}
+for _, list in ipairs({ PRIMITIVE_TYPES, PRIMITIVE_WORDS }) do
+    for _, name in ipairs(list) do RESERVED[name] = true end
+end
+
+-- A module-level name may not be one of the language's own words. This is a naming rule, not a
+-- scoping rule: the word is already bound in every module, so the program would silently change
+-- what `u32` or `oneof` means.
+local function reserve(name, span)
+    if RESERVED[name] then
+        D.reject("reserved", name .. " is a built-in Wordlet word; choose another name", span)
+    end
 end
 
 -- The module a scope belongs to: the root of its chain. A definition's names are resolved there, so
@@ -201,10 +223,12 @@ function Eval:load(program)
     self.top = top
     for _, decl in ipairs(program.declarations) do
         if decl.kind == "ForeignDecl" then
+            reserve(decl.def.name.text, decl.span)
             local slot = declare(top, decl.def.name.text,
                 { kind = "word", name = decl.def.name.text }, decl.span)
             slot.def = self:foreignDef(decl.def, top)
         elseif decl.kind == "WordDecl" then
+            reserve(decl.def.name.text, decl.span)
             local slot = declare(top, decl.def.name.text, { kind = "word", name = decl.def.name.text }, decl.span)
             slot.def = self:define(decl.def, top, nil)
         elseif decl.kind == "UseDecl" then
@@ -215,6 +239,7 @@ function Eval:load(program)
             -- evaluation so a result vector is distributed exactly as a local binding's is.
             local slots = {}
             for index, binder in ipairs(decl.def.binders) do
+                reserve(binder.name.text, binder.span)
                 local slot = declare(top, binder.name.text,
                     { kind = "value", name = binder.name.text, decl = decl, scope = top, binderIndex = index },
                     binder.span)
@@ -228,39 +253,39 @@ function Eval:load(program)
         end
         ::continue::
     end
-    for _, name in ipairs({ "U32", "U8", "U16", "I32", "U64", "I64", "F64", "Bool", "Unit", "Type" }) do
+    for _, name in ipairs(PRIMITIVE_TYPES) do
         declare(top, name, { kind = "value", name = name, value = V.type(S[name]) })
     end
-    -- `Ref(T)` is a type and `Ref(place)` is a reference to that place. Both are the same ordinary
+    -- `ref(T)` is a type and `ref(place)` is a reference to that place. Both are the same ordinary
     -- word, dispatched on whether the argument is a type value or a place, so no new syntax is
     -- needed and the builtin is applied, supplied and checked like any other word.
-    local refBuiltin = self:builtin("Ref", { { name = "target" } }, function(engine, ctx, values, span)
+    local refBuiltin = self:builtin("ref", { { name = "target" } }, function(engine, ctx, values, span)
         local target = values[1]
         local ty = engine:asType(target, span)
         if ty then return V.type(S.ref(engine:canonicalize(ty))) end
         return engine:makeReference(ctx, target, span)
     end)
     -- A reference must name a place, and only the argument expression says whether that place has
-    -- an identity that outlives the reference, so `Ref` needs the expression as well as the value.
+    -- an identity that outlives the reference, so `ref` needs the expression as well as the value.
     refBuiltin.refOf = true
-    -- `Ptr(T)` is a type and `Ptr(place)` is an unchecked address to that place: one word, like `Ref`,
+    -- `ptr(T)` is a type and `ptr(place)` is an unchecked address to that place: one word, like `ref`,
     -- dispatched the same way. It is the only place a lifetime is deliberately written off.
-    local ptrBuiltin = self:builtin("Ptr", { { name = "target" } }, function(engine, ctx, values, span)
+    local ptrBuiltin = self:builtin("ptr", { { name = "target" } }, function(engine, ctx, values, span)
         local ty = engine:asType(values[1], span)
-        if not ty then D.reject("type-required", "Ptr needs an element type or a place", span) end
+        if not ty then D.reject("type-required", "ptr needs an element type or a place", span) end
         S.checkRuntime(ty, span)
         return V.type(S.ptr(engine:canonicalize(ty)))
     end)
     ptrBuiltin.ptrOf = true
-    declare(top, "Ptr", { kind = "word", name = "Ptr", def = ptrBuiltin })
-    -- `Null(T)` is the null `Ptr(T)`. There is no null reference, so a pointer is the only thing it
+    declare(top, "ptr", { kind = "word", name = "ptr", def = ptrBuiltin })
+    -- `null(T)` is the null `ptr(T)`. There is no null reference, so a pointer is the only thing it
     -- can make, and it needs runtime code because an address has no compile-time value.
-    declare(top, "Null", { kind = "word", name = "Null",
-        def = self:builtin("Null", { { name = "type" } }, function(engine, ctx, values, span)
+    declare(top, "null", { kind = "word", name = "null",
+        def = self:builtin("null", { { name = "type" } }, function(engine, ctx, values, span)
             local ty = engine:asType(values[1], span)
-            if not ty then D.reject("type-required", "Null needs an element type, as in Null(U8)", span) end
+            if not ty then D.reject("type-required", "null needs an element type, as in null(u8)", span) end
             local target = engine:canonicalize(ty)
-            -- `Ptr(T)` is the runtime value, so the pointer is what must be representable, not `T`:
+            -- `ptr(T)` is the runtime value, so the pointer is what must be representable, not `T`:
             -- a named record is a fine target even though it is not itself a runtime value.
             local pointer = S.ptr(target)
             S.checkRuntime(pointer, span)
@@ -270,20 +295,20 @@ function Eval:load(program)
             end
             return V.runtime(ctx.builder:nullPtr(pointer), pointer)
         end) })
-    declare(top, "Ref", { kind = "word", name = "Ref", def = refBuiltin })
-    -- `OneOf(cases)` builds a sum type; the cases are a keyed schema whose fields are the
+    declare(top, "ref", { kind = "word", name = "ref", def = refBuiltin })
+    -- `oneof` builds a sum type from its `cases` requirement: a keyed schema whose fields are the
     -- alternatives. Nothing new is needed in the grammar: member selection names a constructor and
     -- keyed application matches on the tag.
-    -- `Array(T, N)` is a type: N elements of T, with the length part of the type so a static index is
+    -- `array(T, N)` is a type: N elements of T, with the length part of the type so a static index is
     -- checked while compiling and only a run-time index needs a bounds guard.
-    declare(top, "Array", { kind = "word", name = "Array",
+    declare(top, "array", { kind = "word", name = "array",
         -- The element is a type, so it is resolved on the type path: that is what lets a definition
         -- mention itself through an array and be told it is a type cycle rather than an eager demand.
-        def = self:builtin("Array", { { name = "element", isType = true }, { name = "length" } },
+        def = self:builtin("array", { { name = "element", isType = true }, { name = "length" } },
             function(engine, ctx, values, span)
                 local element = engine:asType(values[1], span)
                 if not element then
-                    D.reject("type-required", "Array needs an element type", span)
+                    D.reject("type-required", "array needs an element type", span)
                 end
                 -- A named cell is what an open definition hands back while its own layout is being
                 -- computed. It is a placeholder rather than a value, so it is allowed through here and
@@ -291,42 +316,42 @@ function Eval:load(program)
                 -- type a value can actually have.
                 if not S.hasNamed(element) then S.checkRuntime(element, span) end
                 local length = values[2]
-                if not V.isInteger(length) or length.ty ~= S.U32 then
-                    D.reject("type-required", "Array needs a length as a literal U32", span)
+                if not V.isInteger(length) or length.ty ~= S.u32 then
+                    D.reject("type-required", "array needs a length as a literal u32", span)
                 end
                 if length.n < 1 then
                     D.reject("array-length", "An array holds at least one element", span)
                 end
                 return V.type(S.array(element, length.n))
             end) })
-    -- `String` is the byte slice: text is an array of bytes with a runtime length, not a separate
+    -- `string` is the byte slice: text is an array of bytes with a runtime length, not a separate
     -- kind of value, so it needs no rule of its own.
-    declare(top, "String", { kind = "value", name = "String", value = V.type(S.String) })
-    -- `Slice(T)` is a type and `Slice(array)` is a view of that array. One word, dispatched on
-    -- whether its argument is a type value or a storage array, exactly as `Ref` is.
-    local sliceBuiltin = self:builtin("Slice", { { name = "source" } }, function(engine, ctx, values, span)
+    declare(top, "string", { kind = "value", name = "string", value = V.type(S.string) })
+    -- `slice(T)` is a type and `slice(array)` is a view of that array. One word, dispatched on
+    -- whether its argument is a type value or a storage array, exactly as `ref` is.
+    local sliceBuiltin = self:builtin("slice", { { name = "source" } }, function(engine, ctx, values, span)
         local element = engine:asType(values[1], span)
         if not element then
-            D.reject("type-required", "Slice needs an element type or an array", span)
+            D.reject("type-required", "slice needs an element type or an array", span)
         end
         S.checkRuntime(element, span)
         return V.type(S.slice(element))
     end)
-    -- Only the argument expression says whether the view's storage outlives it, so `Slice` needs
-    -- the expression as well as the value, exactly as `Ref` does.
+    -- Only the argument expression says whether the view's storage outlives it, so `slice` needs
+    -- the expression as well as the value, exactly as `ref` does.
     sliceBuiltin.sliceOf = true
-    declare(top, "Slice", { kind = "word", name = "Slice", def = sliceBuiltin })
-    declare(top, "OneOf", { kind = "word", name = "OneOf",
-        def = self:builtin("OneOf", { { name = "cases" } }, function(engine, ctx, values, span)
+    declare(top, "slice", { kind = "word", name = "slice", def = sliceBuiltin })
+    declare(top, "oneof", { kind = "word", name = "oneof",
+        def = self:builtin("oneof", { { name = "cases" } }, function(engine, ctx, values, span)
             local cases = values[1]
             if V.tag(cases) ~= "schema" then
-                D.reject("type-required", "OneOf needs a keyed schema of alternatives", span)
+                D.reject("type-required", "oneof needs a keyed schema of alternatives", span)
             end
             local def = cases.def
             local alternatives = {}
             for _, name in ipairs(def.fieldOrder) do alternatives[name] = def.fields[name] end
             if next(alternatives) == nil then
-                D.reject("type-required", "OneOf needs at least one alternative", span)
+                D.reject("type-required", "oneof needs at least one alternative", span)
             end
             return V.type(S.sum(alternatives))
         end) })
@@ -587,7 +612,7 @@ function Eval:demandCPS(machine, slot, span, k)
         machine:pop()
         settled()
         -- Several binders produce a result vector; distribute it as a local result-list binding does,
-        -- filling a missing value with Unit.
+        -- filling a missing value with unit.
         local values = self:expand(result)
         for index, sibling in ipairs(siblings) do
             sibling.value = values[index] or V.unit()
@@ -632,7 +657,7 @@ function Eval:sealCell(slot, span)
         -- it back to the cell itself is an infinite type. A slice registers itself before naming its
         -- element, so a slice self-reference is finite and the fold stops there.
         if S.reachesCell(ty, slot.cell, self.types.cells) then
-            D.reject("type-cycle", "Type " .. slot.name .. " refers to itself with no record or sum "
+            D.reject("type-cycle", "type " .. slot.name .. " refers to itself with no record or sum "
                 .. "to give it a finite layout; a recursive type needs a record or sum boundary", span)
         end
         self:checkNoValueCycle(ty, slot, span)
@@ -645,8 +670,8 @@ end
 -- by-value children only, stopping at every indirection.
 function Eval:checkNoValueCycle(ty, slot, span)
     if not S.embedsCell(ty) then return end
-    D.reject("type-cycle", "Type " .. slot.name .. " contains itself by value; a recursive type "
-        .. "needs an indirection boundary, as in Ref(" .. slot.name .. ") or Ptr(" .. slot.name
+    D.reject("type-cycle", "type " .. slot.name .. " contains itself by value; a recursive type "
+        .. "needs an indirection boundary, as in ref(" .. slot.name .. ") or ptr(" .. slot.name
         .. ")", span)
 end
 
@@ -734,9 +759,9 @@ end
 
 -- A variant value, tagged and (in residual code) constructed.
 function Eval:makeVariantCPS(machine, ctx, ctor, payload, span, k)
-    -- A Unit alternative carries no payload, but the frontend value still holds the Unit value so
+    -- A unit alternative carries no payload, but the frontend value still holds the unit value so
     -- that knownness and matching treat it like any other alternative.
-    local unit = ctor.caseType == S.Unit and payload == nil
+    local unit = ctor.caseType == S.unit and payload == nil
     local value = payload or V.unit()
     if not ctx.residual then
         return k(machine, V.variant(ctor.sum, ctor.case, value))
@@ -911,8 +936,8 @@ function Eval:matchResidualCPS(machine, ctx, base, handlers, span, k)
         local armCtx = ctx:arm(arm)
         local caseType = S.caseOf(base.ty, name)
         local args
-        if caseType == S.Unit then
-            -- The handler still takes one (erased) Unit parameter, so the arity matches; the value
+        if caseType == S.unit then
+            -- The handler still takes one (erased) unit parameter, so the arity matches; the value
             -- itself is never materialised.
             args = { V.unit() }
         else
@@ -1061,17 +1086,17 @@ function Eval:derefPlaceCPS(machine, ctx, value, span, k)
     end)
 end
 
--- `Ref(x)`: a reference to the place `x` names. A file-scope binding is module storage, which the
+-- `ref(x)`: a reference to the place `x` names. A file-scope binding is module storage, which the
 -- interpreter already holds as a record and residual code promotes to a named object, so both modes
 -- classify it the same way.
 -- The words that build a type out of other types. A definition written with one of these is a type
 -- definition, so a demand that arrives while it is open is the recursion knot rather than a value
 -- demand; a definition written any other way is a value, and a value that demands itself is an
 -- initializer cycle.
-local TYPE_CONSTRUCTORS = { Ref = true, Ptr = true, Slice = true, Array = true, OneOf = true }
+local TYPE_CONSTRUCTORS = { ref = true, ptr = true, slice = true, array = true, oneof = true }
 
--- A binding that is a direct alias of a type constructor -- `let MyRef = Ref` -- is a type
--- constructor too, so `let Node = MyRef(Node)` still recognises the recursion knot. The alias is
+-- A binding that is a direct alias of a type constructor -- `let my_ref = ref` -- is a type
+-- constructor too, so `let node = my_ref(node)` still recognises the recursion knot. The alias is
 -- followed structurally rather than demanded, so this decides without evaluating anything.
 local function isTypeConstructor(scope, name, seen)
     if TYPE_CONSTRUCTORS[name] then return true end
@@ -1128,16 +1153,16 @@ function Eval:placeOriginCPS(machine, ctx, expr, k)
     end
     return k(machine, nil)
 end
--- `Ptr(place)` takes the address of a place and writes off its lifetime. Unlike a reference there is no
+-- `ptr(place)` takes the address of a place and writes off its lifetime. Unlike a reference there is no
 -- target rule to check, and that is the point: from here the program is responsible, so the one place
 -- a lifetime is dropped is spelled rather than inferred.
 
--- `Ptr(x)`: a pointer type when `x` is a type, an address when it is a place. Two of the branches need
+-- `ptr(x)`: a pointer type when `x` is a type, an address when it is a place. Two of the branches need
 -- a child value, so each is a continuation; the address itself is one answered through `k`.
--- `Ptr(x)`: a pointer type when `x` is a type, an address when it is a place. The place is probed
+-- `ptr(x)`: a pointer type when `x` is a type, an address when it is a place. The place is probed
 -- first -- asking is not an error -- and only when it declines is the expression evaluated to find an
 -- instance to spill, which is what the alias case needs.
--- `Ptr(x)`: a pointer type when `x` is a type, an address when it is a place. The place is probed
+-- `ptr(x)`: a pointer type when `x` is a type, an address when it is a place. The place is probed
 -- first -- asking is not an error -- and only when it declines is the expression evaluated to find an
 -- instance to spill, which is what the alias case needs.
 function Eval:evalPtrCPS(machine, ctx, expr, k)
@@ -1148,7 +1173,7 @@ function Eval:evalPtrCPS(machine, ctx, expr, k)
             return self:evalExprCPS(m, ctx, expr, function(m2, value)
                 local asType = self:asType(value, expr.span)
                 if asType then return k(m2, V.type(S.ptr(self:canonicalize(asType)))) end
-                D.reject("type-required", "Ptr needs an element type or a place to address", expr.span)
+                D.reject("type-required", "ptr needs an element type or a place to address", expr.span)
             end)
         end
         if not ctx.residual then
@@ -1176,13 +1201,13 @@ function Eval:evalPtrCPS(machine, ctx, expr, k)
                         return answer(m4, { place = place, ty = held.ty })
                     end)
                 end
-                D.reject("not-a-place", "Ptr needs a place to address", expr.span)
+                D.reject("not-a-place", "ptr needs a place to address", expr.span)
             end)
         end)
     end
     if expr.kind == "Reference" then
         local slot = lookup(ctx.scope, expr.name.text)
-        -- `Ptr(Node)` inside Node's own definition must not demand Node's layout: a pointer is an
+        -- `ptr(Node)` inside Node's own definition must not demand Node's layout: a pointer is an
         -- indirection boundary exactly as a reference is, so it names the cell the definition
         -- reserved and the recursion stays finite.
         if slot and slot.open and slot.value == nil and slot.cell and self:isTypeDefinition(slot) then
@@ -1199,20 +1224,20 @@ function Eval:evalPtrCPS(machine, ctx, expr, k)
     end
     return afterSlot(machine)
 end
--- `Ref(x)`: a type when `x` is one, a reference to storage otherwise. The place classification below
+-- `ref(x)`: a type when `x` is one, a reference to storage otherwise. The place classification below
 -- is the direct walker (`placeOrigin`/`placeOf`/`asType`), which is why only the fallback evaluation
 -- is a continuation.
--- `Ref(x)`: a type when `x` is one, a reference to storage otherwise. The place is probed first, and
+-- `ref(x)`: a type when `x` is one, a reference to storage otherwise. The place is probed first, and
 -- the fallback -- evaluate the expression, then reference a named or local object -- is shared by every
 -- path that does not settle as a place.
--- `Ref(x)`: a type when `x` is one, a reference to storage otherwise. The place is probed first, and
+-- `ref(x)`: a type when `x` is one, a reference to storage otherwise. The place is probed first, and
 -- the fallback -- evaluate the expression, then reference a named or local object -- is shared by every
 -- path that does not settle as a place.
 function Eval:evalRefCPS(machine, ctx, expr, k)
     local slot
     if expr.kind == "Reference" then
         slot = lookup(ctx.scope, expr.name.text)
-        -- `Ref(Node)` inside Node's own definition must not demand Node's layout: it refers to the
+        -- `ref(Node)` inside Node's own definition must not demand Node's layout: it refers to the
         -- cell that definition reserved, which is what makes the recursion finite.
         if slot and slot.open and slot.value == nil and slot.cell and self:isTypeDefinition(slot) then
             self.types.referenced[slot.cell] = true
@@ -1344,7 +1369,7 @@ function Eval:finishArrayCPS(machine, ctx, expr, expected, items, k)
         local element = items[1].ty
         for _, item in ipairs(items) do
             if item.ty ~= element then
-                D.reject("type-mismatch", "Array elements must share one type: " .. S.encode(element)
+                D.reject("type-mismatch", "array elements must share one type: " .. S.encode(element)
                     .. " and " .. S.encode(item.ty), expr.span)
             end
         end
@@ -1377,17 +1402,17 @@ end
 
 -- The place an array value's elements live at. A value that only exists as an SSA value is spilled
 -- into storage once, which is what lets a parameter or a call result be indexed.
--- `Slice(array)` is a runtime-length view of an array: the address of its first element and its
+-- `slice(array)` is a runtime-length view of an array: the address of its first element and its
 -- length. The view borrows the storage it names, so the lifetime rules of a reference apply to it.
--- `Slice(T)` is a type and `Slice(x)` a view, and neither child is recursive: everything below is
+-- `slice(T)` is a type and `slice(x)` a view, and neither child is recursive: everything below is
 -- the direct walker, so each answer is a value through `k` and nothing nests. Its caller is still
 -- `evalApply`, which is why the direct name stays as a shim for one boundary frame.
--- `Slice(array)` is a runtime-length view of an array: the address of its first element and its
+-- `slice(array)` is a runtime-length view of an array: the address of its first element and its
 -- length. The view borrows the storage it names, so the lifetime rules of a reference apply to it.
--- `Slice(T)` is a type and `Slice(x)` a view, and everything below is the direct walker, so each answer
+-- `slice(T)` is a type and `slice(x)` a view, and everything below is the direct walker, so each answer
 -- is a value through `k`.
 function Eval:evalSliceCPS(machine, ctx, expr, k)
-    -- `Slice(Node)` inside Node's own definition must not demand Node's layout: a slice is a pointer
+    -- `slice(Node)` inside Node's own definition must not demand Node's layout: a slice is a pointer
     -- and a length, so its size does not depend on its element either. It names the cell the
     -- definition reserved, exactly as a pointer or a reference does.
     if expr.kind == "Reference" then
@@ -1398,7 +1423,7 @@ function Eval:evalSliceCPS(machine, ctx, expr, k)
         end
     end
     return self:containerOfCPS(machine, ctx, expr, expr.span, function(m, container)
-        -- `Slice(T)` is a type, exactly as `Ref(T)` is; only a non-type argument names a view.
+        -- `slice(T)` is a type, exactly as `ref(T)` is; only a non-type argument names a view.
         local element = self:asType(container.value, expr.span)
         if element then
             S.checkRuntime(element, expr.span)
@@ -1406,7 +1431,7 @@ function Eval:evalSliceCPS(machine, ctx, expr, k)
         end
         local ty = container.ty
         if not ty:isArray() then
-            D.reject("type-mismatch", "Slice needs an array, found " .. S.encode(ty or S.Unit), expr.span)
+            D.reject("type-mismatch", "slice needs an array, found " .. S.encode(ty or S.unit), expr.span)
         end
         -- A reference to module storage may leave the activation; a view of anything else may not.
         local tied = not (container.container and container.container.module)
@@ -1437,7 +1462,7 @@ function Eval:evalSliceCPS(machine, ctx, expr, k)
         end
         if container.place then return withPlace(m, container.place) end
         if not container.value then
-            D.reject("not-a-place", "Slice needs an array with storage", expr.span)
+            D.reject("not-a-place", "slice needs an array with storage", expr.span)
         end
         return self:arrayPlaceCPS(m, ctx, container.value, expr.span, withPlace)
     end)
@@ -1629,12 +1654,12 @@ function Eval:placeOfCPS(machine, ctx, expr, span, k)
             if base.ty and base.ty:isPtr() then
                 local element = self:pointeeType(base.ty)
                 return self:evalExprCPS(m, ctx, expr.index, function(m2, index)
-                    self:requireType(index, S.U32, expr.index.span)
+                    self:requireType(index, S.u32, expr.index.span)
                     if not ctx.residual then
                         D.reject("runtime-in-normalization", "A pointer element needs runtime code", expr.span)
                     end
                     return self:containerExprCPS(m2, ctx, base, function(m3, view)
-                        return self:expressionCPS(m3, ctx, index, S.U32, function(m4, indexExpr)
+                        return self:expressionCPS(m3, ctx, index, S.u32, function(m4, indexExpr)
                             -- No length and so no guard: that is the whole difference from the slice
                             -- index below.
                             return k(m4, { place = ctx.builder:ptrIndex(view, indexExpr, element),
@@ -1647,7 +1672,7 @@ function Eval:placeOfCPS(machine, ctx, expr, span, k)
                 if container.ty:isSlice() then
                     local element = container.ty.element
                     return self:evalExprCPS(m2, ctx, expr.index, function(m3, index)
-                        self:requireType(index, S.U32, expr.index.span)
+                        self:requireType(index, S.u32, expr.index.span)
                         local count = self:sliceCount(container.value)
                         if V.isKnown(index) and V.isInteger(index) and count then
                             if index.n >= count then
@@ -1665,10 +1690,10 @@ function Eval:placeOfCPS(machine, ctx, expr, span, k)
                                 "A run-time slice index needs runtime code", expr.span)
                         end
                         return self:containerExprCPS(m3, ctx, container, function(m4, view)
-                            return self:expressionCPS(m4, ctx, index, S.U32, function(m5, indexExpr)
+                            return self:expressionCPS(m4, ctx, index, S.u32, function(m5, indexExpr)
                                 -- A run-time index is checked before it is used, exactly as an array's is.
                                 ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Ge", indexExpr,
-                                    ctx.builder:sliceLength(view, S.U32), S.Bool), "index-range"))
+                                    ctx.builder:sliceLength(view, S.u32), S.bool), "index-range"))
                                 return k(m5, { place = ctx.builder:sliceIndex(view, indexExpr, element),
                                     ty = element, readonly = true })
                             end)
@@ -1677,12 +1702,12 @@ function Eval:placeOfCPS(machine, ctx, expr, span, k)
                 end
                 if not container.ty:isArray() then
                     D.reject("type-mismatch",
-                        "Expected an array but found " .. S.encode(container.ty or S.Unit), expr.span)
+                        "Expected an array but found " .. S.encode(container.ty or S.unit), expr.span)
                 end
                 local length, element = container.ty.length, container.ty.element
                 return self:evalExprCPS(m2, ctx, expr.index, function(m3, index)
                     -- A narrower integer index widens, which is free.
-                    self:requireType(index, S.U32, expr.index.span)
+                    self:requireType(index, S.u32, expr.index.span)
                     if V.isKnown(index) and V.isInteger(index) then
                         if index.n >= length then
                             D.reject("index-range", "Index " .. tostring(index.n) .. " is outside an array of "
@@ -1720,11 +1745,11 @@ function Eval:placeOfCPS(machine, ctx, expr, span, k)
                         D.reject("runtime-in-normalization", "A run-time index needs runtime code", expr.span)
                     end
                     -- A run-time index is checked before it is used, exactly as a run-time divisor is.
-                    return self:expressionCPS(m3, ctx, index, S.U32, function(m4, indexExpr)
+                    return self:expressionCPS(m3, ctx, index, S.u32, function(m4, indexExpr)
                         ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Ge", indexExpr,
-                            ctx.builder:u32(length), S.Bool), "index-range"))
+                            ctx.builder:u32(length), S.bool), "index-range"))
                         local function answer(m5, place)
-                            -- The container travels too: `Ref(r[i])` has to be able to see that the element
+                            -- The container travels too: `ref(r[i])` has to be able to see that the element
                             -- it names is in module storage, even when the route to it is a run-time index.
                             return k(m5, { place = Ir.Index(place, indexExpr, element), ty = element,
                                 container = container.container })
@@ -1815,7 +1840,7 @@ end
 -- The value a resolved container stands for, as an IR expression: the value it carries when there is
 -- one, and otherwise a read of the place it was resolved to. A container that came from `placeOf` has
 -- no value attached, so a consumer that needs the expression must be able to read one; assuming a value
--- is there is what turned `Slice(Ptr(U8))` into an internal Lua error rather than a diagnostic.
+-- is there is what turned `slice(ptr(u8))` into an internal Lua error rather than a diagnostic.
 
 -- Either the value the container holds or a read of its place.
 -- Either the value the container holds or a read of its place.
@@ -1936,7 +1961,7 @@ function Eval:callableArmCPS(machine, value, span, k)
                             span)
                     end
                     self.arms[key] = { kind = "word", def = def, bound = bound }
-                    return k(m, key, S.Unit, S.sig(inputs, results))
+                    return k(m, key, S.unit, S.sig(inputs, results))
                 end)
             end
             return self:requirementCPS(machine, def, index, sc, span, function(m, ty)
@@ -1969,7 +1994,7 @@ end
 -- The tagged representation of one arm: the tag names the code, the payload is its environment.
 function Eval:taggedArmValue(ty, key, value, span)
     local envTy = S.caseOf(ty, key)
-    if envTy == S.Unit then return V.variant(ty, key, V.unit()) end
+    if envTy == S.unit then return V.variant(ty, key, V.unit()) end
     local plan = value.plan
     if #plan.runtimeOrder ~= #(plan.envNames or {}) then
         D.bug("tagged-arm", "A tagged environment must match the plan's runtime captures")
@@ -2009,7 +2034,7 @@ function Eval:callTaggedArmCPS(machine, ctx, name, variantId, taggedTy, args, sp
     if not descriptor then D.bug("tagged-arm", "Tagged callable has no arm " .. name) end
     local envTy = S.caseOf(taggedTy, name)
     if descriptor.kind == "word" then
-        if envTy ~= S.Unit then D.bug("tagged-arm", "A word arm carries no environment") end
+        if envTy ~= S.unit then D.bug("tagged-arm", "A word arm carries no environment") end
         local values = {}
         for _, item in ipairs(descriptor.bound) do values[#values + 1] = item end
         for _, item in ipairs(args) do values[#values + 1] = item end
@@ -2020,7 +2045,7 @@ function Eval:callTaggedArmCPS(machine, ctx, name, variantId, taggedTy, args, sp
     for _, item in ipairs(descriptor.bound) do merged[#merged + 1] = item end
     for _, item in ipairs(args) do merged[#merged + 1] = item end
     local envExprs = {}
-    if envTy ~= S.Unit then
+    if envTy ~= S.unit then
         local id = ctx.builder:valueId()
         ctx.builder:emit(ctx.body, Ir.VariantPayload(id, variantId, taggedTy, name))
         local payload = ctx.builder:ref(id, envTy)
@@ -2107,7 +2132,7 @@ function Eval:expressionCPS(machine, ctx, value, want, k)
             ctx.builder:emit(ctx.body, Ir.ConstructVariant(id, value.ty, value.case, payload))
             return k(machine, ctx.builder:ref(id, value.ty))
         end
-        if caseType == S.Unit then return emit(nil) end
+        if caseType == S.unit then return emit(nil) end
         return self:expressionCPS(machine, ctx, value.payload, caseType, function(m, payload)
             return emit(payload)
         end)
@@ -2144,7 +2169,7 @@ function Eval:expressionCPS(machine, ctx, value, want, k)
         end
         return field(1)
     end
-    D.reject("residual-value", "A " .. S.encode(value.ty or S.Unit) .. " value cannot cross into runtime storage",
+    D.reject("residual-value", "A " .. S.encode(value.ty or S.unit) .. " value cannot cross into runtime storage",
         ctx.span)
 end
 
@@ -2230,13 +2255,13 @@ end
 function Eval:convert(value, ty, span)
     if ty:isF64() then
         -- An integer becomes a double implicitly only when the double is exact: rounding can lose a
-        -- value, so the rounding is written `F64(x)` where it happens.
+        -- value, so the rounding is written `f64(x)` where it happens.
         if not value.ty:isInteger() then return nil end
         local from = value.ty
         if V.isKnown(value) then
             local high, low = wordsOf(value)
             local rounded
-            -- Only a signed wide value is negative: the same bits are a large positive U64.
+            -- Only a signed wide value is negative: the same bits are a large positive u64.
             if from:isWide() and from:isSigned() and U64Kernel.slt(high, low, 0, 0) then
                 rounded = -U64Kernel.tofloat(U64Kernel.neg(high, low))
             elseif from:isWide() then
@@ -2247,13 +2272,13 @@ function Eval:convert(value, ty, span)
             local backHigh, backLow = wordsOfDouble(rounded)
             if backHigh == high and backLow == low then return V.f64(rounded) end
             D.reject("numeric-range", "Value " .. describeWords(from, high, low)
-                .. " is not exactly an F64; write F64(x) to round it", span)
+                .. " is not exactly an f64; write f64(x) to round it", span)
         end
         if from:isWide() then return nil end
         -- Every value of a 32-bit or narrower type is exactly a double.
         if V.tag(value) == "runtime" then
             value.cast = true
-            value.ty = S.F64
+            value.ty = S.f64
             return value
         end
         return V.f64(value.n)
@@ -2304,7 +2329,7 @@ function Eval:evalExprCPS(machine, ctx, expr, k)
     -- Tail position belongs to this node alone, so it is taken here and handed back only to a construct
     -- whose child really is the returned expression: a call that is the whole expression, and the arms
     -- of a conditional. An operand of `+`, an index or an argument is never a tail position, so a
-    -- self-call there stays a real call instead of becoming a back edge whose result is Unit.
+    -- self-call there stays a real call instead of becoming a back edge whose result is unit.
     local tail = ctx.tail
     ctx.tail = false
     local kind = expr.kind
@@ -2315,7 +2340,7 @@ function Eval:evalExprCPS(machine, ctx, expr, k)
         return k(machine, literal)
     elseif kind == "U64Literal" then
         -- A literal that does not fit a word is a 64-bit literal, held as its two words.
-        local literal = V.int64(S.U64, expr.high, expr.low)
+        local literal = V.int64(S.u64, expr.high, expr.low)
         literal.literal = true
         return k(machine, literal)
     elseif kind == "BoolLiteral" then return k(machine, V.bool(expr.value))
@@ -2330,7 +2355,7 @@ function Eval:evalExprCPS(machine, ctx, expr, k)
         ctx.tail = tail
         return self:evalApplyCPS(machine, ctx, expr, k)
     elseif kind == "SchemaExpr" then return self:evalSchemaCPS(machine, ctx, expr, k)
-    elseif kind == "StringLiteral" then return k(machine, V.string(S.String, expr.bytes))
+    elseif kind == "StringLiteral" then return k(machine, V.string(S.string, expr.bytes))
     elseif kind == "FloatLiteral" then return k(machine, V.f64(expr.value))
     elseif kind == "ArrayExpr" then return self:evalArrayCPS(machine, ctx, expr, nil, k)
     elseif kind == "IndexExpr" then return self:evalIndexCPS(machine, ctx, expr, k)
@@ -2444,30 +2469,30 @@ function Eval:readFieldValue(ctx, slot, span)
     return V.runtime(ctx.builder:ref(read, slot.ty), slot.ty, nil, slot.place)
 end
 
--- Arithmetic and comparison on IEEE-754 doubles. Both sides must be F64 once a literal has adopted the
+-- Arithmetic and comparison on IEEE-754 doubles. Both sides must be f64 once a literal has adopted the
 -- other side's type, exactly as an integer operation needs one width: an integer that is not a literal
 -- needs an explicit conversion, because rounding it may lose a value. IEEE decides the rest, so a
 -- division by zero is an infinity or a NaN rather than a trap and a NaN comparison is false.
 
--- An F64 operation: known operands fold here, runtime ones become one IR operation over two
+-- An f64 operation: known operands fold here, runtime ones become one IR operation over two
 -- materialised operands.
 function Eval:floatOpCPS(machine, ctx, op, left, right, leftSpan, rightSpan, span, k)
     for _, side in ipairs({ { left, leftSpan }, { right, rightSpan } }) do
         local value, where = side[1], side[2]
-        if value.ty ~= S.F64 then
+        if value.ty ~= S.f64 then
             if value.ty:isInteger() and value.literal then
-                -- A literal adopts F64, which is what lets `2.0 * 3` read as it looks.
-                self:requireType(value, S.F64, where)
+                -- A literal adopts f64, which is what lets `2.0 * 3` read as it looks.
+                self:requireType(value, S.f64, where)
             else
-                D.reject("type-mismatch", "A float operation needs two F64 values, found "
-                    .. S.encode(left.ty or S.Unit) .. " and " .. S.encode(right.ty or S.Unit)
+                D.reject("type-mismatch", "A float operation needs two f64 values, found "
+                    .. S.encode(left.ty or S.unit) .. " and " .. S.encode(right.ty or S.unit)
                     .. "; convert one side explicitly", span)
             end
         end
     end
     local irOp = FLOAT_ARITH[op] or COMPARE[op]
     if not irOp then
-        D.reject("type-mismatch", "Operator " .. op .. " has no meaning for F64", span)
+        D.reject("type-mismatch", "Operator " .. op .. " has no meaning for f64", span)
     end
     if V.isKnown(left) and V.isKnown(right) then
         local a, b = left.n, right.n
@@ -2484,7 +2509,7 @@ function Eval:floatOpCPS(machine, ctx, op, left, right, leftSpan, rightSpan, spa
         else result = a >= b end
         return k(machine, V.bool(result))
     end
-    local ty = COMPARE[op] and S.Bool or S.F64
+    local ty = COMPARE[op] and S.bool or S.f64
     return self:expressionCPS(machine, ctx, left, nil, function(m, leftExpr)
         return self:expressionCPS(m, ctx, right, nil, function(m2, rightExpr)
             return k(m2, V.runtime(ctx.builder:bin(irOp, leftExpr, rightExpr, ty), ty))
@@ -2564,21 +2589,21 @@ function Eval:evalUnary(machine, ctx, expr, k)
     return self:evalExprCPS(machine, ctx, expr.operand, function(m, value)
         local op = expr.operator
         if op == "not" then
-            self:requireType(value, S.Bool, expr.operand.span)
+            self:requireType(value, S.bool, expr.operand.span)
             if V.tag(value) == "bool" then return k(m, V.bool(not value.b)) end
             return self:expressionCPS(m, ctx, value, nil, function(m2, operand)
-                return k(m2, V.runtime(ctx.builder:un("Not", operand, S.Bool), S.Bool))
+                return k(m2, V.runtime(ctx.builder:un("Not", operand, S.bool), S.bool))
             end)
         end
         if value.ty:isF64() then
             -- Only negation applies to a float; complement and shift are integer operations.
             if op ~= "-" then
-                D.reject("type-mismatch", "Negation is the only unary operator F64 has, not " .. op,
+                D.reject("type-mismatch", "Negation is the only unary operator f64 has, not " .. op,
                     expr.operand.span)
             end
             if V.isKnown(value) then return k(m, V.f64(-value.n)) end
             return self:expressionCPS(m, ctx, value, nil, function(m2, operand)
-                return k(m2, V.runtime(ctx.builder:un("Neg", operand, S.F64), S.F64))
+                return k(m2, V.runtime(ctx.builder:un("Neg", operand, S.f64), S.f64))
             end)
         end
         if not value.ty:isInteger() then
@@ -2634,12 +2659,12 @@ function Eval:binaryOpCPS(machine, ctx, op, left, right, leftSpan, rightSpan, sp
         -- value, so nothing else about it is offered.
         if (op ~= "==" and op ~= "!=") or left.ty ~= right.ty then
             D.reject("type-mismatch", "A pointer compares only with a pointer of one element type, found "
-                .. S.encode(left.ty or S.Unit) .. " and " .. S.encode(right.ty or S.Unit), span)
+                .. S.encode(left.ty or S.unit) .. " and " .. S.encode(right.ty or S.unit), span)
         end
         if not ctx.residual then
             D.reject("runtime-in-normalization", "A pointer comparison needs runtime code", span)
         end
-        return self:binaryOperandsCPS(machine, ctx, left, right, COMPARE[op], S.Bool, k)
+        return self:binaryOperandsCPS(machine, ctx, left, right, COMPARE[op], S.bool, k)
     end
     if left.ty:isF64() or right.ty:isF64() then
         return self:floatOpCPS(machine, ctx, op, left, right, leftSpan, rightSpan, span, k)
@@ -2654,19 +2679,19 @@ function Eval:binaryOpCPS(machine, ctx, op, left, right, leftSpan, rightSpan, sp
         if not ctx.residual then
             D.reject("runtime-in-normalization", "A run-time string comparison needs runtime code", span)
         end
-        return self:binaryOperandsCPS(machine, ctx, left, right, COMPARE[op], S.Bool, k)
+        return self:binaryOperandsCPS(machine, ctx, left, right, COMPARE[op], S.bool, k)
     end
     if (op == "==" or op == "!=") and left.ty:isBool() and right.ty:isBool() then
-        -- A Bool compares by value. The operation is not ordered: section 7 offers Bool only
-        -- equality, exactly as it offers only equality for Unit.
+        -- A bool compares by value. The operation is not ordered: section 7 offers bool only
+        -- equality, exactly as it offers only equality for unit.
         if V.isKnown(left) and V.isKnown(right) then
             return k(machine, V.bool((left.b == right.b) == (op == "==")))
         end
-        return self:binaryOperandsCPS(machine, ctx, left, right, COMPARE[op], S.Bool, k)
+        return self:binaryOperandsCPS(machine, ctx, left, right, COMPARE[op], S.bool, k)
     end
     if (op == "==" or op == "!=") and left.ty:isUnit() and right.ty:isUnit() then
-        -- Unit has one value and no runtime representation, so both operands already ran for their
-        -- effects and the answer is known: Unit equals Unit.
+        -- unit has one value and no runtime representation, so both operands already ran for their
+        -- effects and the answer is known: unit equals unit.
         return k(machine, V.bool(op == "=="))
     end
     if COMPARE[op] then
@@ -2690,7 +2715,7 @@ function Eval:binaryOpCPS(machine, ctx, op, left, right, leftSpan, rightSpan, sp
         end
         if not left.ty:isInteger() or left.ty ~= right.ty then
             D.reject("type-mismatch", "Comparison needs two integers of one width, found "
-                .. S.encode(left.ty or S.Unit) .. " and " .. S.encode(right.ty or S.Unit), span)
+                .. S.encode(left.ty or S.unit) .. " and " .. S.encode(right.ty or S.unit), span)
         end
         if V.isInteger(left) and V.isInteger(right) then
             local a, b = left.n, right.n
@@ -2703,21 +2728,21 @@ function Eval:binaryOpCPS(machine, ctx, op, left, right, leftSpan, rightSpan, sp
             else result = a >= b end
             return k(machine, V.bool(result))
         end
-        return self:binaryOperandsCPS(machine, ctx, left, right, COMPARE[op], S.Bool, k)
+        return self:binaryOperandsCPS(machine, ctx, left, right, COMPARE[op], S.bool, k)
     end
     local irOp = ARITH[op]
     if not irOp then D.bug("operator", "Unknown binary operator " .. tostring(op)) end
-    -- A shift takes its amount as a plain U32; every other operator needs both sides at one width.
+    -- A shift takes its amount as a plain u32; every other operator needs both sides at one width.
     if op == "<<" or op == ">>" then
         if not left.ty:isInteger() then
             D.reject("type-mismatch", "A shift needs an integer to shift, found "
-                .. S.encode(left.ty or S.Unit), leftSpan)
+                .. S.encode(left.ty or S.unit), leftSpan)
         end
-        self:requireType(right, S.U32, rightSpan)
+        self:requireType(right, S.u32, rightSpan)
     else
         if not left.ty:isInteger() or not right.ty:isInteger() then
             D.reject("type-mismatch", "Arithmetic needs two integers, found "
-                .. S.encode(left.ty or S.Unit) .. " and " .. S.encode(right.ty or S.Unit), span)
+                .. S.encode(left.ty or S.unit) .. " and " .. S.encode(right.ty or S.unit), span)
         end
         -- Which width the result has is decided by what is written, not by what is known, so the
         -- interpreter and the generated code agree: a literal adopts the other operand's width when
@@ -2800,11 +2825,11 @@ function Eval:binaryOpCPS(machine, ctx, op, left, right, leftSpan, rightSpan, sp
                 end
                 if not V.isKnown(right) then
                     builder:emit(ctx.body, Ir.Trap(builder:bin("Lt", rightExpr,
-                        builder:int(right.ty, 0), S.Bool), "numeric-range"))
+                        builder:int(right.ty, 0), S.bool), "numeric-range"))
                 end
             end
             if (op == "/" or op == "%") and not V.isInteger(right) then
-                builder:trap(ctx.body, builder:bin("Eq", rightExpr, builder:u32(0), S.Bool),
+                builder:trap(ctx.body, builder:bin("Eq", rightExpr, builder:u32(0), S.bool),
                     "division-zero")
             end
             return k(m3, V.runtime(builder:bin(irOp, leftExpr, rightExpr, ty), ty))
@@ -2820,13 +2845,13 @@ end
 -- is the one place a continuation has to carry a *different* ctx (`yesCtx`) than its caller's.
 function Eval:evalShortCircuit(machine, ctx, expr, k)
     return self:evalExprCPS(machine, ctx, expr.left, function(m, left)
-        self:requireType(left, S.Bool, expr.left.span)
+        self:requireType(left, S.bool, expr.left.span)
         local isOr = expr.operator == "or"
         if V.tag(left) == "bool" then
             local short = isOr and left.b or (not isOr and not left.b)
             if short then return k(m, V.bool(isOr)) end
             return self:evalExprCPS(m, ctx, expr.right, function(m2, right)
-                self:requireType(right, S.Bool, expr.right.span)
+                self:requireType(right, S.bool, expr.right.span)
                 return k(m2, right)
             end)
         end
@@ -2834,16 +2859,16 @@ function Eval:evalShortCircuit(machine, ctx, expr, k)
             local yesList, noList = {}, {}
             local yesCtx = ctx:arm(yesList)
             return self:evalExprCPS(m2, yesCtx, expr.right, function(m3, yesValue)
-                self:requireType(yesValue, S.Bool, expr.right.span)
+                self:requireType(yesValue, S.bool, expr.right.span)
                 local builder = ctx.builder
-                local storage = builder:var(ctx.body, S.Bool, nil)
+                local storage = builder:var(ctx.body, S.bool, nil)
                 local place = Ir.Local(storage)
                 return self:expressionCPS(m3, yesCtx, yesValue, nil, function(m4, yesExpr)
                     builder:store(yesList, place, yesExpr)
                     builder:store(noList, place, builder:bool(isOr))
                     builder:emit(ctx.body, Ir.If(test, S.list(yesList), S.list(noList)))
-                    return k(m4, V.runtime(builder:ref(builder:read(ctx.body, S.Bool, place), S.Bool),
-                        S.Bool))
+                    return k(m4, V.runtime(builder:ref(builder:read(ctx.body, S.bool, place), S.bool),
+                        S.bool))
                 end)
             end)
         end)
@@ -2871,7 +2896,7 @@ function Eval:evalConditionCPS(machine, ctx, expr, expected, k)
     local tail = ctx.tail
     ctx.tail = false
     return self:evalExprCPS(machine, ctx, expr.test, function(m, test)
-        self:requireType(test, S.Bool, expr.test.span)
+        self:requireType(test, S.bool, expr.test.span)
         if V.tag(test) == "bool" then
             ctx.tail = tail
             return self:evalExpectedCPS(m, ctx, test.b and expr.yes or expr.no, expected, k)
@@ -2895,7 +2920,7 @@ function Eval:evalConditionCPS(machine, ctx, expr, expected, k)
     end)
 end
 
--- Join a logical result vector, preserving equal static components and erasing Unit. Materialize
+-- Join a logical result vector, preserving equal static components and erasing unit. Materialize
 -- under each arm's own context, then emit the control once (not once per result component).
 function Eval:evalConditionJoin(m, ctx, expr, yesCtx, noCtx, yesValue, yesTerminated, noValue,
         noTerminated, yesList, noList, testExpr, builder, k)
@@ -2946,7 +2971,7 @@ function Eval:evalConditionJoin(m, ctx, expr, yesCtx, noCtx, yesValue, yesTermin
                 return component(m2, index + 1)
             end
             local ty = value.ty
-            if not ty or ty == S.Type then
+            if not ty or ty == S.type then
                 D.reject("branch-result", "Conditional static results need one common value", expr.span)
             end
             local place = Ir.Local(builder:var(ctx.body, ty, nil))
@@ -3057,7 +3082,7 @@ function Eval:evalSupplyCPS(machine, ctx, expr, k)
     return self:evalExprCPS(machine, ctx, expr.schema, function(m, base)
         if V.tag(base) == "ctor" then
             -- A sum alternative with a record payload is built like a record, then tagged.
-            if #expr.fields == 0 and base.caseType == S.Unit then
+            if #expr.fields == 0 and base.caseType == S.unit then
                 return self:makeVariantCPS(m, ctx, base, nil, expr.span, k)
             end
             if not base.caseType:isRecord() then
@@ -3209,7 +3234,7 @@ function Eval:evalFieldSelectCPS(machine, ctx, expr, k)
                 D.reject("runtime-in-normalization", "A runtime slice length needs runtime code", expr.span)
             end
             return self:expressionCPS(m, ctx, base, base.ty, function(m2, data)
-                return k(m2, V.runtime(ctx.builder:sliceLength(data, S.U32), S.U32))
+                return k(m2, V.runtime(ctx.builder:sliceLength(data, S.u32), S.u32))
             end)
         end
         local tag = V.tag(base)
@@ -3269,7 +3294,7 @@ function Eval:evalFieldSelectCPS(machine, ctx, expr, k)
             end
             return k(m, V.runtime(ctx.builder:get(base.expr, name, ty), ty))
         end
-        D.reject("member-required", "Cannot select from " .. S.encode(base.ty or S.Unit), expr.span)
+        D.reject("member-required", "Cannot select from " .. S.encode(base.ty or S.unit), expr.span)
     end)
 end
 
@@ -3543,7 +3568,7 @@ function Eval:invokeRuntimeCPS(machine, ctx, value, args, span, k)
             D.bug("borrowed-callable-value",
                 "A closure with borrowed captures must not have a materialised value")
         end
-        if S.environmentOf(ty) == S.Unit then
+        if S.environmentOf(ty) == S.unit then
             -- Pure code carries no environment, so there is nothing to project: the call is direct.
             return self:invokeClosureCPS(machine, ctx, plan, {}, args, span, value.bound, k)
         end
@@ -3630,7 +3655,7 @@ function Eval:invokeRuntimeCPS(machine, ctx, value, args, span, k)
                                 local parent = {}
                                 local id = builder:valueId()
                                 builder:emit(parent, Ir.VariantMatches(id, variantId, ty, piece.name))
-                                builder:emit(parent, Ir.If(builder:ref(id, S.Bool), S.list(piece.list),
+                                builder:emit(parent, Ir.If(builder:ref(id, S.bool), S.list(piece.list),
                                     S.list(child)))
                                 child = parent
                             end
@@ -3811,7 +3836,7 @@ function Eval:prepareLambdaCPS(machine, ctx, expr, expected, k)
                     plan.envNames[position] = envFieldName(position)
                     envFields[envFieldName(position)] = plan.runtime[name].ty
                 end
-                plan.envTy = #plan.runtimeOrder > 0 and S.record(envFields) or S.Unit
+                plan.envTy = #plan.runtimeOrder > 0 and S.record(envFields) or S.unit
                 plan.key = "closure:" .. tostring(plan.def.id)
                 for _, name in ipairs(order) do
                     local static, borrowed = plan.static[name], plan.borrowed[name]
@@ -4194,9 +4219,9 @@ function Eval:constructCallableInstanceCPS(machine, key, callable, args, span, k
             else
                 S.checkRuntime(ty, param.span)
             end
-            if not bound and ty == S.Unit then
-                -- A Unit parameter carries no information, so it is not a runtime input at all: the
-                -- name is bound to the Unit value and neither the ABI nor the call site mentions it.
+            if not bound and ty == S.unit then
+                -- A unit parameter carries no information, so it is not a runtime input at all: the
+                -- name is bound to the unit value and neither the ABI nor the call site mentions it.
                 declare(sc, param.name.text, { kind = "value", name = param.name.text, value = V.unit() }, param.span)
                 bound = true
             end
@@ -4376,16 +4401,16 @@ function Eval:execBlockCPS(machine, ctx, statements, from, k)
     return statement(from or 1)
 end
 
--- A value list as an IR expression list. A Unit slot is logical but has no runtime representation,
--- exactly as a Unit parameter has none, so it is dropped here and the IR result list is the erased one.
--- A value list as an IR expression list. A Unit slot is logical but has no runtime representation,
--- exactly as a Unit parameter has none, so it is dropped here and the IR result list is the erased one.
+-- A value list as an IR expression list. A unit slot is logical but has no runtime representation,
+-- exactly as a unit parameter has none, so it is dropped here and the IR result list is the erased one.
+-- A value list as an IR expression list. A unit slot is logical but has no runtime representation,
+-- exactly as a unit parameter has none, so it is dropped here and the IR result list is the erased one.
 function Eval:materializeAllCPS(machine, ctx, values, wants, k)
     local out = {}
     local function item(index)
         if index > #values then return k(machine, out) end
         local value = values[index]
-        if value.ty == S.Unit then return item(index + 1) end
+        if value.ty == S.unit then return item(index + 1) end
         return self:expressionCPS(machine, ctx, value, wants and wants[index] or nil, function(m, expr)
             out[#out + 1] = expr
             return item(index + 1)
@@ -4393,19 +4418,19 @@ function Eval:materializeAllCPS(machine, ctx, values, wants, k)
     end
     return item(1)
 end
--- A Unit slot erases from a result vector the way it erases from a parameter list (syntax.md §6).
--- The function's IR results are the non-Unit ones; a call site reinserts the Unit values so a
+-- A unit slot erases from a result vector the way it erases from a parameter list (syntax.md §6).
+-- The function's IR results are the non-unit ones; a call site reinserts the unit values so a
 -- binding list keeps its positions, while a return simply drops them.
 function Eval:runtimeResults(results)
     local out = {}
-    for _, ty in ipairs(results or {}) do if ty ~= S.Unit then out[#out + 1] = ty end end
+    for _, ty in ipairs(results or {}) do if ty ~= S.unit then out[#out + 1] = ty end end
     return out
 end
 
 function Eval:logicalResults(results, runtime)
     local out, index = {}, 1
     for _, ty in ipairs(results or {}) do
-        if ty == S.Unit then out[#out + 1] = V.unit()
+        if ty == S.unit then out[#out + 1] = V.unit()
         else out[#out + 1] = runtime[index]; index = index + 1 end
     end
     return out
@@ -4419,7 +4444,7 @@ end
 -- block that contains this stop looking for the end of its list.
 function Eval:execIfStatementCPS(machine, ctx, stmt, k)
     return self:evalExprCPS(machine, ctx, stmt.test, function(m, test)
-        self:requireType(test, S.Bool, stmt.test.span)
+        self:requireType(test, S.bool, stmt.test.span)
         if V.tag(test) == "bool" then
             return self:execBlockCPS(m, ctx, test.b and stmt.yes or stmt.no, nil, k)
         end
@@ -4502,7 +4527,7 @@ function Eval:checkAnnotationCPS(machine, ctx, binder, value, k)
         return k(m, value)
     end)
 end
--- A type expression is a Type value or a schema (which denotes its record type).
+-- A type expression is a type value or a schema (which denotes its record type).
 function Eval:asType(value, span)
     if V.tag(value) == "type" then return value.value end
     if V.tag(value) == "schema" then return value.def.type end
@@ -4538,7 +4563,7 @@ end
 -- Integer arithmetic -------------------------------------------------------------------------------
 -- One implementation of the per-width rules, shared by the interpreter and by the builder when it
 -- folds constants. Wrapping is masked at the type's own width, so a narrower integer wraps the way
--- U32 wraps at 32 bits.
+-- u32 wraps at 32 bits.
 
 local U32Kernel = require("wordletkit.u32")
 
@@ -4576,13 +4601,13 @@ end
 -- kernel; every narrower width fits exactly either way. A power needs the same exactness and has its
 -- own function, because its intermediate squares are products too.
 function mulExact(ty, x, y)
-    if ty == S.U32 then return U32Kernel.mul(x, y) end
+    if ty == S.u32 then return U32Kernel.mul(x, y) end
     return wrap(ty, x * y)
 end
 
 function pow(ty, base, exponent)
-    if ty == S.U32 then return U32Kernel.pow(base, exponent) end
-    if ty == S.I32 then
+    if ty == S.u32 then return U32Kernel.pow(base, exponent) end
+    if ty == S.i32 then
         -- A signed power wraps at 32 bits exactly as an unsigned one does, so the exact kernel does
         -- the arithmetic on the two's complement words and the result is mapped back into range.
         -- Doing it here would multiply values whose product exceeds what a Lua number holds.
@@ -4633,7 +4658,7 @@ function Eval:evalArgumentsCPS(machine, ctx, exprs, callee, k, prepared)
         if param and param.isType then
             -- A builtin parameter that names a type is resolved on the type path, which is the path
             -- that hands back the cell an open definition reserved instead of demanding its layout.
-            -- That is what lets `Array(Node, 2)` inside Node's own definition reach the cycle checker
+            -- That is what lets `array(Node, 2)` inside Node's own definition reach the cycle checker
             -- rather than being refused as an eager initializer.
             return self:typeOfCPS(machine, expr, sc, expr.span, function(m, ty)
                 local held = V.type(ty)
@@ -4662,7 +4687,7 @@ function Eval:evalArgumentsCPS(machine, ctx, exprs, callee, k, prepared)
         end
         -- The requirement decides, not how it was spelled: an alias of a signature is a signature,
         -- so a lambda passed to `f: Endo` gets its parameter type from it just as one passed to a
-        -- written `(U32): U32` does. Only a signature is used this way, as that is what types a
+        -- written `(u32): u32` does. Only a signature is used this way, as that is what types a
         -- lambda.
         if resolved and param then
             local ty = resolved.paramTypes[index + offset]
@@ -4675,12 +4700,12 @@ function Eval:evalArgumentsCPS(machine, ctx, exprs, callee, k, prepared)
     end
     return argument(1)
 end
--- `U8(x)`, `U16(x)` and `U32(x)` convert between integer widths: widening is free, narrowing traps
+-- `u8(x)`, `u16(x)` and `u32(x)` convert between integer widths: widening is free, narrowing traps
 -- when the value does not fit, and a known value outside the target is rejected while compiling.
 -- An integer becomes the nearest double, rounding once with ties to even. The exact kernel does the
 -- rounding, because a Lua division would round twice for a value above 2^53.
 
--- An integer to F64: known values round here, a runtime one converts in code.
+-- An integer to f64: known values round here, a runtime one converts in code.
 function Eval:roundToFloatCPS(machine, ctx, value, span, k)
     local from = value.ty
     if V.isKnown(value) then
@@ -4692,7 +4717,7 @@ function Eval:roundToFloatCPS(machine, ctx, value, span, k)
         return k(machine, V.f64(value.n))
     end
     return self:expressionCPS(machine, ctx, value, nil, function(m, expr)
-        return k(m, V.runtime(ctx.builder:convert(expr, S.F64), S.F64))
+        return k(m, V.runtime(ctx.builder:convert(expr, S.f64), S.f64))
     end)
 end
 
@@ -4700,7 +4725,7 @@ end
 -- is known and stops a run-time one, which is also what keeps a NaN from becoming some integer: a NaN
 -- compares false against every bound, so it is trapped on its own.
 
--- An F64 to an integer: known values are range-checked here, a runtime one in code.
+-- An f64 to an integer: known values are range-checked here, a runtime one in code.
 function Eval:truncateToIntCPS(machine, ctx, ty, value, span, k)
     local maxDouble, minDouble = floatBounds(ty)
     if V.isKnown(value) then
@@ -4716,16 +4741,16 @@ function Eval:truncateToIntCPS(machine, ctx, ty, value, span, k)
     end
     local builder = ctx.builder
     return self:expressionCPS(machine, ctx, value, nil, function(m, expr)
-        builder:emit(ctx.body, Ir.Trap(builder:bin("Ne", expr, expr, S.Bool), "numeric-range"))
-        builder:emit(ctx.body, Ir.Trap(builder:bin("Lt", expr, builder:float(S.F64, minDouble), S.Bool),
+        builder:emit(ctx.body, Ir.Trap(builder:bin("Ne", expr, expr, S.bool), "numeric-range"))
+        builder:emit(ctx.body, Ir.Trap(builder:bin("Lt", expr, builder:float(S.f64, minDouble), S.bool),
             "numeric-range"))
-        builder:emit(ctx.body, Ir.Trap(builder:bin("Ge", expr, builder:float(S.F64, maxDouble), S.Bool),
+        builder:emit(ctx.body, Ir.Trap(builder:bin("Ge", expr, builder:float(S.f64, maxDouble), S.bool),
             "numeric-range"))
         return k(m, V.runtime(builder:convert(expr, ty), ty))
     end)
 end
 
--- `F64(x)` rounds an integer to the nearest double, and `U32(f)` truncates a float toward zero with
+-- `f64(x)` rounds an integer to the nearest double, and `u32(f)` truncates a float toward zero with
 -- the target's range checked. Both directions are explicit here even where the value would be exact,
 -- because that is what names the rounding at the point it happens.
 
@@ -4737,7 +4762,7 @@ function Eval:applyConversionCPS(machine, ctx, ty, args, span, k)
     if ty:isF64() then
         if value.ty:isF64() then return k(machine, value) end
         if not value.ty:isInteger() then
-            D.reject("type-mismatch", "F64 needs a number, found " .. S.encode(value.ty or S.Unit), span)
+            D.reject("type-mismatch", "f64 needs a number, found " .. S.encode(value.ty or S.unit), span)
         end
         return self:roundToFloatCPS(machine, ctx, value, span, k)
     end
@@ -4746,7 +4771,7 @@ function Eval:applyConversionCPS(machine, ctx, ty, args, span, k)
     end
     if not value.ty:isInteger() then
         D.reject("type-mismatch", S.encode(ty) .. " needs an integer, found "
-            .. S.encode(value.ty or S.Unit), span)
+            .. S.encode(value.ty or S.unit), span)
     end
     local reinterprets = S.widthOf(value.ty) == S.widthOf(ty)
         and value.ty:isSigned() ~= ty:isSigned()
@@ -4770,11 +4795,11 @@ function Eval:applyConversionCPS(machine, ctx, ty, args, span, k)
     return self:expressionCPS(machine, ctx, value, nil, function(m, expr)
         if compare(sourceMinHigh, sourceMinLow, minHigh, minLow) then
             ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Lt", expr,
-                self:constInt(ctx, value.ty, minHigh, minLow), S.Bool), "numeric-range"))
+                self:constInt(ctx, value.ty, minHigh, minLow), S.bool), "numeric-range"))
         end
         if compare(maxHigh, maxLow, sourceMaxHigh, sourceMaxLow) then
             ctx.builder:emit(ctx.body, Ir.Trap(ctx.builder:bin("Gt", expr,
-                self:constInt(ctx, value.ty, maxHigh, maxLow), S.Bool), "numeric-range"))
+                self:constInt(ctx, value.ty, maxHigh, maxLow), S.bool), "numeric-range"))
         end
         return k(m, V.runtime(ctx.builder:convert(expr, ty), ty))
     end)
@@ -4786,11 +4811,11 @@ function Eval:constInt(ctx, ty, high, low)
 end
 
 
--- An application. The callee is one step, and the three builtin spellings (`Slice`, `Ptr`, `Ref`) tail
--- into their own converted methods so a `Slice(x)` costs no frame of its own. The invocation is in tail
+-- An application. The callee is one step, and the three builtin spellings (`slice`, `ptr`, `ref`) tail
+-- into their own converted methods so a `slice(x)` costs no frame of its own. The invocation is in tail
 -- position when the call is the returned expression; callee and arguments never are.
--- An application. The callee is one step, and the three builtin spellings (`Slice`, `Ptr`, `Ref`) tail
--- into their own converted methods so a `Slice(x)` costs no frame of its own. The invocation is in tail
+-- An application. The callee is one step, and the three builtin spellings (`slice`, `ptr`, `ref`) tail
+-- into their own converted methods so a `slice(x)` costs no frame of its own. The invocation is in tail
 -- position when the call is the returned expression; callee and arguments never are.
 function Eval:evalApplyCPS(machine, ctx, expr, k)
     local tail = ctx.tail
@@ -4825,10 +4850,10 @@ function Eval:evalApplyCPS(machine, ctx, expr, k)
             ctx.tail = tail
             local tag = V.tag(callee)
             if tag == "type" then
-                -- `Unit()` is the Unit value (syntax.md §1). An integer or float type converts; any other
+                -- `unit()` is the unit value (syntax.md §1). An integer or float type converts; any other
                 -- type is not a call.
-                if callee.value == S.Unit then
-                    if #args ~= 0 then D.reject("arity", "Unit() takes no value", expr.span) end
+                if callee.value == S.unit then
+                    if #args ~= 0 then D.reject("arity", "unit() takes no value", expr.span) end
                     return k(m2, V.unit())
                 end
                 if callee.value:isInteger() or callee.value:isF64() then
@@ -4838,10 +4863,10 @@ function Eval:evalApplyCPS(machine, ctx, expr, k)
                     expr.callee.span)
             end
             if tag == "ctor" then
-                -- An alternative whose payload is not a record takes one positional argument; a Unit
+                -- An alternative whose payload is not a record takes one positional argument; a unit
                 -- alternative takes none.
-                if callee.caseType == S.Unit then
-                    if #args ~= 0 then D.reject("arity", "A Unit alternative takes no value", expr.span) end
+                if callee.caseType == S.unit then
+                    if #args ~= 0 then D.reject("arity", "A unit alternative takes no value", expr.span) end
                     return self:makeVariantCPS(m2, ctx, callee, nil, expr.span, k)
                 end
                 if #args ~= 1 then D.reject("arity", "A variant constructor takes one value", expr.span) end
@@ -4878,7 +4903,7 @@ function Eval:foreignInstanceCPS(machine, def, span, k)
             return self:declaredResultCPS(machine, def, sc, span, function(m, declared, requirements)
                 if not declared or next(requirements or {}) ~= nil then
                     D.reject("result-required", "Foreign word " .. def.name
-                        .. " needs a concrete result, as in `: U32`", span)
+                        .. " needs a concrete result, as in `: u32`", span)
                 end
                 for _, ty in ipairs(declared) do
                     if ty == false then
@@ -4887,9 +4912,9 @@ function Eval:foreignInstanceCPS(machine, def, span, k)
                     end
                     S.checkRuntime(ty, span)
                 end
-                -- A single `Unit` result is erased, exactly as a Wordlet result contract's Unit is:
+                -- A single `unit` result is erased, exactly as a Wordlet result contract's unit is:
                 -- there is no value to carry, and emitting one would declare a `void` variable.
-                if #declared == 1 and declared[1] == S.Unit then declared = {} end
+                if #declared == 1 and declared[1] == S.unit then declared = {} end
                 local instance = { target = def.symbol, def = def, foreign = true, inputPlan = plan,
                     inputTypes = types, inputs = inputs, results = declared }
                 self.foreigns.instances[def] = instance
@@ -5264,7 +5289,7 @@ end
 -- Builds the argument list from the instance's input plan.
 
 -- The call itself: a borrowed receiver becomes a place argument, every other input is materialised,
--- and the results come back as runtime values with the Unit slots reinserted.
+-- and the results come back as runtime values with the unit slots reinserted.
 function Eval:emitCallCPS(machine, ctx, instance, values, span, receiver, k)
     local builder = ctx.builder
     local args = {}
@@ -5510,7 +5535,7 @@ function Eval:constructInstanceCPS(machine, key, def, values, span, receiver, k)
                         "A callable argument with no known code needs a function-pointer ABI", param.span)
                 end
             else
-                -- `Type` and the other compile-time descriptors have no runtime representation, so a
+                -- `type` and the other compile-time descriptors have no runtime representation, so a
                 -- parameter of one has to be supplied statically; the static branch below binds it.
                 if not S.runtime(ty) then
                     if values[index] == nil or not V.isStatic(values[index]) then
@@ -5521,8 +5546,8 @@ function Eval:constructInstanceCPS(machine, key, def, values, span, receiver, k)
                     S.checkRuntime(ty, param.span)
                 end
             end
-            if ty == S.Unit then
-                -- Erased exactly like a Unit result: no input, no ABI slot, name bound directly.
+            if ty == S.unit then
+                -- Erased exactly like a unit result: no input, no ABI slot, name bound directly.
                 declare(sc, param.name.text, { kind = "value", name = param.name.text, value = V.unit() }, param.span)
                 goto continue
             end

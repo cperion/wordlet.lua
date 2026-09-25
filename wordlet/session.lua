@@ -26,7 +26,7 @@ function Session.new(options)
         types = {
             cells = {},       -- a named cell's sealed definition, keyed by the cell identity
             byMeaning = {},   -- S.encode(ty) -> the one named type with that structural meaning
-            referenced = {},  -- cells named through Ref/Ptr/Slice, which need emitting even when empty
+            referenced = {},  -- cells named through ref/ptr/slice, which need emitting even when empty
         },
 
         -- Occurrences: what one compilation builds, keyed by the identity that distinguishes it.

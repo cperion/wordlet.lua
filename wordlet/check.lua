@@ -223,7 +223,7 @@ function M.function_(fn, definitions, seeded)
                 -- A view binds a known callable's hidden prefix in a local adapter, or represents
                 -- pure code: an owned callable with an empty environment and no bound prefix.
                 if not stmt.type:isView() and not (stmt.type:isOwned()
-                    and S.environmentOf(stmt.type) == S.Unit) then
+                    and S.environmentOf(stmt.type) == S.unit) then
                     D.bug("ir-type", "View needs a view or an empty-environment callable type")
                 end
                 local target = definitions[stmt.entry]
@@ -261,9 +261,9 @@ function M.function_(fn, definitions, seeded)
                 end
                 local caseType = S.caseOf(stmt.type, stmt.tag)
                 if not caseType then D.bug("ir-type", "Sum type has no alternative " .. stmt.tag) end
-                if caseType == S.Unit then
+                if caseType == S.unit then
                     if stmt.payload then
-                        D.bug("ir-type", "A Unit alternative must not carry a payload")
+                        D.bug("ir-type", "A unit alternative must not carry a payload")
                     end
                 else
                     if not stmt.payload then
@@ -284,12 +284,12 @@ function M.function_(fn, definitions, seeded)
                 if visible[stmt.variant.id] ~= stmt.sum then
                     D.bug("ir-type", "VariantMatches tests a value that is not of that sum type")
                 end
-                bind(visible, stmt.value.id, S.Bool)
+                bind(visible, stmt.value.id, S.bool)
             elseif kind == "VariantPayload" then
                 local caseType = S.caseOf(stmt.sum, stmt.tag)
                 if not caseType then D.bug("ir-type", "Sum type has no alternative " .. stmt.tag) end
-                if caseType == S.Unit then
-                    D.bug("ir-type", "A Unit alternative has no payload to project")
+                if caseType == S.unit then
+                    D.bug("ir-type", "A unit alternative has no payload to project")
                 end
                 if visible[stmt.variant.id] ~= stmt.sum then
                     D.bug("ir-type", "VariantPayload projects a value that is not of that sum type")
@@ -360,10 +360,10 @@ function M.expr(expr, locals, storages)
             elseif expr.literal.value > S.maxOf(expr.type) then
                 D.bug("ir-literal", "A constant does not fit in its own width")
             end
-        elseif expr.type == S.F64 then
-            if expr.literal.kind ~= "Float" then D.bug("ir-literal", "F64 constant needs a Float literal") end
-        elseif expr.type == S.Bool then
-            if expr.literal.kind ~= "Boolean" then D.bug("ir-literal", "Bool constant needs a Boolean literal") end
+        elseif expr.type == S.f64 then
+            if expr.literal.kind ~= "Float" then D.bug("ir-literal", "f64 constant needs a Float literal") end
+        elseif expr.type == S.bool then
+            if expr.literal.kind ~= "Boolean" then D.bug("ir-literal", "bool constant needs a Boolean literal") end
         elseif expr.type:isSlice() then
             -- A byte slice is the one aggregate with a literal spelling, and its bytes are the
             -- constant. Any other element type has no literal, so a Str there is a compiler bug.
@@ -389,10 +389,10 @@ function M.expr(expr, locals, storages)
             if #expr.fields ~= 2 then D.bug("ir-arity", "A slice needs a data pointer and a length") end
             local data = M.expr(expr.fields[1], locals, storages)
             if not data:isRef() or data.target ~= expr.type.element then
-                D.bug("ir-type", "Slice data must be a reference to the element type")
+                D.bug("ir-type", "slice data must be a reference to the element type")
             end
-            if M.expr(expr.fields[2], locals, storages) ~= S.U32 then
-                D.bug("ir-type", "A slice length is a U32")
+            if M.expr(expr.fields[2], locals, storages) ~= S.u32 then
+                D.bug("ir-type", "A slice length is a u32")
             end
             return expr.type
         end
@@ -440,21 +440,21 @@ function M.expr(expr, locals, storages)
         if field ~= expr.type then D.bug("ir-type", "Get type does not match the field type") end
         return expr.type
     elseif kind == "Convert" then
-        -- A conversion is between integer widths, or between an integer and F64, and its type is what
+        -- A conversion is between integer widths, or between an integer and f64, and its type is what
         -- it converts to.
         local operand = M.expr(expr.operand, locals, storages)
         if not ((operand:isInteger() and expr.type:isInteger())
             or (operand:isF64() ~= expr.type:isF64())) then
-            D.bug("ir-type", "Convert needs two integer widths, or one integer and F64")
+            D.bug("ir-type", "Convert needs two integer widths, or one integer and f64")
         end
         return expr.type
     elseif kind == "Un" then
         local operand = M.expr(expr.operand, locals, storages)
         local op = expr.op.kind
         if op == "Not" then
-            if operand ~= S.Bool or expr.type ~= S.Bool then D.bug("ir-type", "Not requires Bool") end
+            if operand ~= S.bool or expr.type ~= S.bool then D.bug("ir-type", "Not requires bool") end
         elseif op == "Neg" or op == "BitNot" then
-            -- F64 has negation but no complement: IEEE defines no bitwise operation on a double.
+            -- f64 has negation but no complement: IEEE defines no bitwise operation on a double.
             local doubleNegation = op == "Neg" and operand:isF64() and operand == expr.type
             if not doubleNegation and (not operand:isInteger() or operand ~= expr.type) then
                 D.bug("ir-type", "Unary " .. op .. " requires one integer width")
@@ -470,38 +470,38 @@ function M.expr(expr, locals, storages)
         local arithmetic = { Add = true, Sub = true, Mul = true, Div = true, Rem = true, Pow = true,
             BitAnd = true, BitOr = true, BitXor = true }
         if arithmetic[op] then
-            -- F64 is one type on both sides too, but it has no remainder and no power: IEEE puts
+            -- f64 is one type on both sides too, but it has no remainder and no power: IEEE puts
             -- those outside the arithmetic operators rather than making them a rounding question.
             if not (left:isInteger() or left:isF64()) or left ~= right or expr.type ~= left then
-                D.bug("ir-type", "Arithmetic " .. op .. " requires one integer width or F64 on both sides")
+                D.bug("ir-type", "Arithmetic " .. op .. " requires one integer width or f64 on both sides")
             end
             if left:isF64() and op ~= "Add" and op ~= "Sub" and op ~= "Mul" and op ~= "Div" then
-                D.bug("ir-op", "F64 has no " .. op .. " operator")
+                D.bug("ir-op", "f64 has no " .. op .. " operator")
             end
         elseif op == "Shl" or op == "Shr" then
-            -- The amount is a plain U32; the value keeps its own width.
-            if not left:isInteger() or right ~= S.U32 or expr.type ~= left then
-                D.bug("ir-type", "A shift needs an integer value and a U32 amount")
+            -- The amount is a plain u32; the value keeps its own width.
+            if not left:isInteger() or right ~= S.u32 or expr.type ~= left then
+                D.bug("ir-type", "A shift needs an integer value and a u32 amount")
             end
         elseif op == "Eq" or op == "Ne" then
-            if left ~= right or expr.type ~= S.Bool then D.bug("ir-type", "Equality requires matching types") end
+            if left ~= right or expr.type ~= S.bool then D.bug("ir-type", "Equality requires matching types") end
         elseif op == "Lt" or op == "Le" or op == "Gt" or op == "Ge" then
-            -- F64 orders as IEEE does, which is what C's operators already implement.
-            if not (left:isInteger() or left:isF64()) or left ~= right or expr.type ~= S.Bool then
-                D.bug("ir-type", "Ordering requires two integers or two F64 values")
+            -- f64 orders as IEEE does, which is what C's operators already implement.
+            if not (left:isInteger() or left:isF64()) or left ~= right or expr.type ~= S.bool then
+                D.bug("ir-type", "Ordering requires two integers or two f64 values")
             end
         else
             D.bug("ir-op", "Unknown binary operation " .. tostring(op))
         end
         return expr.type
     elseif kind == "Null" then
-        -- The null pointer of a Ptr type, and of nothing else: there is no null reference.
-        if not expr.type:isPtr() then D.bug("ir-type", "Null needs a Ptr type") end
+        -- The null pointer of a ptr type, and of nothing else: there is no null reference.
+        if not expr.type:isPtr() then D.bug("ir-type", "null needs a ptr type") end
         return expr.type
     elseif kind == "SliceLength" then
         local view = S.environmentOf(M.expr(expr.view, locals, storages))
         if not view:isSlice() then D.bug("ir-type", "SliceLength needs a slice view") end
-        if expr.type ~= S.U32 then D.bug("ir-type", "A slice length is a U32") end
+        if expr.type ~= S.u32 then D.bug("ir-type", "A slice length is a u32") end
         return expr.type
     end
     D.bug("ir-expr", "Unknown expression variant " .. tostring(kind))
@@ -512,12 +512,12 @@ function M.place(place, storages, locals)
     local kind = place.kind
     if kind == "Index" then
         -- The element type is recorded on the node, so the base only has to be an array of it and the
-        -- index has to be a U32.
+        -- index has to be a u32.
         local base = M.place(place.base, storages, locals)
         if not base:isArray() then D.bug("ir-place", "Index needs an array base") end
         if base.element ~= place.type then D.bug("ir-type", "Index element type does not match") end
-        if M.expr(place.index, locals, storages) ~= S.U32 then
-            D.bug("ir-type", "Index needs a U32 index")
+        if M.expr(place.index, locals, storages) ~= S.u32 then
+            D.bug("ir-type", "Index needs a u32 index")
         end
         return place.type
     end
@@ -553,21 +553,21 @@ function M.place(place, storages, locals)
         -- two are checked for shape, not compared by identity.
         local view = S.environmentOf(M.expr(place.view, locals, storages))
         if not view:isPtr() then D.bug("ir-place", "PtrIndex needs a pointer view") end
-        if M.expr(place.index, locals, storages) ~= S.U32 then
-            D.bug("ir-type", "PtrIndex needs a U32 index")
+        if M.expr(place.index, locals, storages) ~= S.u32 then
+            D.bug("ir-type", "PtrIndex needs a u32 index")
         end
         return place.type
     end
     if kind == "SliceIndex" then
         -- The view is a value rather than a place, so its type is checked like any expression;
-        -- the element type is recorded on the node and the index has to be a U32.
+        -- the element type is recorded on the node and the index has to be a u32.
         local view = S.environmentOf(M.expr(place.view, locals, storages))
         if not view:isSlice() then D.bug("ir-place", "SliceIndex needs a slice view") end
         if view.element ~= place.type then
             D.bug("ir-type", "SliceIndex element type does not match the view")
         end
-        if M.expr(place.index, locals, storages) ~= S.U32 then
-            D.bug("ir-type", "SliceIndex needs a U32 index")
+        if M.expr(place.index, locals, storages) ~= S.u32 then
+            D.bug("ir-type", "SliceIndex needs a u32 index")
         end
         return place.type
     end

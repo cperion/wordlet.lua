@@ -101,7 +101,7 @@ function Parser:expression()
         D.reject("parse", "A signature is written '(inputs): results'", self:peek().span)
     end
     if self:at(":") then
-        D.reject("parse", "Signature inputs must be parenthesized: '(U32): U32'", self:peek().span)
+        D.reject("parse", "Signature inputs must be parenthesized: '(u32): u32'", self:peek().span)
     end
     if self:at("->") then
         D.reject("parse", "'->' introduces a lambda body; a signature is written '(inputs): results'",
@@ -160,10 +160,11 @@ function Parser:postfix()
             local args = self:argumentList()
             expr = A.c.Apply(expr, args, mergeSpan(expr.span, spanOf(args)))
         elseif self:at("{") then
-            -- A keyed definition -- `name: Type`, or a method -- is a schema, and attaching it to a
-            -- word supplies that word's keyed requirement: `OneOf { circle: Circle }` is
-            -- `OneOf({ circle: Circle })`. `name = value` is a keyed supply, which constructs or
-            -- specializes. The entry separator decides which, so the two forms never mix.
+            -- A keyed definition -- `name: type`, or a method -- is a schema, and attaching it to a
+            -- word supplies that word's keyed requirement: `oneof { circle: circle_shape }` is the
+            -- keyed spelling of `oneof({ circle: circle_shape })`. `name = value` is a keyed supply,
+            -- which constructs or specializes. The entry separator decides which, so the two forms
+            -- never mix.
             local first, after = self:peek(1), self:peek(2)
             if first.kind == "name" and (after.text == ":" or after.text == "(") then
                 local schema = self:schema()
@@ -404,7 +405,7 @@ function Parser:declaration()
         self:expect("(")
         local params = self:parameters(")", true)
         self:expect(")")
-        self:expect(":", "a result declaration such as `: U32`, because a foreign word has no body")
+        self:expect(":", "a result declaration such as `: u32`, because a foreign word has no body")
         local result = self:resultSpec()
         local def = A.c.ForeignDef(A.name(name), params, result)
         return A.c.ForeignDecl(def, mergeSpan(first.span, spanOf(result) or name.span))
@@ -464,7 +465,7 @@ function Parser:definitionBody(name, params, keyed)
     return A.c.WordDef(name, params, keyed, result, self:body())
 end
 
--- `{ name: Type, ... }`: a word's keyed requirements, in the form a schema literal uses. A word
+-- `{ name: type, ... }`: a word's keyed requirements, in the form a schema literal uses. A word
 -- definition writes them after its name; the same braces with `=` supply them at a call site.
 function Parser:keyedParameters()
     local open = self:expect("{")
@@ -604,8 +605,8 @@ function Parser:ifStatement()
     return A.c.IfStmt(test, yes, no, mergeSpan(open.span, close.span))
 end
 
--- A bare `return` denotes one Unit result, not zero results (syntax.md §6). A `;` spells the same
--- thing explicitly, which is how a Unit return before an expression statement is written
+-- A bare `return` denotes one unit result, not zero results (syntax.md §6). A `;` spells the same
+-- thing explicitly, which is how a unit return before an expression statement is written
 -- (syntax.md §1); that following statement is unreachable and is rejected by the statement list.
 function Parser:returnStatement()
     local open = self:expect("return")

@@ -39,7 +39,7 @@ local ok, err = xpcall(function()
     local project = temp .. "/project with ' quote"
     for _, path in ipairs({"vendor", "tools", "tests", "wordletkit", "wordlet", "examples", "wordletkit.lua", "bundle-manifest.lua",
         "README.md", "AGENTS.md", "architecture.md", "syntax.md", "GUIDE.md", "interfaces.md", "ast.asdl", "ir.asdl",
-        "ASDL.md", "U32.md", "U64.md", "THIRD_PARTY.md", "VALIDATION.md", "lambda-investigation.md", "LICENSE", ".gitignore"}) do        command("cp -R -- " .. q(root .. path) .. " " .. q(project .. "/"))
+        "ASDL.md", "u32.md", "u64.md", "THIRD_PARTY.md", "VALIDATION.md", "lambda-investigation.md", "LICENSE", ".gitignore"}) do        command("cp -R -- " .. q(root .. path) .. " " .. q(project .. "/"))
     end
     -- The optional profiler uses only the copied project, even when invoked from another cwd.
     command("cd " .. q(temp) .. " && timeout 15s " .. lua .. " "
@@ -59,7 +59,7 @@ local ok, err = xpcall(function()
         "the syntax document must lead the generated file")
     write(temp .. "/isolated.lua", first)
     -- The shipped bundle is the compiler itself: compile and interpret a program with no source tree.
-    local program = [==[let affine(a, b, x: U32) : U32 = a * x + b
+    local program = [==[let affine(a, b, x: u32) : u32 = a * x + b
 return { functions = { affine } }]==]
     write(temp .. "/program.let", program)
     run([[package.path=''; package.cpath=''; local w=assert(loadfile('isolated.lua'))();

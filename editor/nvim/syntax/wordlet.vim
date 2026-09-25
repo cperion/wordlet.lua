@@ -61,9 +61,9 @@ syn match wordletSection  "\%(types\|functions\|results\)\ze[ \t]*=" contained
 " Predefined words -------------------------------------------------------------
 " Bindings the language provides, not user types. The constructors are `Special`
 " so they read differently from the type names a program declares, and because a
-" constructor is a word the program applies: OneOf({...}), Array(T, N), Ref(x).
-syn keyword wordletType        U8 U16 U32 I32 U64 I64 F64 Bool Unit Type
-syn keyword wordletConstructor String OneOf Ref Array Slice Ptr Null
+" constructor is a word the program applies: oneof {...}, array(T, N), ref(x).
+syn keyword wordletType        u8 u16 u32 i32 u64 i64 f64 bool unit type
+syn keyword wordletConstructor string oneof ref array slice ptr null
 
 " Reserved words, each by role -------------------------------------------------
 " `extern let name(...)`: after `extern` the `let` keyword does the nextgroup.
@@ -100,8 +100,8 @@ if s:heuristics
   syn match wordletKey "\<[A-Za-z_]\w*\ze\s*:"
 
   " A word applied to arguments: a call or a method definition. The predefined
-  " type constructors are keywords and win at the same column, so Array(, Ref(
-  " and OneOf( stay constructors.
+  " type constructors are keywords and win at the same column, so array( and ref(
+  " stay constructors.
   syn match wordletWord "\<[A-Za-z_]\w*\ze\s*("
 endif
 
@@ -159,9 +159,9 @@ hi def link wordletStatement       Statement
 hi def link wordletConditional     Conditional
 hi def link wordletOperator        Operator
 hi def link wordletBoolean         Boolean
-hi def link wordletType            Type
+hi def link wordletType            type
 hi def link wordletConstructor     Special
-hi def link wordletTypeName        Type
+hi def link wordletTypeName        type
 hi def link wordletWord            Function
 hi def link wordletWordDef         Function
 hi def link wordletBinding         Identifier
@@ -172,7 +172,7 @@ hi def link wordletInclude         Include
 hi def link wordletDelimiter       Delimiter
 hi def link wordletNumber          Number
 hi def link wordletFloat           Float
-hi def link wordletString          String
+hi def link wordletString          string
 hi def link wordletStringDelimiter Delimiter
 hi def link wordletByte            Character
 hi def link wordletEscape          SpecialChar

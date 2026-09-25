@@ -10,31 +10,31 @@
 --
 -- Expected: main() = 7
 
-let Op = OneOf({ push: U32, add: Unit, halt: Unit })
+let op = oneof { push: u32, add: unit, halt: unit }
 
-let run(code: Ptr(Op), pc: U32, stack: Ptr(U32), sp: U32): U32 = do
+let run(code: ptr(op), pc: u32, stack: ptr(u32), sp: u32): u32 = do
   let op = code[pc]
   let npc, nsp, done = op {
-    push = |value: U32| -> do
+    push = |value: u32| -> do
       stack[sp] = value
       return pc + 1, sp + 1, false
     end,
-    add = |unit: Unit| -> do
+    add = |unit: unit| -> do
       let right = stack[sp - 1]
       let left = stack[sp - 2]
       stack[sp - 2] = left + right
       return pc + 1, sp - 1, false
     end,
-    halt = |unit: Unit| -> do return pc, sp, true end,
+    halt = |unit: unit| -> do return pc, sp, true end,
   }
   if done then return stack[sp - 1] end
   return run(code, npc, stack, nsp)
 end
 
-let main(): U32 = do
-  let code = [Op.push(3), Op.push(4), Op.add(), Op.halt()]
+let main(): u32 = do
+  let code = [op.push(3), op.push(4), op.add(), op.halt()]
   let stack = [0, 0, 0, 0]
-  return run(Ptr(code[0]), 0, Ptr(stack[0]), 0)
+  return run(ptr(code[0]), 0, ptr(stack[0]), 0)
 end
 
 return { functions = { main } }

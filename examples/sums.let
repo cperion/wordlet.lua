@@ -1,7 +1,7 @@
 -- Sum types: one keyed schema of alternatives, constructed by member selection and consumed by
 -- exhaustive keyed application. Nothing here needs new surface syntax.
 --
--- area takes its Shape at run time, so its match becomes a C tag test with the payload projected
+-- area takes its shape at run time, so its match becomes a C tag test with the payload projected
 -- inside each arm; area_of_circle and area_of_round build a known tag, so their match is resolved
 -- while compiling and only the handler for that alternative is elaborated.
 --
@@ -11,40 +11,40 @@
 --           scaled(3)         = 36   (a rectangle 3 wide and 12 high)
 --           total(0)          = 6    (a rectangle 2 wide and 3 high)
 --           total(4)          = 16   (a circle of radius 4)
---           unwrap_or(0, 9)   = 9    (the Unit alternative supplies the fallback)
+--           unwrap_or(0, 9)   = 9    (the unit alternative supplies the fallback)
 --           unwrap_or(4, 9)   = 4
 
-let Circle = { radius: U32 }
-let Rect = { width: U32, height: U32 }
+let circle = { radius: u32 }
+let rect = { width: u32, height: u32 }
 
-let Shape = OneOf { circle: Circle, rect: Rect }
+let shape = oneof { circle: circle, rect: rect }
 
 -- One handler per alternative. The payload arrives as that handler argument.
-let area(s: Shape): U32 = s {
-  circle = |c: Circle| -> c.radius * c.radius,
-  rect = |r: Rect| -> r.width * r.height,
+let area(s: shape): u32 = s {
+  circle = |c: circle| -> c.radius * c.radius,
+  rect = |r: rect| -> r.width * r.height,
 }
 
-let round(radius: U32): Shape = Shape.circle { radius = radius }
-let box(width: U32, height: U32): Shape = Shape.rect { width = width, height = height }
+let round(radius: u32): shape = shape.circle { radius = radius }
+let box(width: u32, height: u32): shape = shape.rect { width = width, height = height }
 
-let area_of_circle(radius: U32): U32 = area(Shape.circle { radius = radius })
-let area_of_round(radius: U32): U32 = area(round(radius))
-let area_of_box(width: U32): U32 = area(box(width, 3))
+let area_of_circle(radius: u32): u32 = area(shape.circle { radius = radius })
+let area_of_round(radius: u32): u32 = area(round(radius))
+let area_of_box(width: u32): u32 = area(box(width, 3))
 
 -- An alternative chosen by a run-time condition is still matched exhaustively.
-let scaled(n: U32): U32 = area(if n == 0 then box(n + 2, 3) else box(n, n * 4))
-let total(n: U32): U32 = area(if n == 0 then box(n + 2, 3) else round(n))
+let scaled(n: u32): u32 = area(if n == 0 then box(n + 2, 3) else box(n, n * 4))
+let total(n: u32): u32 = area(if n == 0 then box(n + 2, 3) else round(n))
 
--- A Unit alternative carries no payload, so its handler receives nothing to use.
-let Opt = OneOf { none: Unit, some: U32 }
-let or_else(o: Opt, fallback: U32): U32 = o {
-  none = |absent: Unit| -> fallback,
-  some = |present: U32| -> present,
+-- A unit alternative carries no payload, so its handler receives nothing to use.
+let opt = oneof { none: unit, some: u32 }
+let or_else(o: opt, fallback: u32): u32 = o {
+  none = |absent: unit| -> fallback,
+  some = |present: u32| -> present,
 }
-let unwrap_or(n: U32, fallback: U32): U32 = or_else(if n == 0 then Opt.none() else Opt.some(n), fallback)
+let unwrap_or(n: u32, fallback: u32): u32 = or_else(if n == 0 then opt.none() else opt.some(n), fallback)
 
 return {
-  types = { Circle, Rect, Shape, Opt },
+  types = { circle, rect, shape, opt },
   functions = { area, round, box, area_of_circle, area_of_round, area_of_box, scaled, total, unwrap_or },
 }

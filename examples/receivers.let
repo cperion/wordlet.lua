@@ -1,11 +1,11 @@
-let Counter = {
-  value: U32,
-  inc() : U32 = do value += 1  return value end,
+let counter = {
+  value: u32,
+  inc() : u32 = do value += 1  return value end,
 }
-let observe(n: U32, change: Bool) : (U32, U32) = do
-  let c = Counter { value = n }
+let observe(n: u32, change: bool) : (u32, u32) = do
+  let c = counter { value = n }
   let old = c.value
   if change then c.inc() end
   return old, c.value
 end
-return { types = { Counter }, functions = { observe } }
+return { types = { counter }, functions = { observe } }

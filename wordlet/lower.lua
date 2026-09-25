@@ -378,7 +378,7 @@ function Emitter:placeC(place)
         return "(*(" .. self:placeC(place.base) .. "))"
     end
     if place.kind == "Index" then
-        -- Elements live in the array member, and the index expression is a plain U32 value.
+        -- Elements live in the array member, and the index expression is a plain u32 value.
         return self:placeC(place.base) .. ".f_data[" .. self:expr(place.index) .. "]"
     end
     if place.kind == "PtrIndex" then
@@ -481,7 +481,7 @@ function Emitter:statements(list)
         elseif kind == "VariantMatches" then
             if not (self.inline and self.inline[stmt.value.id]) then
                 local tag = S.tagIndex(stmt.sum, stmt.tag)
-                self:declare(S.Bool, self:value(stmt.value.id),
+                self:declare(S.bool, self:value(stmt.value.id),
                     "(" .. self:valueOrInline(stmt.variant.id) .. ".wordlet_tag == " .. tag .. ")")
             end
         elseif kind == "VariantPayload" then
@@ -681,7 +681,7 @@ function Emitter:makeView(stmt)
     if self.unit then self.unit.requireRoot(stmt.entry) end
     local types = stmt.type
     -- Either an erased callable view, or pure code: an owned callable with an empty environment.
-    if not types:isView() and not (types:isOwned() and S.environmentOf(types) == S.Unit) then
+    if not types:isView() and not (types:isOwned() and S.environmentOf(types) == S.unit) then
         D.bug("c-view", "View needs a view type or an empty-environment callable type")
     end
     local layout = self.layouts.viewLayout(types)
@@ -766,7 +766,7 @@ function M.typeDeclarations(layouts)
         return entry
     end
     local function typeName(ty)
-        if ty == S.Unit then return "void" end
+        if ty == S.unit then return "void" end
         return layouts:cType(ty)
     end
     local function defineAggregate(layout, fields, isTag)
@@ -807,7 +807,7 @@ function M.typeDeclarations(layouts)
         -- Needs are recorded by name and resolved when emitting, because discovery order does not
         -- decide definition order.
         for _, field in ipairs(fields) do
-            if field.type ~= S.Unit then entry.needs[#entry.needs + 1] = layouts:cType(field.type) end
+            if field.type ~= S.unit then entry.needs[#entry.needs + 1] = layouts:cType(field.type) end
         end
         return entry
     end
@@ -861,7 +861,7 @@ function M.typeDeclarations(layouts)
             if param.type then typeName(param.type) end
         end
         for _, ty in ipairs(types) do
-            if ty ~= S.Unit then entry.needs[#entry.needs + 1] = typeName(ty) end
+            if ty ~= S.unit then entry.needs[#entry.needs + 1] = typeName(ty) end
         end
         return entry
     end
@@ -882,7 +882,7 @@ function M.typeDeclarations(layouts)
                 .. table.concat(fields, "\n") .. "\n};"
         end)
         for _, field in ipairs(adapter.bound) do
-            if not field.pointer and field.type ~= S.Unit then
+            if not field.pointer and field.type ~= S.unit then
                 entry.needs[#entry.needs + 1] = layouts:cType(field.type)
             end
         end
@@ -1005,7 +1005,7 @@ function M.prelude(layouts)
     if layouts.usesstreq then
         -- Two byte strings are equal when their lengths match and their bytes match. Testing the
         -- length first means an unequal pair never reads either buffer.
-        local layout = layouts.sliceLayout(S.String)
+        local layout = layouts.sliceLayout(S.string)
         lines[#lines + 1] = "static bool wordlet_streq(" .. layout.name .. " a, " .. layout.name .. " b) {"
         lines[#lines + 1] = "    if (a.f_length != b.f_length) return false;"
         lines[#lines + 1] = "    return a.f_length == UINT32_C(0) || memcmp(a.f_data, b.f_data, a.f_length) == 0;"

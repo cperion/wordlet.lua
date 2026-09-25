@@ -90,7 +90,7 @@ local function walkFunction(fn, visitor)
     for _, param in ipairs(fn.params) do Walk.walk(param, visitor) end
     for _, stmt in ipairs(fn.body) do Walk.walk(stmt, visitor) end
 end
-local function scalar(ty) return ty and (ty:isInteger() or ty == S.Bool or ty == S.F64) end
+local function scalar(ty) return ty and (ty:isInteger() or ty == S.bool or ty == S.f64) end
 local SCALAR_STMTS = {Let=true, Var=true, Read=true, Store=true, Call=true, If=true,
     Switch=true, Loop=true, Next=true, Trap=true, Return=true,
     ConstructVariant=true, VariantMatches=true, VariantPayload=true}

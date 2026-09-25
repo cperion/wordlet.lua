@@ -9,25 +9,25 @@
 --           scaled(true, 5) = 11     scaled(false, 5) = 4
 --           across(true, 4) = 5      across(false, 4) = 12
 
-let inc(x: U32): U32 = x + 1
-let dec(x: U32): U32 = x - 1
+let inc(x: u32): u32 = x + 1
+let dec(x: u32): u32 = x - 1
 
 -- Two named words: no environment, one tag each.
-let pick(c: Bool): U32 = do
+let pick(c: bool): u32 = do
   let f = if c then inc else dec
   return f(10)
 end
 
 -- Two lambdas that capture the same shape but differ in code, so each arm carries its environment.
-let scaled(c: Bool, x: U32): U32 = do
-  let f = if c then |y: U32| -> y + x else |y: U32| -> y * 2
+let scaled(c: bool, x: u32): u32 = do
+  let f = if c then |y: u32| -> y + x else |y: u32| -> y * 2
   return f(f(1))
 end
 
 -- A tagged callable whose tag is only known at the call site. An unannotated result infers the
 -- tagged type, so the value crosses a call boundary intact.
-let mk(c: Bool) = if c then inc else |y: U32| -> y * 3
-let across(c: Bool, x: U32): U32 = do
+let mk(c: bool) = if c then inc else |y: u32| -> y * 3
+let across(c: bool, x: u32): u32 = do
   let f = mk(c)
   return f(x)
 end

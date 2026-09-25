@@ -92,7 +92,7 @@ function M.close(compilation)
         for _, field in ipairs(ty.fields) do
             layout.fields[#layout.fields + 1] = { name = "f_" .. M.escape(field.name), type = field.type }
             -- Name nested field types too, so their declarations precede this struct.
-            if S.runtime(field.type) and field.type ~= S.Unit then
+            if S.runtime(field.type) and field.type ~= S.unit then
                 layouts:cType(field.type)
             end
         end
@@ -116,7 +116,7 @@ function M.close(compilation)
 
     -- A slice is a pointer and a length. The pointer member is what keeps a slice finite even when
     -- its element type is recursive: the element's layout is named, but a pointer to an incomplete
-    -- type is a complete type, so `Slice(Node)` inside `Node` is a legal layout.
+    -- type is a complete type, so `slice(node)` inside `node` is a legal layout.
     local function sliceLayout(ty)
         local existing = layouts.slices.index[ty]
         if existing then return existing end
@@ -141,7 +141,7 @@ function M.close(compilation)
         for index, field in ipairs(S.alternatives(ty)) do
             layout.cases[#layout.cases + 1] = { name = "f_" .. M.escape(field.name), type = field.type,
                 tag = index - 1 }
-            if field.type ~= S.Unit and S.runtime(field.type) then layouts:cType(field.type) end
+            if field.type ~= S.unit and S.runtime(field.type) then layouts:cType(field.type) end
         end
         return layout
     end
@@ -152,7 +152,7 @@ function M.close(compilation)
     local function resultLayout(results)
         if #results == 0 then return { kind = "void" } end
         if #results == 1 then
-            if results[1] == S.Unit then return { kind = "void", unit = true } end
+            if results[1] == S.unit then return { kind = "void", unit = true } end
             return { kind = "scalar", type = results[1] }
         end
         local key = S.encode(S.list(results))
@@ -246,36 +246,36 @@ function M.close(compilation)
             -- A pointer to a target, so the target needs a declaration but not a definition here.
             return layouts:cType(ty.target) .. " *"
         end
-        if ty == S.F64 then
+        if ty == S.f64 then
             -- The host's own double, so the arithmetic below the boundary is IEEE-754 exactly.
             layouts.usesFloat = true
             return "double"
         end
-        if ty == S.U32 then return "uint32_t" end
-        if ty == S.U8 then return "uint8_t" end
-        if ty == S.U16 then return "uint16_t" end
-        if ty == S.U64 then
+        if ty == S.u32 then return "uint32_t" end
+        if ty == S.u8 then return "uint8_t" end
+        if ty == S.u16 then return "uint16_t" end
+        if ty == S.u64 then
             layouts.usesWide = true
             return "uint64_t"
         end
-        if ty == S.I64 then
+        if ty == S.i64 then
             layouts.usesWide = true
             layouts.usesSigned64 = true
             return "int64_t"
         end
-        if ty == S.I32 then
+        if ty == S.i32 then
             -- The unit needs the signed helpers, which reinterpret rather than rely on the
             -- implementation's conversion of an out-of-range value.
             layouts.usesSigned = true
             return "int32_t"
         end
-        if ty == S.Bool then
+        if ty == S.bool then
             layouts.usesBool = true
             return "bool"
         end
-        if ty == S.Unit then return "void" end
+        if ty == S.unit then return "void" end
         if ty:isView() then return viewLayout(ty).name end
-        if ty:isOwned() and S.environmentOf(ty) ~= S.Unit then return layouts:cType(ty.environment) end
+        if ty:isOwned() and S.environmentOf(ty) ~= S.unit then return layouts:cType(ty.environment) end
         if ty:isOwned() then return viewLayout(ty).name end
         if ty:isRecord() then return recordLayout(ty).name end
         if ty:isArray() then return arrayLayout(ty).name end
@@ -306,7 +306,7 @@ function M.close(compilation)
         local params, placeParams = {}, {}
         for _, param in ipairs(fn.params) do
             if param.kind == "ValueParam" then
-                -- The C parameter is named after the SSA value so Ref() lowers directly, and the
+                -- The C parameter is named after the SSA value so ref() lowers directly, and the
                 -- binding it names is recorded so the emitter can ask the IR whether the body uses it.
                 params[#params + 1] = { name = "v" .. param.binding.id, type = param.type,
                     input = param.input, binding = param.binding.id }

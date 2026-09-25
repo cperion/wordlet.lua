@@ -43,8 +43,8 @@ keyword/type/function/identifier one. Its core is the *word*: a word with ordere
 or keyed requirements, an optional result contract and an optional terminal. A
 signature is a word with no implementation; a record schema is a word with keyed
 requirements and an intrinsic construction terminal; a method is a word with an
-implicitly bound receiver. Types are ordinary words too — `Ref(T)`, `Array(T, N)`,
-`OneOf({...})` — and a type expression is an expression. See `syntax.md` and
+implicitly bound receiver. Types are ordinary words too — `ref(T)`, `array(T, N)`,
+`oneof {...}` — and a type expression is an expression. See `syntax.md` and
 `ast.asdl`.
 
 Two invariants decide every rule.
@@ -69,10 +69,10 @@ Two invariants decide every rule.
 | `do` `end` `return` `defer` | `Statement` | statement and block forms |
 | `if` `then` `else` | `Conditional` | control |
 | `and` `or` `not` | `Operator` | logical operators |
-| `true` `false` | `Boolean` | Bool literals |
-| `U8`..`F64` `Bool` `Unit` `Type` | `Type` | predefined type bindings |
-| `OneOf` `Ref` `Array` `Slice` `Ptr` `Null` `String` | `Special` | predefined constructor words, kept distinct from the type names a program declares |
-| name after `:` | `Type` | annotation, parameter requirement, result or schema-field type |
+| `true` `false` | `Boolean` | bool literals |
+| `u8`..`f64` `bool` `unit` `type` | `type` | predefined type bindings |
+| `oneof` `ref` `array` `slice` `ptr` `null` `string` | `Special` | predefined constructor words, kept distinct from the type names a program declares |
+| name after `:` | `type` | annotation, parameter requirement, result or schema-field type |
 | word definition and call, method | `Function` | executable words |
 | `let` binder | `Identifier` | a bound name |
 | name before `:` | `Identifier` | a keyed requirement (parameter or schema field) |
@@ -81,16 +81,16 @@ Two invariants decide every rule.
 | `use <dotted name>` | `Include` | module import, like Vim's `Include` |
 | `+` `-` `*` `/` `%` `^` `&` `\|` `<<` `>>` `->` `=` `==` … | `Operator` | `\|` is one token in both its lambda and its bitwise role, so it is one group |
 | `(` `)` `{` `}` `[` `]` `,` `;` `:` `.` | `Delimiter` | structure |
-| integers, floats, strings, bytes | `Number` `Float` `String` `Character` | |
+| integers, floats, strings, bytes | `Number` `Float` `string` `Character` | |
 
 ### Why `Special` for constructors
 
 They are the one place where a language-provided name and a user-declared name
-must not look alike. `Type`, `Structure`, `Typedef`, `Constant`, `Keyword` and
+must not look alike. `type`, `Structure`, `Typedef`, `Constant`, `Keyword` and
 `StorageClass` all resolve to the same default colour, so any of them would be
-indistinguishable from `Type`; `Special` does not. It is also honest to Wordlet's
-model: a constructor is a word the program applies (`OneOf({...})`, `Array(T, N)`,
-`Ref(x)`), so sharing the applied-word colour is not a lie.
+indistinguishable from `type`; `Special` does not. It is also honest to Wordlet's
+model: a constructor is a word the program applies (`oneof {...}`, `array(T, N)`,
+`ref(x)`), so sharing the applied-word colour is not a lie.
 
 If you prefer a different default, relink it:
 
@@ -107,7 +107,7 @@ sparse highlighting:
 - `Exception` — no exceptions; `defer` is a statement, not `finally`.
 - `Label` — no `goto` or `case`; the export sections are keys, not labels.
 - `Structure`, `Typedef` — no `struct` or `typedef` keyword. Rust maps its own to
-  `Keyword`/`Type` for the same reason.
+  `Keyword`/`type` for the same reason.
 - `PreProc`, `Define`, `Macro` — no preprocessor.
 - `Debug`, `Underlined`, `Title`, `Tag` — nothing to attach them to.
 
@@ -129,12 +129,12 @@ with two matching groups keeps the later one.
 - `Point { ... }` (schema construction) vs `value { ... }` (a match on a sum
   value): the base name is not classified.
 - a signature input list `(T): U` cannot be told from a parameter list
-  `(x: T) : U` by `)` alone, so only names after `:` are marked `Type`.
-- `Ref(x)`, `Ptr(x)` and `Slice(x)` take a type or a place depending on the
+  `(x: T) : U` by `)` alone, so only names after `:` are marked `type`.
+- `ref(x)`, `ptr(x)` and `slice(x)` take a type or a place depending on the
   resolver, so their argument is not guessed; nor is a user element type inside
-  `Array(T, N)` (the predefined ones are keywords anyway).
+  `array(T, N)` (the predefined ones are keywords anyway).
 - bare parameters that share a later annotation, as `a` and `b` in
-  `(a, b, x: U32)`, have no local marker and stay default.
+  `(a, b, x: u32)`, have no local marker and stay default.
 - a word bound to a lambda or a partial application, as
   `let next32 = xorshift(13, 17, 5)`, is a binder at its definition and a
   `Function` at its call site; only the resolver knows the binding denotes code.

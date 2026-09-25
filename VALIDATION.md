@@ -7,7 +7,7 @@ timeout --kill-after=2s 180s luajit tests/run.lua
 ```
 
 The runner verifies ASDL interning/type checks, non-interned occurrences, actual copied-method
-behavior, corrected List equality selectors, and concrete U32 arithmetic against edge cases and an
+behavior, corrected List equality selectors, and concrete u32 arithmetic against edge cases and an
 independent bit-serial multiplication reference. It copies this project's declared files to a
 temporary path containing spaces and a quote, then builds there from another working directory.
 It compares repeated bundle bytes, checks that the generated ASDL and syntax-reference modules match
@@ -27,6 +27,25 @@ bundle or ASDL constructor check alone is not a parser/evaluator/C correctness c
 suites are what make that claim. Tests need POSIX tools and a C11 compiler; they are not a sandbox
 for untrusted module source or manifest code.
 
+## The primitive vocabulary is lowercase and reserved
+
+Wordlet spells its own words in lowercase and has no second, capitalized spelling of any: the
+primitive types `u8`, `u16`, `u32`, `u64`, `i32`, `i64`, `f64`, `bool`, `unit` and `type`, the byte
+slice `string`, and the type constructors `oneof`, `ref`, `array`, `slice`, `ptr` and `null`. Those
+names live in `ir.asdl`'s `Ty` module, so `S.encode`/`S.display` -- and therefore every diagnostic --
+print the same spelling the source writes. Program-defined names are lowercase `snake_case`
+(`GUIDE.md` section 3); capitalization carries no category in either direction.
+
+A module-level `let`, `extern` or word declaration may not bind a predefined word (`reserved`,
+`wordlet/eval.lua`); a local binding may shadow one like any outer name. `oneof` takes its keyed
+schema directly -- `oneof { a: u32 }` -- and the parenthesized form `oneof({ a: u32 })` remains the
+spelling for a schema held in an expression.
+
+Checked by the full suite: `examples/*.let`, `tests/eval.lua`, `tests/parse.lua`, `tests/c.lua`,
+`tests/contextual.lua` and `tests/sha256.lua` all use the lowercase vocabulary, and the C corpus
+compiles and runs the renamed examples at credits 0 and 256 under GCC and Clang. This is a surface
+spelling change: it removes no capability and changes no generated code beyond identifiers.
+
 ## Contextual C acceptance
 
 `tests/contextual.lua` compiles/runs production C at `-O0`, `-O2` and `-O3`, with
@@ -36,11 +55,11 @@ matrix under Clang; the default `cc` on the validation host is GCC. Normal host 
 compiled to check mixed-recursive linkage.
 
 The five-million-step witnesses include scalar mutual tails, nested diamonds, heterogeneous
-three-member swaps, expression/statement tuple results, and nullary Unit cycles driven both by a
+three-member swaps, expression/statement tuple results, and nullary unit cycles driven both by a
 foreign function and by mutable module state. A static-`pc` dispatch regression includes selected
 lambda-handler instances in its tail cycle. Existing self-tail loops are checked independently.
 Additional cases cover borrowed receivers and cleanup that must retain calls; foreign/opaque/local
-and discarded returns; erased Unit components; exact-once vector-branch effects; signed zeros;
+and discarded returns; erased unit components; exact-once vector-branch effects; signed zeros;
 module-reading/mutating closures constructed without executing their bodies; aliases, imports and
 separate headers; runtime aborts, template immutability, deterministic output, a 12,000-node SCC
 stress case and expansion/total-size limits. The evaluator suite also checks vector arity/type errors
@@ -51,11 +70,11 @@ unused sum boxes without losing payload effects.
 
 Production validation on GCC 13.3 / Clang 18.1:
 
-- Full `tests/run.lua`: **PASS, 42.95 s** (peak RSS 167,796 KiB); evaluator 795 checks, C
+- Full `tests/run.lua`: **PASS, 42.83 s** (peak RSS 167,684 KiB); evaluator 795 checks, C
   differential/distribution 1407 checks across 43 programs, contextual 5115 checks, plus
   schema/parser/kernel, SHA-256, JIT and isolated deterministic distribution acceptance.
-- `CC=clang luajit tests/contextual.lua`: **PASS, 5115 checks, 3.55 s**.
-- `CC=clang luajit tests/c.lua`: **PASS, 1407 checks / 43 programs, 22.40 s**.
+- `CC=clang luajit tests/contextual.lua`: **PASS, 5115 checks, 3.46 s**.
+- `CC=clang luajit tests/c.lua`: **PASS, 1407 checks / 43 programs, 24.71 s**.
 - An additional static-`pc`/known-match/payload-effect witness passed **12 compile/run combinations
   in 1.89 s**: GCC, Clang and tcc, C99/C11, credits 0/256, five million iterations on a 256 KiB stack.
   GCC/Clang used `-O0 -fno-inline -fno-optimize-sibling-calls -Wall -Wextra -Wpedantic -Werror`;
@@ -88,7 +107,7 @@ one directly.
 - examples/arithmetic.let: transform(4)=19; divmod(17,5)=(3,2); consume(17,5)=17. Unknown zero
   divisor aborts; statically evaluating a zero divisor rejects.
 - examples/receivers.let: observe(7,false)=(7,7); observe(7,true)=(7,8). The first result must
-  remain a snapshot despite the method call. At U32 maximum, increment wraps to zero.
+  remain a snapshot despite the method call. At u32 maximum, increment wraps to zero.
 - examples/captures.let: run(5,7)=12. An exported make_adder result must remain callable after
   its creator returns and copy its captured value by value.
 - examples/arrays.let: literal_sum()=60, local_pick(2)=9, store(1,4)=643, grid(1,0)=3, via_parameter(5)=11,
@@ -109,16 +128,16 @@ one directly.
   that called the loop would be a different code instance and would grow the stack one frame per
   step. `tests/eval.lua` asserts the value and that the loop, not a call, survives.
 - examples/interpreter.let: main()=7. The same dispatch with the hot state as the loop's parameters
-  (`Ptr(Op)` code, `pc`, `Ptr(U32)` stack, `sp`) instead of a record, so a step copies no aggregate.
+  (`ptr(Op)` code, `pc`, `ptr(u32)` stack, `sp`) instead of a record, so a step copies no aggregate.
   Handlers return the transition (next pc, next sp, done) and `run` tail-calls itself outside the
-  match, which is the only self-call. `tests/c.lua` compiles and runs it, since a `Ptr` exists only
+  match, which is the only self-call. `tests/c.lua` compiles and runs it, since a `ptr` exists only
   in compiled code.
 - examples/pipeline.let: settle(1,50)=50, settle(0,50)=0, settle(1,500)=0, summarize(1,50)=50,
   summarize(1,500)=0. Hierarchical continuation wiring: a parent owns a stateful record and composes
   a child that is a method on it; the child's only exits are the callable requirements the parent
   supplies. `settle` supplies exits that yield a scalar, `evaluate` returns the outcome as a sum, and
   `summarize` dispatches it — the downward and upward duals of the same child, separated by the
-  `R: Type` parameter. `tests/eval.lua` asserts every value listed here.
+  `R: type` parameter. `tests/eval.lua` asserts every value listed here.
 - examples/references.let: read_shared(1)=6, bump_shared(1)=7, borrowed(2)=55, following()=10,
   bump_following()=15. A reference to module storage persists a store; a reference to a captured
   record is live for the caller; a recursive Node/Link reaches and mutates its neighbour through a
@@ -128,7 +147,7 @@ one directly.
   returned from a call all dispatch on the tag without a function pointer.
 - examples/sums.let: area_of_circle(5)=25, area_of_round(6)=36, area_of_box(4)=12, scaled(3)=36,
   total(0)=6, total(4)=16, unwrap_or(0,9)=9, unwrap_or(4,9)=4. A known alternative resolves its
-  match while compiling; a run-time alternative becomes a C tag test; a Unit alternative carries no
+  match while compiling; a run-time alternative becomes a C tag test; a unit alternative carries no
   payload and its handler takes no C argument.
 - examples/sha256.let: a real program. `abc()` equals the published SHA-256("abc") digest
   `ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad`, and `digest_seed(x)` agrees
@@ -147,19 +166,19 @@ Gates 1–5 and 9–11 have their first executable form in `tests/parse.lua`, `t
    occurrence interning; builder-level per-function expression interning.
 2. **Grammar:** free-form equivalence, comments/tokens, operator precedence, `:` results versus `->` lambda bodies, parenthesized signature inputs,
    named/shared parameters, per-binding annotations, schemas/initializers/configuration, separators.
-3. **Interpreter:** U32 rules, Bool-only short circuit, exact application adjustment, static partial
-   supply, Type-dependent requirements, lexical scope and lazy top-level dependencies.
+3. **Interpreter:** u32 rules, bool-only short circuit, exact application adjustment, static partial
+   supply, type-dependent requirements, lexical scope and lazy top-level dependencies.
 4. **Storage:** immutable bindings versus mutable fields, immediate reads, record value copies,
    compound-target evaluation once, receiver effects through calls and actual nested owner routes.
 5. **Structured branches:** each arm elaborated once, correct early-return completion, result-vector
    joins, initialization on every continuing arm, no arm-local definitions leaked outside scope.
 6. **Instances:** canonical known argument/code/capture bindings, shared helper bodies, no caller path
    multiplication, bounded changing-specialization recursion and complete annotated residual cycles.
-7. **Sums:** `OneOf(schema)` builds one canonical sum; member selection constructs an alternative by
-   keyed supply, positionally for a non-record payload, or with no value for `Unit`; matching requires
+7. **Sums:** `oneof { ... }` on a keyed schema builds one canonical sum; member selection constructs an alternative by
+   keyed supply, positionally for a non-record payload, or with no value for `unit`; matching requires
    exactly one callable handler per alternative, all with the same result type. A known tag elaborates
    only its own handler; an opaque tag emits a tag test per alternative with the payload projected
-   inside the arm. C lowers to a tag plus a union and a `Unit` parameter is erased. Non-schema cases,
+   inside the arm. C lowers to a tag plus a union and a `unit` parameter is erased. Non-schema cases,
    an empty schema, unknown alternatives, missing or duplicated handlers, unknown payload fields and
    disagreeing arm types all reject.
 8. **Callables:** a callable that borrows (a closure over a receiver, or a method value) crosses a
@@ -179,15 +198,15 @@ Gates 1–5 and 9–11 have their first executable form in `tests/parse.lua`, `t
    mutation seen through a stored reference, and by-value cycles rejected across one and several
    definitions (`type-cycle`) while a cycle through a reference is accepted with a finite
    forward-declared layout. A reference is also a parameter, a result and a field: a host may pass a
-   pointer for `Ref(T)`, a reference to module storage may be returned from a call and followed, and
+   pointer for `ref(T)`, a reference to module storage may be returned from a call and followed, and
    a tied reference held in a local record reaches the enclosing instance.
 8c. **Arrays (implemented):** a literal with an inferred element type and an annotated one, a static
    index, a run-time index with its guard (the guard aborts, asserted in C), element stores, nested
    arrays, an array parameter (a copy) and a local alias (not a copy), an array result compared
-   element by element, a pool of nodes in module storage reached by `Ref(pool[i])`, and the
+   element by element, a pool of nodes in module storage reached by `ref(pool[i])`, and the
    rejections `type-required` for an empty literal, `array-length`, `type-mismatch`, `index-range`
    and `not-a-place`.
-8d. **Integer widths (implemented):** `U8`/`U16` literals by annotation, wrapping arithmetic at the
+8d. **Integer widths (implemented):** `u8`/`u16` literals by annotation, wrapping arithmetic at the
    named width (compared against the interpreter and the generated C), implicit widening, a literal
    adopting a narrower operand, mixed run-time widths widening, a checked conversion that rejects a
    known value out of range and aborts a run-time one, a non-integer conversion rejected, and the
@@ -196,7 +215,7 @@ Gates 1–5 and 9–11 have their first executable form in `tests/parse.lua`, `t
    imported type used as an annotation and as a keyed supply, a name the module does not export
    (`unknown-member`), a missing file (`import-input`), a cycle (`import-cycle`), and a source string
    that tries to use an import.
-8f. **Signed integers (implemented):** `I32` wrapping, truncating division with the remainder taking
+8f. **Signed integers (implemented):** `i32` wrapping, truncating division with the remainder taking
    the dividend's sign, an arithmetic shift, negation, a reinterpreting signedness change, a
    literal adapting to a signed operand, the `int32_t` representation and the reinterpretation helper,
    and the rejections `type-mismatch` for mixing signed and unsigned and `numeric-range` for a
@@ -211,8 +230,8 @@ Gates 1–5 and 9–11 have their first executable form in `tests/parse.lua`, `t
    whose length is unknown while compiling, a slice over a module array, a slice over a local array, and
    an array literal viewed as a temporary; the read-only rejection (`not-a-place`) for a store through a
    view; the `borrow-escape` rejection for a view of a local returned from its activation and for a record
-   holding one, while a view of module storage and a `String` literal both return; the `lex-string`
-   rejections; and a `String` parameter and result compared against the interpreter through the generated
+   holding one, while a view of module storage and a `string` literal both return; the `lex-string`
+   rejections; and a `string` parameter and result compared against the interpreter through the generated
    C ABI, where the argument is built as the same two-member struct the backend emits.
 8i. **Literals (implemented):** decimal, hexadecimal and binary integers, with a separator allowed
    between digits; a separator that leads, trails or doubles rejected (`lex-number`); a binary literal
@@ -228,9 +247,9 @@ Gates 1–5 and 9–11 have their first executable form in `tests/parse.lua`, `t
    division by zero producing an infinity, zero over zero producing a NaN, and a NaN comparing false
    while `!=` holds; both conversion directions, with an integer rounding to the nearest double by
    ties-to-even and a float truncating toward zero, a known out-of-range value rejected (`numeric-range`)
-   and a run-time one stopped by an emitted guard, including one for a NaN; F64 negated; F64 rejecting
-   the remainder, power, shift and bitwise operators; an integer literal adopting F64 while a wider
-   non-literal integer needs `F64(x)`; and a differential case comparing every one of those against the
+   and a run-time one stopped by an emitted guard, including one for a NaN; f64 negated; f64 rejecting
+   the remainder, power, shift and bitwise operators; an integer literal adopting f64 while a wider
+   non-literal integer needs `f64(x)`; and a differential case comparing every one of those against the
    generated C, where an infinity and a NaN are named and tested rather than compared.
 8k. **Deferred actions (implemented):** `defer` as a statement form taking a call, with its callee and
    arguments evaluated where it is written; several actions in one block running in reverse order; a
@@ -242,21 +261,21 @@ Gates 1–5 and 9–11 have their first executable form in `tests/parse.lua`, `t
    runtime state and folding it dropped the store from the generated code.
 8l. **Foreign declarations (implemented):** `extern let` declaring a host function with no body and a
    required result; the artifact emitting a prototype with external linkage and a direct call, which the
-   host links its own definition against; a `Unit` result being erased so the call is a statement; the
+   host links its own definition against; a `unit` result being erased so the call is a statement; the
    reference interpreter rejecting a foreign call (`foreign-effect`); and a fold that cannot complete
    because of one being compiled instead.
-8m. **Raw pointers and scoped resources (implemented):** `Ptr(T)` as a distinct type from `Ref`, with
-   `Ptr(place)` taking an address without reading what it addresses, a host-returned pointer indexed and
-   written through with no bounds check, `p.field` selecting through `Ptr(Record)`, `Null(T)` and address
-   comparison, and the two rejections that keep the types apart: a pointer does not satisfy a `Ref`
-   requirement and `Ref(p)` does not turn one back into a checked borrow. Also the region shape of
+8m. **Raw pointers and scoped resources (implemented):** `ptr(T)` as a distinct type from `ref`, with
+   `ptr(place)` taking an address without reading what it addresses, a host-returned pointer indexed and
+   written through with no bounds check, `p.field` selecting through `ptr(Record)`, `null(T)` and address
+   comparison, and the two rejections that keep the types apart: a pointer does not satisfy a `ref`
+   requirement and `ref(p)` does not turn one back into a checked borrow. Also the region shape of
    section 8.7: a known body specialized so the generic combinator does not survive and the call site is
    direct, no invocation pointer anywhere in the artifact, and the acquire emitted before the body and
    the release after it. A run-time argument is now checked against its parameter's requirement in the
    residual path as well, where a wrong type used to reach the IR checker and be reported as a compiler
    bug rather than a source error. A pointer is also an indirection boundary for a recursive type, so
-   `let Node = { value: U32, next: Ptr(Node) }` has a finite layout while a by-value cycle still rejects
-   (`type-cycle`), and field selection through a `Ptr(Record)` resolves the cell a recursive definition
+   `let Node = { value: u32, next: ptr(Node) }` has a finite layout while a by-value cycle still rejects
+   (`type-cycle`), and field selection through a `ptr(Record)` resolves the cell a recursive definition
    reserved the way a reference does.
    bug rather than a source error.
 8n. **What a value or a place is, not how it was reached (audited):** the evaluator used to decide
@@ -266,7 +285,7 @@ Gates 1–5 and 9–11 have their first executable form in `tests/parse.lua`, `t
    indexing a nil; a nested lambda's captures travel through the lambda that encloses it, because an
    environment cannot hold a name its enclosing environment lacks; a slice is a third indirection
    boundary, so a type may mention itself through one while a by-value cycle still rejects; a reference
-   decides module storage from the place as well as from the name route, so `Ref(r[i])` through a local
+   decides module storage from the place as well as from the name route, so `ref(r[i])` through a local
    reference to module storage is module storage and its store reaches the module array, while the
    interpreter says it needs storage rather than blaming the target's lifetime; and a requirement types
    a lambda however it is spelled, so an alias of a signature is as good as a written one. The cycle
@@ -278,7 +297,7 @@ Gates 1–5 and 9–11 have their first executable form in `tests/parse.lua`, `t
    dynamic failure guards, transitive borrow provenance, finite layouts, no metadata runtime slots.
 10. **C:** strict C11 compile/run, arithmetic boundary values, side-effect order, safe tail permutations,
    constant-stack self-tails (5,000,000 iterations),
-   no dangling environment, separate header/source consumer, stable names and Unit erasure.
+   no dangling environment, separate header/source consumer, stable names and unit erasure.
 11. **Distribution:** replace wordletkit with the REAL facade/CLI in the manifest; bundle parity with the
     checkout implementation; clean relocated builds and runtime execution without source search paths.
 

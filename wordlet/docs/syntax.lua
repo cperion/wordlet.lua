@@ -25,21 +25,31 @@ are allowed in delimited lists.
 
 Identifiers use ASCII letters or underscore followed by ASCII letters, digits or underscore. Names
 are case-sensitive; capitalization never distinguishes a type from a value or a signature from a
-lambda. Reserved keywords are `let`, `extern`, `do`, `defer`, `end`, `if`, `then`, `else`, `return`, `and`, `or`, `not`,
-`true`, and `false`. Primitive names U32, U8, U16, I32, U64, I64, F64, Bool, Unit and Type are
-predefined bindings, as are the type constructors `OneOf` (section 8.1), `Ref` (section 8.2), `Array`
-and `Slice` (sections 8.3 and 8.4), `Ptr` (section 8.5) and the null pointer `Null` (section 8.5).
+lambda. Wordlet spells its own vocabulary in lowercase for exactly that reason, and there is no
+second, capitalized spelling of any of it.
+
+Reserved keywords are `let`, `extern`, `do`, `defer`, `end`, `if`, `then`, `else`, `return`, `and`,
+`or`, `not`, `true`, and `false`. Predefined bindings are the primitive types `u8`, `u16`, `u32`,
+`u64`, `i32`, `i64`, `f64`, `bool`, `unit` and `type`, the byte slice `string`, and the type
+constructors `oneof` (section 8.1), `ref` (section 8.2), `array` and `slice` (sections 8.3 and 8.4),
+and `ptr` with its null pointer `null` (section 8.5).
+
+Those predefined words are reserved at module level: a module-level `let`, `extern` or word
+declaration may not bind one (`reserved`), because the name is already the language's own word and
+rebinding it would silently change what `u32` or `oneof` means. A local binding inside a body may
+shadow one, like any outer name. Everything else a program names is the program's own vocabulary;
+GUIDE.md section 3 describes the spelling style Wordlet source is written in.
 
 Numeric literals are decimal, hexadecimal prefixed by 0x, or binary prefixed by 0b. A single
 underscore may separate any two digits, so 1_000_000 and 0b1010_1010 read as they look; a separator
 that leads, trails or doubles rejects rather than being ignored into a different value. A literal
 that fits a
-word is a U32 and one that does not is a U64, so 0xFFFFFFFFFFFFFFFF can be written directly; a
+word is a u32 and one that does not is a u64, so 0xFFFFFFFFFFFFFFFF can be written directly; a
 literal above 64 bits rejects rather than wrapping. A leading minus is an operator, not part of a
 literal. There are no nil or implicit tuple literals. A string literal is a byte sequence, specified in
 section 8.4.
 
-The integer types are `U8`, `U16`, `U32`, `I32`, `U64` and `I64`. `I32` is
+The integer types are `u8`, `u16`, `u32`, `i32`, `u64` and `i64`. `i32` is
 two's complement, so it wraps, its division truncates toward zero with the remainder taking the
 dividend's sign, its right shift is arithmetic, and the most negative value divided by -1 wraps to
 itself rather than being undefined. Its negation wraps too, and a signed power needs a power that is
@@ -52,26 +62,26 @@ reinterprets the bits; any other conversion that cannot lose a value is implicit
 checked, rejecting a known value outside the target and stopping a run-time one.
 
 Arithmetic wraps at the width its type names, comparisons widen first, and a shift amount is a plain
-U32. Assigning a run-time value to a narrower annotation rejects (`numeric-range`) rather than
+u32. Assigning a run-time value to a narrower annotation rejects (`numeric-range`) rather than
 truncating it silently.
 
-`U64` and `I64` are 64 bits wide and follow the same rules, including the `I64` boundary cases above.
+`u64` and `i64` are 64 bits wide and follow the same rules, including the `i64` boundary cases above.
 Their bounds are not Lua numbers, so a conversion that changes width is checked against the target's
 range rather than truncated, and a conversion that only changes signedness at one width still
 reinterprets.
 
-`F64` is IEEE-754 double and follows IEEE 754 rather than the integer rules: division by zero is an
+`f64` is IEEE-754 double and follows IEEE 754 rather than the integer rules: division by zero is an
 infinity or a NaN rather than a trap, a NaN comparison is false, an integer converts to a float by
 rounding to nearest with ties to even and a float to an integer by truncation, with a value outside
 the integer's range rejected when known and stopped when not. There is no `F32`.
 
-A float literal is written with a point, an exponent, or both, and its type is F64: `1.5`, `1e5` and
+A float literal is written with a point, an exponent, or both, and its type is f64: `1.5`, `1e5` and
 `1.5e-3` are one value each. A point needs a digit on both sides, so `1.` is the integer 1 followed by
 a `.` rather than a float, and a member selection never has to guess which was meant. A hexadecimal
 literal keeps its `e` as a digit, so `0x1e5` is an integer. A digit separator may appear between any
 two digits of the mantissa or the exponent, and an exponent needs at least one digit. A float literal
-does not adopt another operand's type the way an integer literal does: `1.5` is F64 and stays F64.
-`true` and `false` are Bool. `Unit()` is the Unit value.
+does not adopt another operand's type the way an integer literal does: `1.5` is f64 and stays f64.
+`true` and `false` are bool. `unit()` is the unit value.
 
 Comments begin with `--`. `--` followed immediately by a long bracket opens a block comment that ends
 at that bracket's own closing form, so it may span lines and its body may contain anything; any other
@@ -81,15 +91,15 @@ rule. Operators use longest-token matching, so `!=`, `<<=` and `->` are single t
 An item boundary is grammatical, not visual. In a block, `let`, `return`, statement `if`, and `end`
 cannot continue an ordinary expression. Adjacent names do not apply functions. A postfix `(` or `{`
 CAN continue the preceding expression across a newline; use `;` if separation is intended. A return
-of Unit before an expression statement must be written `return;` (the following statement is then
+of unit before an expression statement must be written `return;` (the following statement is then
 unreachable), not inferred from a line break.
 
 ## 2. Bindings and named definitions
 
 ```
 let x = 42
-let flag: Bool = true
-let affine(a, b, x: U32) : U32 = a * x + b
+let flag: bool = true
+let affine(a, b, x: u32) : u32 = a * x + b
 ```
 
 `let` introduces an immutable lexical binding. An optional annotation checks its value; it is not a
@@ -97,14 +107,14 @@ conversion chosen by the backend. Bindings cannot be reassigned. A binding can h
 instance, however: binding immutability does not freeze that instance's fields.
 
 A named definition is sugar for binding a word. Parameters are ordered and have immutable bindings.
-Adjacent names share the following annotation: `(a, b, x: U32)` declares three U32 parameters. Every
+Adjacent names share the following annotation: `(a, b, x: u32)` declares three u32 parameters. Every
 named-definition parameter must have an annotation. The result annotation is optional except where
 section 10 requires it. Duplicate parameter names reject.
 
 A named definition may take **keyed** requirements instead, written like a schema's members:
 
 ```
-let distance { x: U32, y: U32 }: U32 = x * x + y * y
+let distance { x: u32, y: u32 }: u32 = x * x + y * y
 let d = distance { x = 3, y = 4 }
 ```
 
@@ -114,14 +124,14 @@ supply does, and the supplied values must be static. Keyed requirements have no 
 may be written in any order, and the word is applied by name. A schema is the special case of a
 keyed word whose terminal constructs an instance.
 
-Type requirements are evaluated left-to-right when arguments are supplied. An earlier parameter may
+type requirements are evaluated left-to-right when arguments are supplied. An earlier parameter may
 appear in a later requirement:
 
 ```
-let identity(T: Type, x: T) = x
+let identity(t: type, x: t) = x
 ```
 
-T must be known before checking x's requirement. This is ordinary type demand, not an implicit type
+`t` must be known before checking x's requirement. This is ordinary type demand, not an implicit type
 parameter or a new `static` keyword.
 
 Top-level binding names are mutually visible; their initializers are evaluated once, eagerly, during
@@ -161,8 +171,8 @@ Partial supply is static specialization, not an implicit closure allocation. To 
 runtime value, write a lambda explicitly:
 
 ```
-let add(a, b: U32) = a + b
-let add_runtime(n: U32) = |x: U32| -> add(n, x)
+let add(a, b: u32) = a + b
+let add_runtime(n: u32) = |x: u32| -> add(n, x)
 ```
 
 Inside a residual function `add(n)` rejects if n is runtime; `add(n, x)` is a valid saturated call.
@@ -181,9 +191,9 @@ Every lambda uses pipes:
 ```
 |x| -> x + 1
 |a, b| -> a ~ b
-|x: U32| -> x + 1
-|a, b: U32| -> do let t = a * a  return t + b end
-|| -> Unit()
+|x: u32| -> x + 1
+|a, b: u32| -> do let t = a * a  return t + b end
+|| -> unit()
 ```
 
 Bare `x -> ...` is NOT a lambda form: `->` only ever introduces a lambda body. A result is written
@@ -191,8 +201,8 @@ with `:`, and a signature's inputs are parenthesized, so a signature is unambigu
 type aliases are lowercase and even inside a lambda's parameter list:
 
 ```
-let number = U32
-let Endo = (number): number
+let number = u32
+let endo = (number): number
 ```
 
 Lambda parameters use the same grouping rule as named parameters. Missing annotations require an
@@ -201,8 +211,8 @@ contract. Every missing parameter type must be determined by that context; arbit
 parameter inference is not performed. An untyped standalone lambda rejects.
 
 ```
-let inc: (U32): U32 = |x| -> x + 1
-let twice(f: (U32): U32, x: U32) = f(f(x))
+let inc: (u32): u32 = |x| -> x + 1
+let twice(f: (u32): u32, x: u32) = f(f(x))
 let inc_2x = twice(|x| -> x + 1)
 ```
 
@@ -213,7 +223,7 @@ types are resolved, invocation uses those types; it does not evaluate their anno
 
 A literal used immediately as a callee, or as the selected handler of a known match, need not first
 become a first-class callable value. During static execution, a saturated invocation with known
-numeric, Bool, Unit or string arguments and no runtime/place captures prepares captures and parameter
+numeric, bool, unit or string arguments and no runtime/place captures prepares captures and parameter
 types, then executes its body once. It checks the selected body path, like a fully static named word;
 no generic result signature or unused C base is invented first. Captures and annotations still occur
 at the literal's written position, before arguments or later handler expressions, and invocation waits
@@ -223,22 +233,22 @@ This is not result memoization or general lazy closure checking.
 
 `->` introduces a lambda's BODY; it never denotes a result type. A lambda's result is declared by an
 annotated binding or by the requirement it is passed to. Typed lambda parameters plus an inferred
-result are also valid, and a lambda body may itself be a signature: `|x: U32| -> (U32): U32`.
+result are also valid, and a lambda body may itself be a signature: `|x: u32| -> (u32): u32`.
 
 Signature forms are:
 
 ```
-(U32): U32                    -- one input, one result
-(U32, U32): U32               -- two inputs
-(): U32                       -- no inputs
-(U32): (U32, U32)             -- two results
-(U32): ()                     -- Unit result contract
-(U32): ((U32): U32)           -- one callable result
+(u32): u32                    -- one input, one result
+(u32, u32): u32               -- two inputs
+(): u32                       -- no inputs
+(u32): (u32, u32)             -- two results
+(u32): ()                     -- unit result contract
+(u32): ((u32): u32)           -- one callable result
 ```
 
 A parenthesized comma list before the `:` is the input list; a comma list after it is the result
-list. Neither creates tuple values. An empty list denotes no inputs, or one Unit result. A
-parenthesized single type is grouping and is equivalent to that type, so `(U32): U32` has one input.
+list. Neither creates tuple values. An empty list denotes no inputs, or one unit result. A
+parenthesized single type is grouping and is equivalent to that type, so `(u32): u32` has one input.
 
 A signature is a calling requirement, not executable code. Checking known code against it verifies
 parameter and result requirements without arbitrarily erasing known implementation identity. Unknown
@@ -250,15 +260,15 @@ is not an assertion that a callable owns an environment.
 A word body is an expression or a `do ... end` block:
 
 ```
-let square(x: U32) = x * x
-let square_block(x: U32) = do
+let square(x: u32) = x * x
+let square_block(x: u32) = do
   let result = x * x
   return result
 end
 ```
 
 An expression body returns that expression's result vector. A block has no implicit last-expression
-result: every reachable function path must return. A bare `return` returns Unit. A declaration or
+result: every reachable function path must return. A bare `return` returns unit. A declaration or
 call statement at the end does not imply a return. Code after a definitely terminating statement in
 the same list is rejected as unreachable.
 
@@ -287,18 +297,18 @@ producing a result vector. A statement conditional has statement-list arms, opti
 terminating end. After then/else, statement versus expression parsing is determined by which form
 was entered; a leading statement-position if is never guessed to be an expression statement.
 
-Conditions must be Bool. A known condition evaluates only the selected arm; the other arm is parsed
+Conditions must be bool. A known condition evaluates only the selected arm; the other arm is parsed
 and lexically resolved but not semantically evaluated. An unknown condition elaborates both arms once.
 Continuing expression arms must agree in source result arity and compatible component types. Identical
 known components remain known; differing representable values require runtime result slots. Different
-static-only type values cannot be turned into a runtime Type.
+static-only type values cannot be turned into a runtime type.
 
 Each arm has a child lexical scope. Declarations inside an arm do not escape. An arm that returns
 from the enclosing word does not reach the continuation. A missing statement else is an empty
 continuing arm. Thus this is complete without any fictitious value from the first arm:
 
 ```
-let skip(s, n: U32) : U32 = do
+let skip(s, n: u32) : u32 = do
   if n == 0 then return s end
   return skip(next32(s), n - 1)
 end
@@ -309,15 +319,15 @@ end
 Multiple results are an ordered result vector, not a tuple value:
 
 ```
-let divmod(a, b: U32) : (U32, U32) = do
+let divmod(a, b: u32) : (u32, u32) = do
   return a / b, a % b
 end
 
 let quotient, remainder = divmod(17, 5)
-let q: U32, r: U32 = divmod(17, 5)
+let q: u32, r: u32 = divmod(17, 5)
 ```
 
-For ordinary bindings, each name has its OWN optional annotation. `let a, b: U32 = ...` annotates b
+For ordinary bindings, each name has its OWN optional annotation. `let a, b: u32 = ...` annotates b
 only; shared annotations are restricted to parameter lists. Each bound name is fresh and immutable.
 This is result-list binding, not recursive destructuring or a pattern language.
 
@@ -332,17 +342,17 @@ left-to-right before adjustment. Named record initializer items each contribute 
 expand a result vector across fields.
 
 ```
-let forward(a, b: U32) = divmod(a, b)        -- forwards both results
-let first(a, b: U32) = (divmod(a, b))        -- returns one result
+let forward(a, b: u32) = divmod(a, b)        -- forwards both results
+let first(a, b: u32) = (divmod(a, b))        -- returns one result
 ```
 
-Binding lists discard surplus values and fill missing values with Unit. An annotation incompatible
-with that Unit rejects. Call argument lists do NOT fill missing parameters: after expansion they
+Binding lists discard surplus values and fill missing values with unit. An annotation incompatible
+with that unit rejects. Call argument lists do NOT fill missing parameters: after expansion they
 follow partial/saturated application rules. Return vectors must match the enclosing declared or
 inferred result contract exactly; they are not padded to satisfy it.
 
-Zero results and a bare return denote one Unit result in Wordlet. Explicit Unit slots in multiple
-results remain logical slots even though C erases their payloads. `return Unit(), 3` has arity two.
+Zero results and a bare return denote one unit result in Wordlet. Explicit unit slots in multiple
+results remain logical slots even though C erases their payloads. `return unit(), 3` has arity two.
 A callable expression returning multiple results as an expression body forwards all of them.
 
 ## 7. Operators and evaluation order
@@ -365,31 +375,31 @@ Tightest first:
 | logical or | `or` | left |
 
 Pipes in prefix position introduce a lambda; infix pipe is bitwise-or. A lambda parameter annotation
-stops at the closing pipe, so `|f: (U32): U32| -> f` reads as one parameter whose type is a signature.
+stops at the closing pipe, so `|f: (u32): u32| -> f` reads as one parameter whose type is a signature.
 The lambda body extends as a full body/expression to its enclosing delimiter. Signature arrows do
 not introduce parameter names or executable bodies.
 
 Power binds tighter than unary on its left: `-x ^ 2` means `-(x ^ 2)`. Unary is allowed on the right
-of power, so `x ^ -1` means `x ^ (-1)`. Here -1 is modular U32 negation, not a signed exponent. Two
+of power, so `x ^ -1` means `x ^ (-1)`. Here -1 is modular u32 negation, not a signed exponent. Two
 comparisons cannot chain without explicit grouping; `a < b < c` rejects.
 
 Arithmetic and bitwise operators require one integer type, except that `+`, `-`, `*` and `/` also
-apply to F64. As section 1 says, a literal adopts the other operand's type when its value fits,
+apply to f64. As section 1 says, a literal adopts the other operand's type when its value fits,
 mixed widths of one signedness widen to the wider one, and mixing signed and unsigned rejects.
 Add/subtract/multiply/negate/power wrap at the width the type names.
 `0 ^ 0` is 1. Division truncates toward zero, with the remainder taking the dividend's sign; a known
 zero divisor rejects and a dynamic one aborts at runtime. A right shift is logical for an unsigned
 type and arithmetic for a signed one, so it keeps the sign bit; a shift amount at least the width
-yields zero, or the sign fill for an arithmetic right shift. No implicit Bool/integer conversion
+yields zero, or the sign fill for an arithmetic right shift. No implicit bool/integer conversion
 exists.
 
-Ordered comparison requires one integer type or F64, and equality requires equal scalar types (one
-integer type, Bool, F64 or Unit; Unit equals Unit). A comparison widens its operands to one integer
-type the way an arithmetic operation does. Two `String` values compare by content, since a byte
+Ordered comparison requires one integer type or f64, and equality requires equal scalar types (one
+integer type, bool, f64 or unit; unit equals unit). A comparison widens its operands to one integer
+type the way an arithmetic operation does. Two `string` values compare by content, since a byte
 sequence has no identity a program can observe. Record, word, type, slice and callable equality are
 not added by the equality tokens.
 
-`and`, `or`, `not` require Bool and produce Bool. There is no truthiness and no operand-valued Lua
+`and`, `or`, `not` require bool and produce bool. There is no truthiness and no operand-valued Lua
 and/or behavior. `and` and `or` short-circuit. Other binary operators evaluate operands left-to-right;
 all source call and initializer evaluation order is preserved by generated C.
 
@@ -404,15 +414,15 @@ uses the earlier snapshot. Plain field assignment evaluates its target once, the
 ## 8. Records, keyed supply and methods
 
 ```
-let Point = { x: U32, y: U32 }
-let p = Point { x = 3, y = 4 }
+let point = { x: u32, y: u32 }
+let p = point { x = 3, y = 4 }
 let old = p.x
 p.x = 20
 ```
 
 A schema literal contains named data requirements and optional methods. A named initializer occurs
 only AFTER a word expression, as postfix keyed application. Bare `{x=3}` is not an untyped record
-value. Bare `{}` is the empty record schema; `Point {}` is an empty keyed supply. Schema field order
+value. Bare `{}` is the empty record schema; `point {}` is an empty keyed supply. Schema field order
 does not determine identity or layout. Duplicate names and reserved-member collisions reject.
 
 Keyed application accepts named supplies, not positional arguments. Unknown names and resupplying a
@@ -422,8 +432,8 @@ a fresh record with its remaining data fields initialized. Ordinary saturated co
 that happen to be known do NOT thereby turn those source fields into readonly static fields.
 
 ```
-let AtX3 = Point { x = 3 }
-let p = AtX3 { y = 4 }           -- x is statically bound; y is an instance field
+let at_x3 = point { x = 3 }
+let p = at_x3 { y = 4 }           -- x is statically bound; y is an instance field
 ```
 
 Initializer expressions execute in written order even though fields are stored canonically. Methods
@@ -431,16 +441,16 @@ are code members, not initializer fields or stored function pointers. Record arg
 into fields and returns have value-copy semantics; local aliases to an instance retain that instance.
 
 ```
-let Rng = {
-  state: U32,
-  draw() : U32 = do
+let rng = {
+  state: u32,
+  draw() : u32 = do
     state = next32(state)
     return state
   end,
 }
 
-let draw_once(s: U32) : U32 = do
-  let r = Rng { state = s }
+let draw_once(s: u32) : u32 = do
+  let r = rng { state = s }
   let before = r.state
   r.draw()                      -- saturated call statement; result discarded
   return before
@@ -467,43 +477,42 @@ schema read as a tag plus a payload, so it needs no new syntax of its own: the s
 are the alternatives and the field types are their payloads.
 
 ```
-let Circle = { radius: U32 }
-let Rect = { width: U32, height: U32 }
-let Shape = OneOf({ circle: Circle, rect: Rect })
+let circle = { radius: u32 }
+let rect = { width: u32, height: u32 }
+let shape = oneof { circle: circle, rect: rect }
 ```
 
-`OneOf(cases)` takes one keyed schema and produces a type value. Alternative order is canonical, not
-written order, so two spellings of the same alternatives are the same type. `OneOf` requires a schema
-with at least one named alternative; an empty schema, or a non-schema argument, rejects. The schema
-may also be written directly after the word,
+`oneof` takes one keyed schema and produces a type value. Its single requirement is a keyed one, so
+the schema attaches with braces exactly as `point { x = 3 }` attaches a keyed supply, and the entry
+separator decides whether an entry defines or supplies: `name: type` defines, `name = value`
+supplies. There is no call parenthesis to write, because `oneof` is an ordinary word applied to a
+keyed requirement. Passing the schema as an ordinary argument instead --
+`oneof({ circle: circle, rect: rect })` -- is the same thing, and is what a schema held in a binding
+needs.
 
-```
-let Shape = OneOf { circle: Circle, rect: Rect }
-```
-
-which is the keyed spelling of `OneOf({ circle: Circle, rect: Rect })`. A word's keyed requirement is
-attached with braces, exactly as `Point { x = 3 }` attaches a keyed supply, and the entry separator
-decides which: `name: Type` defines, `name = value` supplies.
+Alternative order is canonical, not written order, so two spellings of the same alternatives are the
+same type. `oneof` requires a schema with at least one named alternative; an empty schema, or a
+non-schema argument, rejects.
 
 Member selection on a sum type names a constructor for one alternative:
 
 ```
-let round = Shape.circle { radius = 3 }
-let flat = Shape.rect { width = 4, height = 5 }
+let round = shape.circle { radius = 3 }
+let flat = shape.rect { width = 4, height = 5 }
 ```
 
 An alternative whose payload is a record is constructed by keyed supply, checked and stored exactly
 like the payload record itself. An alternative whose payload is not a record is applied to one value
-positionally, and a `Unit` alternative is applied to nothing (`Opt.none()`). Selecting a name that is
+positionally, and a `unit` alternative is applied to nothing (`Opt.none()`). Selecting a name that is
 not an alternative of that sum rejects.
 
 Matching is keyed application of a sum value with one handler per alternative. The handlers are
 callable values, each receiving that alternative's payload:
 
 ```
-let area(s: Shape): U32 = s {
-  circle = |c: Circle| -> c.radius * c.radius,
-  rect = |r: Rect| -> r.width * r.height,
+let area(s: shape): u32 = s {
+  circle = |c: circle| -> c.radius * c.radius,
+  rect = |r: rect| -> r.width * r.height,
 }
 ```
 
@@ -528,38 +537,38 @@ must already be defined, so a sum cannot mention itself by value. Section 8.2 su
 ### 8.2 References and recursive types
 
 A reference names a place instead of copying it. It is one of the three indirection boundaries that
-make a recursive type finite -- `Ptr` (section 8.5) and `Slice` (section 8.4) are the others -- and it
+make a recursive type finite -- `ptr` (section 8.5) and `slice` (section 8.4) are the others -- and it
 is what lets a sum mention
 itself:
 
 ```
-let Node = { value: U32, next: Link }
-let Link = OneOf({ none: Unit, some: Ref(Node) })
+let node = { value: u32, next: link }
+let link = oneof { none: unit, some: ref(node) }
 ```
 
-`Ref` is an ordinary word, so it needs no new syntax: applied to a type value it produces a type,
+`ref` is an ordinary word, so it needs no new syntax: applied to a type value it produces a type,
 and applied to a place it produces a reference to that place.
 
 ```
-let Counter = { value: U32 }
-let c = Counter { value = 1 }
-let r = Ref(c)                 -- r : Ref(Counter)
+let counter = { value: u32 }
+let c = counter { value = 1 }
+let r = ref(c)                 -- r : ref(counter)
 r.value = 20                   -- writes c.value: selection through a reference is a place route
-let again = Ref(c)             -- a second reference to the same instance
+let again = ref(c)             -- a second reference to the same instance
 ```
 
 A reference is an ordinary value: it may be a parameter, a result, a field or a local binding, and
 passing or returning one passes the reference, not the instance. A function may therefore take
-`Ref(T)` and write through it, and a reference to module storage may be returned from a call and
+`ref(T)` and write through it, and a reference to module storage may be returned from a call and
 followed there. A host that holds such a pointer may pass it directly.
 
-`Ref(T)` is not a copy of `T`. Reading or writing through a reference reaches the referenced
+`ref(T)` is not a copy of `T`. Reading or writing through a reference reaches the referenced
 instance, exactly as selecting that instance directly would, and two references to one instance
 observe each other's writes. A reference has stable identity under copying: copying a record that
 holds a reference copies the reference, not the referenced instance. Assigning through a reference
 to a field of a *binding* still rejects: `r = ...` is not a store, only a place beneath `r` is.
 
-`Ref` never means ownership, uniqueness, move or automatic destruction. A reference does not keep
+`ref` never means ownership, uniqueness, move or automatic destruction. A reference does not keep
 its target alive, and it is not the mechanism by which a record owns a child.
 
 #### What a reference may name
@@ -575,7 +584,7 @@ targets qualify:
 
 Anything else rejects (`ref-target`): a local that does not enclose the reference, a temporary, a
 field of a record that is about to be copied, and a place that has already been replaced. A reference
-is not itself a place to reference again, so `Ref(Ref(x))` rejects rather than collapsing two
+is not itself a place to reference again, so `ref(ref(x))` rejects rather than collapsing two
 indirections into one.
 
 A record that holds a reference to an enclosing owner is itself tied to that activation: it may be
@@ -584,18 +593,18 @@ capturing it in an escaping closure rejects (`ref-escape`). A record that holds 
 module storage has no such restriction, because those targets outlive every activation.
 
 ```
-let Counter = { value: U32 }
-let shared = Counter { value = 0 }              -- module storage
+let counter = { value: u32 }
+let shared = counter { value = 0 }              -- module storage
 
-let Node = { value: U32, next: Ref(Counter) }
-let local(x: U32): U32 = do
-  let n = Node { value = x, next = Ref(shared) }
+let node = { value: u32, next: ref(counter) }
+let local(x: u32): u32 = do
+  let n = node { value = x, next = ref(shared) }
   return n.next.value                            -- fine: the target is module storage
 end
 
-let bad(x: U32): Node = do
-  let c = Counter { value = x }
-  return Node { value = x, next = Ref(c) }        -- rejects: c dies with this activation
+let bad(x: u32): node = do
+  let c = counter { value = x }
+  return node { value = x, next = ref(c) }        -- rejects: c dies with this activation
 end
 ```
 
@@ -612,14 +621,14 @@ indirection to that cell rather than forcing its layout. The cell is sealed with
 definition and the result must not change afterwards.
 
 ```
-let Bad = { child: Bad }        -- rejects: by-value containment has no finite layout
-let Good = { child: Ref(Good) } -- accepted: the layout cycle crosses the reference boundary
+let bad = { child: bad }        -- rejects: by-value containment has no finite layout
+let good = { child: ref(good) } -- accepted: the layout cycle crosses the reference boundary
 ```
 
 A by-value cycle rejects (`type-cycle`) even when it passes through several definitions. A cycle
 that crosses an indirection, a reference or a raw pointer, is finite: either has a representation
 whose size does not depend on
-its target. Type equality is structural, except that a recursive definition compares by its reserved
+its target. type equality is structural, except that a recursive definition compares by its reserved
 identity, so two spellings of one recursive knot are one type and one layout.
 
 #### Validation
@@ -636,14 +645,14 @@ Required reference tests include:
 
 ### 8.3 Arrays
 
-An array is a fixed-length sequence of one element type. The type is `Array(T, N)`, an ordinary word
+An array is a fixed-length sequence of one element type. The type is `array(T, N)`, an ordinary word
 applied to an element type and a length, and a literal is written with brackets:
 
 ```
 let xs = [10, 20, 30]
-let ys: Array(U32, 3) = [10, 20, 30]
+let ys: array(u32, 3) = [10, 20, 30]
 let first = xs[0]
-let pick = |i: U32| -> xs[i]
+let pick = |i: u32| -> xs[i]
 xs[1] = 99
 xs[0] += 5
 ```
@@ -652,9 +661,9 @@ The length is part of the type, so it is never inferred from a later assignment 
 checked against it. A literal takes its element type from its elements, or from an annotation, which
 is what an empty literal needs: `[]` with no element has nothing to infer from and rejects
 (`type-required`). A literal whose length does not match, whose elements do not share one type, or an
-`Array` whose length is not a positive literal rejects (`array-length`, `type-mismatch`).
+`array` whose length is not a positive literal rejects (`array-length`, `type-mismatch`).
 
-Indexing is `a[i]` for a `U32` `i`. A known index outside the array rejects while compiling
+Indexing is `a[i]` for a `u32` `i`. A known index outside the array rejects while compiling
 (`index-range`); any other index is checked at run time and a failure aborts, exactly as a run-time
 zero divisor does. An element is assignable and every compound store form applies to it. Elements are
 values: reading one copies it, and an array is copied by value when it is passed, returned or assigned
@@ -671,20 +680,20 @@ A slice is a runtime-length view of storage someone else owns. It is the one arr
 length is not part of the type, which is what lets one word accept a sequence of any extent:
 
 ```
-let sum_from(xs: Slice(U32), i: U32, total: U32) : U32 = do
+let sum_from(xs: slice(u32), i: u32, total: u32) : u32 = do
   if i == 0 then return total end
   return sum_from(xs, i - 1, total + xs[i - 1])
 end
 
-let sum(xs: Slice(U32)) : U32 = sum_from(xs, xs.length, 0)
+let sum(xs: slice(u32)) : u32 = sum_from(xs, xs.length, 0)
 ```
 
-`Slice(T)` is an ordinary word, like `Ref`: applied to a type it produces a type, and applied to an
+`slice(T)` is an ordinary word, like `ref`: applied to a type it produces a type, and applied to an
 array it produces a view of that array.
 
 ```
 let xs = [10, 20, 30]
-let view = Slice(xs)          -- Slice(U32); view.length is three
+let view = slice(xs)          -- slice(u32); view.length is three
 let middle = view[1]          -- a run-time-checked element read
 ```
 
@@ -696,12 +705,12 @@ storage; it never owns it, and it does not keep its target alive.
 A view is read-only. `xs[i] = v` writes the array; `view[i] = v` rejects (`not-a-place`), because the
 view does not own the storage it names, and the bytes of a string literal are not writable.
 
-Indexing is `view[i]` for a `U32` `i`. A known index outside the known length rejects while compiling
+Indexing is `view[i]` for a `u32` `i`. A known index outside the known length rejects while compiling
 (`index-range`); any other index is checked when it runs and a failure aborts, exactly as a run-time
 array index does. Reading an element copies it.
 
 
-A **string** is a slice of bytes: `String` is `Slice(U8)`. Text and bytes are therefore one mechanism
+A **string** is a slice of bytes: `string` is `slice(u8)`. Text and bytes are therefore one mechanism
 rather than two, and a string has a runtime length like any other view. Its bytes are bytes, not
 characters: the source text is already the encoding, so a multi-byte character needs no escape and no
 decoding. `"\xff"[0]` is the byte 255.
@@ -709,7 +718,7 @@ decoding. `"\xff"[0]` is the byte 255.
 ```
 let greeting = "hello"
 let count = greeting.length      -- 5
-let second = U32(greeting[1])    -- 101
+let second = u32(greeting[1])    -- 101
 let same = "ab" == "ab"          -- true
 ```
 
@@ -721,7 +730,7 @@ and compared freely, and two literals with the same bytes are one buffer.
 
 A **byte literal** is one byte written readably: `'a'` is the byte 97, and it takes the same escapes
 a string does, so `'\n'` is 10 and `'\x41'` is 65. It is a numeric literal, not a one-byte string, so
-it adapts to the width it is used at and reports `U32` where no other operand decides. A byte literal
+it adapts to the width it is used at and reports `u32` where no other operand decides. A byte literal
 that is not exactly one byte rejects (`lex-string`): a multi-byte character is text, so it belongs in
 a string.
 
@@ -731,8 +740,8 @@ bracket is dropped so a body can begin on the line below it. Because the level i
 writer, a body may contain any lower level's closing form. A long string needs at least one `=`: `[[`
 is already an array whose first element is an array, and that must not become ambiguous.
 
-Equality on `String` compares content rather than identity, and costs one length test before any byte
-comparison. Ordering is not offered for `String`, and equality on any other slice type rejects: two
+Equality on `string` compares content rather than identity, and costs one length test before any byte
+comparison. Ordering is not offered for `string`, and equality on any other slice type rejects: two
 views may name overlapping storage, so identity is not observable and element-wise equality is not
 offered by `==`.
 
@@ -740,15 +749,15 @@ No slice operation allocates, grows, frees or copies storage, and no string oper
 string. Building a byte sequence writes into storage the program already has, which is what keeps a
 view a view.
 
-A slice is an indirection boundary, so a type may mention itself through one: `let Node = { value:
-U32, rest: Slice(Node) }` is finite for the same reason a pointer to itself is, because a view's own
+A slice is an indirection boundary, so a type may mention itself through one: `let node = { value:
+u32, rest: slice(node) }` is finite for the same reason a pointer to itself is, because a view's own
 size does not depend on its element.
 
 ### 8.5 Raw pointers
 
-`Ptr(T)` is an address the compiler does not track. It is deliberately a different type from `Ref(T)`:
+`ptr(T)` is an address the compiler does not track. It is deliberately a different type from `ref(T)`:
 a reference keeps the guarantee of section 8.2, that its target outlives every use of it, and an
-address that arrives from a host function cannot make that promise. Widening `Ref` to carry both would
+address that arrives from a host function cannot make that promise. Widening `ref` to carry both would
 turn a checked borrow into a comment, so the two are separate types and a signature says which one it
 means.
 
@@ -758,43 +767,43 @@ storage it points at. That is the point of the type: this is the part of the lan
 programmer is responsible, and the compiler says so by offering no rule to break.
 
 ```
-extern let host_alloc(bytes: U32) : Ptr(U8)
-extern let host_free(p: Ptr(U8)) : Unit
+extern let host_alloc(bytes: u32) : ptr(u8)
+extern let host_free(p: ptr(u8)) : unit
 
-let bytes(n: U32) : Ptr(U8) = host_alloc(n * 4)
+let bytes(n: u32) : ptr(u8) = host_alloc(n * 4)
 ```
 
-`p[i]` is the element at index `i` of `p`, for a `U32` `i`, and it has no bounds check: an unchecked
+`p[i]` is the element at index `i` of `p`, for a `u32` `i`, and it has no bounds check: an unchecked
 pointer does not carry a length. The element is assignable and every compound store form applies to
-it, exactly as an array's element is. For `Ptr(R)` whose `R` is a record, `p.field` selects a field and
+it, exactly as an array's element is. For `ptr(R)` whose `R` is a record, `p.field` selects a field and
 a store through it writes that field, on the same route a reference uses.
 
-A pointer is built in one of two ways. A foreign word may return one, and `Ptr(place)` makes one from a
+A pointer is built in one of two ways. A foreign word may return one, and `ptr(place)` makes one from a
 place the program already has:
 
 ```
 let xs = [1, 2, 3]
-let p = Ptr(xs[0])          -- Ptr(U32); the lifetime is written off here, deliberately
+let p = ptr(xs[0])          -- ptr(u32); the lifetime is written off here, deliberately
 ```
 
-`Ptr(place)` is the only place a lifetime is dropped, so it is the place to look for one. There is no
-other conversion in either direction: `Ref(p)` rejects, because an unchecked address must not become a
-checked borrow. Equality on two pointers of one element type compares addresses, and `Null(T)` is the
-null `Ptr(T)`.
+`ptr(place)` is the only place a lifetime is dropped, so it is the place to look for one. There is no
+other conversion in either direction: `ref(p)` rejects, because an unchecked address must not become a
+checked borrow. Equality on two pointers of one element type compares addresses, and `null(T)` is the
+null `ptr(T)`.
 
 ```
-let empty : Ptr(U8) = Null(U8)
+let empty : ptr(u8) = null(u8)
 let missing = bytes(4) == empty
 ```
 
 Ordering, pointer arithmetic and any conversion between a pointer and an integer are not offered.
 A pointer is an indirection boundary, so it is one of the ways a recursive type can be finite: `let
-Node = { value: U32, next: Ptr(Node) }` has the layout of a struct that holds a pointer to itself, and
-a cycle that crosses only a `Ptr` is accepted for the same reason one that crosses a `Ref` is. A
+node = { value: u32, next: ptr(node) }` has the layout of a struct that holds a pointer to itself, and
+a cycle that crosses only a `ptr` is accepted for the same reason one that crosses a `ref` is. A
 by-value cycle that crosses none of them still rejects (`type-cycle`).
 
 `p[i]` is the only arithmetic a pointer has, so one thing has one spelling. A pointer is not a
-`Slice`: a slice carries a length and a pointer does not.
+`slice`: a slice carries a length and a pointer does not.
 
 ### 8.6 Foreign declarations
 
@@ -802,8 +811,8 @@ A host function is declared with `extern`. It has no body, because its implement
 in this language, so its result and every one of its requirements are written down:
 
 ```
-extern let host_add(a: U32, b: U32) : U32
-extern let host_scale(a: U32) : U32
+extern let host_add(a: u32, b: u32) : u32
+extern let host_scale(a: u32) : u32
 ```
 
 The C symbol is exactly the name that is written. There is no alias and no `pub`, and the host
@@ -814,8 +823,8 @@ excluded.
 
 A foreign call is an effect the compiler cannot see into. It is never folded, so a constant argument
 does not make it a compile-time value, and it exists only where there is code to emit: the reference
-interpreter has no binding to call and rejects it (`foreign-effect`). A `Unit` result is erased like
-any other, so a call to a `Unit` foreign word is a statement. There is no body to specialize, so a
+interpreter has no binding to call and rejects it (`foreign-effect`). A `unit` result is erased like
+any other, so a call to a `unit` foreign word is a statement. There is no body to specialize, so a
 partial supply rejects rather than producing a partial word.
 
 ### 8.7 Scoped resources
@@ -824,17 +833,17 @@ A callable requirement may be a word, so a resource can be acquired and released
 an ownership system, a destructor or a keyword. This is the shape, not a built-in:
 
 ```
-let with_region(R: Type, bytes: U32, body: (Ptr(U8)): R) : R = do
+let with_region(r: type, bytes: u32, body: (ptr(u8)): r) : r = do
   let region = host_alloc(bytes)
   let result = body(region)
   host_free(region)
   return result
 end
 
-let sum() : U32 = with_region(U32, 8, |p: Ptr(U8)| -> do
+let sum() : u32 = with_region(u32, 8, |p: ptr(u8)| -> do
   p[0] = 7
   p[1] = 35
-  return U32(p[0]) + U32(p[1])
+  return u32(p[0]) + u32(p[1])
 end)
 ```
 
@@ -848,10 +857,10 @@ and the release still runs. A `return` inside the body returns from the *body*, 
 combinator, so the release runs on every normal path.
 
 What this does not do is enforce anything. A pointer into the region may be returned, stored in module
-storage or captured by a closure that outlives it, and the compiler accepts that, because a `Ptr`
+storage or captured by a closure that outlives it, and the compiler accepts that, because a `ptr`
 carries no lifetime to check and an abort does not unwind, so a release can be skipped. `with_region`
 cleans up; it does not prevent misuse. This is the trade the design accepts, and it is the reason a
-region's memory arrives as `Ptr` and never as `Ref`: a program that needs the guarantee writes its own
+region's memory arrives as `ptr` and never as `ref`: a program that needs the guarantee writes its own
 region type and keeps the pointer inside it.
 
 ### 8.8 Deferred actions
@@ -860,12 +869,12 @@ region type and keeps the pointer inside it.
 remembering it at every way out:
 
 ```
-let sum() : U32 = do
+let sum() : u32 = do
   let p = host_alloc(8)
   defer host_free(p)
   p[0] = 7
   p[1] = 35
-  return U32(p[0]) + U32(p[1])
+  return u32(p[0]) + u32(p[1])
 end
 ```
 
@@ -938,15 +947,15 @@ Static recursive evaluation can run without a residual result contract, subject 
 and work bounds. A source recursive function whose static arguments change may produce distinct keys;
 that is bounded specialization, not automatically a same-key tail loop.
 
-Generics are ordinary words with Type parameters:
+Generics are ordinary words with type parameters:
 
 ```
-let identity(T: Type, x: T) = x
-let twice(T: Type, f: (T): T, x: T) = f(f(x))
-let identity_u32 = identity(U32)
+let identity(t: type, x: t) = x
+let twice(t: type, f: (t): t, x: t) = f(f(x))
+let identity_u32 = identity(u32)
 ```
 
-There is no implicit generic parameter inference. A runtime value cannot supply Type. Static types
+There is no implicit generic parameter inference. A runtime value cannot supply type. Static types
 are compile-time values and may be returned by private helpers when all their returning paths agree;
 they cannot occupy an external C value slot. Public callable signatures must have a closed runtime ABI.
 
@@ -961,9 +970,9 @@ module, and a host runs it by calling `main`.
 
 ```
 return {
-  types = { Rng },
+  types = { rng },
   functions = { next32, seed, skip },
-  results = { [Endo] = U32 },
+  results = { [endo] = u32 },
 }
 ```
 
@@ -978,20 +987,20 @@ sections reject. List entries in types/functions are names, or named aliases:
 ```
 return {
   functions = { next32, d6 = roll(6) },
-  types = { Rng, Counter = SomeCounter },
-  results = { [helper] = (U32, Bool) },
+  types = { rng, counter = some_counter },
+  results = { [helper] = (u32, bool) },
 }
 ```
 
 A bare identifier exports under its own spelling. `alias = expression` gives an explicit public name;
 its expression must yield a known type or executable selection appropriate to the section. Duplicate
-public names within a section reject. Qualified selections require aliases, such as `draw = Rng.draw`.
+public names within a section reject. Qualified selections require aliases, such as `draw = rng.draw`.
 Method exports expose their receiver as the C entry's receiver parameter, not as an invented source
 argument. A view bound to mutable module-evaluation storage cannot be exported as implicit C global
 state.
 
 Results entries use `[word-or-signature-expression] = result-spec`. A result-spec is one type, an
-ordered parenthesized type list, or () for Unit. Known code contracts and structural signature contracts
+ordered parenthesized type list, or () for unit. Known code contracts and structural signature contracts
 are distinct: a signature entry constrains that calling interface; a code entry constrains that word
 specialization and compiler-derived refinements. Explicitly partial-specialized words have their own
 contracts; implementation must check all applicable contracts and reject contradictions, never silently
@@ -1014,11 +1023,11 @@ the importing file with dots as separators and `.let` implied, so `use util.help
 
 ```
 use util
-let twice(n: U32): U32 = util.helper(n)
-let origin(): util.Point = util.Point { x = 1, y = 2 }
+let twice(n: u32): u32 = util.helper(n)
+let origin(): util.point = util.point { x = 1, y = 2 }
 ```
 
-What a module offers is exactly its export list, so `util.helper` and `util.Point` work only if the
+What a module offers is exactly its export list, so `util.helper` and `util.point` work only if the
 used file exports them; any other name stays private to that file. A used module's own imports are
 resolved first, a module is loaded once however many files use it, and a cycle rejects
 (`import-cycle`). Modules compiled together share one translation unit and one initialiser, so
@@ -1074,17 +1083,17 @@ signature       := '(' type-list? ')' ':' result-spec
 Top-let has local-let's syntax but module visibility rules. Optional semicolons delimit complete
 items. Delimited comma lists permit a trailing comma; empty parameter/argument/lambda lists are valid.
 Parameter groups end after an annotation; a following comma begins the next group. For instance,
-`(a, b: U32, c: Bool)` is two groups. In a binding list, annotations belong to individual binders.
+`(a, b: u32, c: bool)` is two groups. In a binding list, annotations belong to individual binders.
 
 A parenthesized comma sequence is legal only as a signature side/result-spec, never as a general
 expression. Parser lookahead over balanced parentheses can recognize an input type list followed by
 an arrow; scalar grouping otherwise adjusts its expression to one value. Pipe lambdas remove the need
 to guess whether a name before an arrow binds a variable or denotes a type.
 
-Type expressions use expression syntax but must evaluate to a type/calling requirement. There is no
+type expressions use expression syntax but must evaluate to a type/calling requirement. There is no
 separate capitalization rule or implicit conversion of a value into its type. Their surrounding
 colon, arrow or list delimiter determines where they end. A result-spec's comma list is distinct
-from a single signature-valued result, e.g. `: ((U32): U32)`.
+from a single signature-valued result, e.g. `: ((u32): u32)`.
 
 `if a then if b then x else y else z` associates each else with its structurally pending expression
 conditional. Statement conditionals have explicit end tokens and cannot consume an expression's else
@@ -1094,26 +1103,26 @@ across an intended item boundary. Full grammar/parser tests must cover these bou
 ## 13. Worked example
 
 ```
-let xorshift(a, b, c, s: U32) : U32 = do
+let xorshift(a, b, c, s: u32) : u32 = do
   let s1 = s ~ (s << a)
   let s2 = s1 ~ (s1 >> b)
   return s2 ~ (s2 << c)
 end
 
 let next32 = xorshift(13, 17, 5)
-let seed(s: U32) = if s == 0 then 2463534242 else s
+let seed(s: u32) = if s == 0 then 2463534242 else s
 
-let skip(s, n: U32) : U32 = do
+let skip(s, n: u32) : u32 = do
   if n == 0 then return s end
   return skip(next32(s), n - 1)
 end
 
-let step(s: U32) : (U32, U32) = do
+let step(s: u32) : (u32, u32) = do
   let t = next32(s)
   return t, t
 end
 
-let roll(bound, s: U32) : (U32, U32) = do
+let roll(bound, s: u32) : (u32, u32) = do
   let t = next32(s)
   return t, t % bound + 1
 end
@@ -1121,21 +1130,21 @@ end
 let d6 = roll(6)
 let d20 = roll(20)
 
-let Rng = {
-  state: U32,
-  draw() : U32 = do
+let rng = {
+  state: u32,
+  draw() : u32 = do
     state = next32(state)
     return state
   end,
 }
 
-let roll_then_step(s: U32) : (U32, U32) = do
+let roll_then_step(s: u32) : (u32, u32) = do
   let next, face = d6(s)
   return next32(next), face
 end
 
 return {
-  types = { Rng },
+  types = { rng },
   functions = { seed, next32, skip, step, roll, d6, d20, roll_then_step },
 }
 ```
@@ -1148,8 +1157,8 @@ reference, residual partial application, general tuple values, sparse or growing
 zero-length array, record-value literals without a
 schema, non-exhaustive or recursive pattern matching, implicit type parameters, arbitrary foreign
 layouts, `pub`, selective or re-exporting imports and configurable traps are implied by this syntax. A reference is a checked
-borrow of a target that outlives it, not a pointer type a program may fabricate. A `Ptr` is the type
-that may be null or outlive its target, and it is not a `Ref`; ownership, uniqueness, moves and
+borrow of a target that outlives it, not a pointer type a program may fabricate. A `ptr` is the type
+that may be null or outlive its target, and it is not a `ref`; ownership, uniqueness, moves and
 automatic destruction are not offered either, so a scoped resource is released by a word that takes a
 body (section 8.7) rather than by a destructor.
 
@@ -1162,11 +1171,11 @@ Required syntax/semantic tests include:
 - pipe lambdas versus lowercase type aliases/signatures; grouped and nested signature arrows;
 - shared parameter annotations versus per-binder annotations; contextual lambda typing;
 - static partial supply, residual saturated calls, overapplication and nullary calls;
-- multiple-result forwarding/grouping, Unit fill, exact return contracts and result annotations;
+- multiple-result forwarding/grouping, unit fill, exact return contracts and result annotations;
 - expression/statement conditionals, early returns, short circuit and child lexical scopes;
 - immutable bindings versus record stores; compound target/RHS evaluation order;
 - sum construction by supply and by positional application, exhaustive matching, known versus
-  runtime tags, erased `Unit` alternatives and payload type mismatches;
+  runtime tags, erased `unit` alternatives and payload type mismatches;
 - keyed partial supply versus mutable fields initialized by a saturated constructor;
 - owned scalar captures, borrowed receiver captures and invalid escapes;
 - lazy mutually visible module definitions, initializer cycles and exported runtime ABI demands;

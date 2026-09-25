@@ -21,29 +21,29 @@ local limits = {keys=keys, steps=steps, staticDepth=1024, depth=1024, interpretD
 
 local fixtures = {
     {name="match", tracked="vm", source=[[
-let Op=OneOf({step:Unit,branch:Unit,halt:Unit})
-let instruction(pc:U32):Op=[Op.step(),Op.branch(),Op.halt()][pc]
-let vm(pc,n,a:U32):U32=instruction(pc){
- step=|u:Unit|->vm(pc+1,n,a+3),
- branch=|u:Unit|->if n==0 then vm(pc+1,n,a) else vm(0,n-1,a),
- halt=|u:Unit|->a,
+let Op=oneof {step:unit,branch:unit,halt:unit}
+let instruction(pc:u32):Op=[Op.step(),Op.branch(),Op.halt()][pc]
+let vm(pc,n,a:u32):u32=instruction(pc){
+ step=|u:unit|->vm(pc+1,n,a+3),
+ branch=|u:unit|->if n==0 then vm(pc+1,n,a) else vm(0,n-1,a),
+ halt=|u:unit|->a,
 }
-let run(n,a:U32):U32=vm(0,n,a)
+let run(n,a:u32):u32=vm(0,n,a)
 return {functions={run}}
 ]], args=function(n) return {V.u32(n), V.u32(7)} end, expected=function(n) return 7+3*(n+1) end},
     -- Equivalent concrete transitions without constructing handler lambdas.
     {name="direct", tracked="vm", source=[[
-let vm(pc,n,a:U32):U32=if pc==0 then vm(pc+1,n,a+3)
+let vm(pc,n,a:u32):u32=if pc==0 then vm(pc+1,n,a+3)
  else if pc==1 then if n==0 then vm(pc+1,n,a) else vm(0,n-1,a)
  else a
-let run(n,a:U32):U32=vm(0,n,a)
+let run(n,a:u32):u32=vm(0,n,a)
 return {functions={run}}
 ]], args=function(n) return {V.u32(n), V.u32(7)} end, expected=function(n) return 7+3*(n+1) end},
     -- No match or sum at all: an immediately invoked lambda reproduces the repeated suffix work.
     -- Depth 2*n+2 gives the same number of logical word invocations as the VM fixture.
     {name="lambda-chain", tracked="chain", source=[[
-let chain(n:U32):U32=if n==0 then 0 else (|u:Unit|->chain(n-1)+1)(Unit())
-let run(n:U32):U32=chain(n)
+let chain(n:u32):u32=if n==0 then 0 else (|u:unit|->chain(n-1)+1)(unit())
+let run(n:u32):u32=chain(n)
 return {functions={run}}
 ]], args=function(n) return {V.u32(2*n+2)} end, expected=function(n) return 2*n+2 end},
 }

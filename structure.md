@@ -141,7 +141,7 @@ That is the language's own statement of the compiler's two layers.
 
 Interned, immutable, keyed by identity.
 
-| Type | Meaning |
+| type | Meaning |
 | --- | --- |
 | `Ty.V` | a runtime type or calling requirement |
 | `Ty.Field` | a named member of a record, sum, or callable environment |
@@ -162,7 +162,7 @@ Consequences:
 
 Not interned, distinguished by constructor, one `Ir.Fn` at a time.
 
-| Type | Distinction |
+| type | Distinction |
 | --- | --- |
 | `Ir.Value(id)` | an immutable result: from `Let`, `Read`, or `Call` |
 | `Ir.Storage(id)` | a mutable cell: from `Var` or `PlaceParam` |
@@ -275,7 +275,7 @@ Ty:isBool() :isUnit() :isType()
 Ty:isRecord() :isSig() :isSum() :isTagged() :isTaggedType()
 Ty:isRef() :isPtr() :isArray() :isSlice() :isString()
 Ty:isNamed() :isOwned() :isView()
-Ty:isIndirection()   -- Ref | Ptr | Slice: "has a representation that stops", a predicate over
+Ty:isIndirection()   -- ref | ptr | slice: "has a representation that stops", a predicate over
                      -- three variants, not a fourth variant (§0.1)
 ```
 
@@ -390,7 +390,7 @@ Session = {
     types = {
         cells      = {},   -- Ty.Named.cell -> Ty            (sealed recursive definitions)
         byMeaning  = {},   -- S.encode(ty)    -> Ty.Named     (structural identity of a knot)
-        referenced = {},   -- Ty.Named.cell  -> true          (cells named through Ref/Ptr/Slice)
+        referenced = {},   -- Ty.Named.cell  -> true          (cells named through ref/ptr/slice)
     },
 
     -- Occurrences. Grow with distinct specializations only.

@@ -9,7 +9,7 @@ Two conventions keep the examples readable:
 
 - `...` marks an elided body, not something a parser accepts.
 - A **named definition must annotate every parameter**, though adjacent names may
-  share one annotation, so `(a, b, x: U32)` declares three `U32` parameters
+  share one annotation, so `(a, b, x: u32)` declares three `u32` parameters
   (`syntax.md` §2). A list such as `resize(width, height, image)` is a requirement
   shape or a call site, not a definition.
 
@@ -169,13 +169,39 @@ by spelling: see `editor/README.md`.
 
 That makes names part of the architecture rather than mere decoration.
 
+Because capitalization carries no meaning, Wordlet does not spend it. Wordlet's own
+vocabulary is lowercase — `u8` through `u64`, `i32`, `i64`, `f64`, `bool`, `unit`,
+`type`, and the constructors `array`, `slice`, `ref`, `ptr`, `null`, `string`,
+`oneof` — and names a program introduces are lowercase `snake_case` too. The language
+owns a small set of representation-level words; everything built from them earns a
+domain name of its own:
+
+```text
+let document_bytes = array(u8, 4096)
+let visible_text = slice(document_character)
+let editor_mode = oneof { normal: unit, insert: unit, visual: unit }
+let document_byte_offset = u32
+```
+
+The pressure is deliberate:
+
+> A primitive name tells you how something is represented. A program name tells you
+> what it means.
+
+Spend names on the second. A type is just another value in the word system, so
+`let document_byte_offset = u32` reads as ordinary Wordlet, and the surface language
+ends up agreeing with the semantics instead of teaching a second, typographic one.
+Those predefined words are also reserved at module level (`syntax.md` §1): a
+module-level declaration cannot rebind `u32` or `oneof`, though a local binding may
+shadow one like any outer name.
+
 Prefer:
 
 ```text
 let process_payment(
-    payment: Payment,
-    authorization_policy: AuthorizationPolicy,
-    on_authorized: (Authorization): Unit,
+    payment: payment,
+    authorization_policy: authorization_policy,
+    on_authorized: (authorization): unit,
 ) = ...
 ```
 
@@ -216,7 +242,7 @@ unless a short name is genuinely obvious in a tiny local scope.
 For example:
 
 ```text
-let distance(x, y: F64): F64 =
+let distance(x, y: f64): f64 =
     if x < y then y - x else x - y
 ```
 
@@ -275,8 +301,8 @@ Prefer:
 
 ```text
 let production_renderer = renderer {
-    format = Html,
-    policy = ProductionPolicy,
+    format = html,
+    policy = production_policy,
 }
 ```
 
@@ -301,7 +327,7 @@ These names tell the reader what knowledge was supplied.
 Keyed aggregates amplify the importance of naming:
 
 ```text
-Checkout {
+checkout {
     inventory = inventory,
     payment_gateway = gateway,
     fraud_policy = policy,
@@ -378,9 +404,9 @@ Since `let` can name a word at any stage of specialization, use that ability
 deliberately:
 
 ```text
-let parse_json = parse(Json)
-let strict_json_parser = parse_json(StrictPolicy)
-let production_json_parser = strict_json_parser(ProductionDiagnostics)
+let parse_json = parse(json)
+let strict_json_parser = parse_json(strict_policy)
+let production_json_parser = strict_json_parser(production_diagnostics)
 ```
 
 Each name records an architectural decision.
@@ -412,7 +438,7 @@ Application in Wordlet means **supplying requirements**.
 For an ordered word:
 
 ```text
-let affine(a, b, x: U32): U32 =
+let affine(a, b, x: u32): u32 =
     a * x + b
 ```
 
@@ -475,21 +501,21 @@ distance(a, b)
 ```
 
 ```text
-let affine(a, b, x: U32): U32 = a * x + b
+let affine(a, b, x: u32): u32 = a * x + b
 let transform = affine(4, 3)     -- supplies two of three; a specialized word
 ```
 
 Application is compact. Supplying fewer requirements than remain returns a
 specialized word; supplying all of them invokes the body. Requirement order also
 carries dependency, because an earlier parameter may determine a later one, as `T`
-does in `let identity(T: Type, x: T) = x`.
+does in `let identity(T: type, x: T) = x`.
 
 ### Keyed requirements
 
 Use keyed requirements when the names carry meaning:
 
 ```text
-let distance { x: U32, y: U32 }: U32 = x * x + y * y
+let distance { x: u32, y: u32 }: u32 = x * x + y * y
 let d = distance { x = 3, y = 4 }
 ```
 
@@ -506,20 +532,20 @@ let same = distance { y = 4, x = 3 }
 Every key is annotated, because a key has no position to infer a type from.
 
 A schema is the same mechanism with a construction terminal, so `distance { ... }`
-and `Server { ... }` are one thing:
+and `server { ... }` are one thing:
 
 ```text
-let Server = {
-    host: Host,
-    port: U32,
-    logger: Logger,
-    clock: Clock,
-    retry: RetryPolicy,
+let server = {
+    host: host,
+    port: u32,
+    logger: logger,
+    clock: clock,
+    retry: retry_policy,
 }
 
-let ProductionServer = Server {
-    logger = ProductionLogger,
-    retry = ProductionRetry,
+let production_server = server {
+    logger = production_logger,
+    retry = production_retry,
 }
 ```
 
@@ -544,7 +570,7 @@ capabilities: independent, often same-typed, and named for a reason.
 
 ```text
 render { width = w, height = h, scene = scene, camera = camera }
-Server { host = host, port = port, logger = logger, clock = clock, retry = retry }
+server { host = host, port = port, logger = logger, clock = clock, retry = retry }
 ```
 
 The quick test is whether you can read the call aloud without the parameter names.
@@ -622,7 +648,7 @@ A useful default is:
 ```text
 structural / least variable
         ↓
-Type
+type
 algorithm
 policy
 configuration
@@ -636,7 +662,7 @@ most variable
 For example:
 
 ```text
-let transform(T: Type, algorithm: Algorithm, policy: Policy, input: T) = ...
+let transform(t: type, algorithm: algorithm, policy: policy, input: t) = ...
 ```
 
 This ordering makes progressive specialization natural.
@@ -646,7 +672,7 @@ evaluated left-to-right, and an earlier parameter may determine a later requirem
 (`syntax.md` §2):
 
 ```text
-let identity(T: Type, x: T) = x
+let identity(t: type, x: t) = x
 ```
 
 Here `T` must be known before `x` can be checked.
@@ -668,7 +694,7 @@ Known information naturally participates in specialization.
 For example:
 
 ```text
-let affine(a, b, x: U32): U32 =
+let affine(a, b, x: u32): u32 =
     a * x + b
 
 let transform = affine(4, 3)
@@ -708,15 +734,15 @@ This is one of Wordlet's central design instincts.
 Generic programming should usually remain ordinary word programming.
 
 ```text
-let identity(T: Type, x: T) = x
+let identity(t: type, x: t) = x
 
-let twice(T: Type, f: (T): T, x: T) =
+let twice(t: type, f: (t): t, x: t) =
     f(f(x))
 
-let identity_u32 = identity(U32)
+let identity_u32 = identity(u32)
 ```
 
-`Type` is compile-time information (`syntax.md` §10). There is no separate implicit
+`type` is compile-time information (`syntax.md` §10). There is no separate implicit
 generic parameter mechanism.
 
 This means a Wordlet programmer should resist immediately inventing separate
@@ -730,20 +756,20 @@ constexpr types
 type-level functions
 ```
 
-First try an ordinary word taking `Type`.
+First try an ordinary word taking `type`.
 
 If ordinary supply and specialization already express the idea, another language
 feature is unnecessary.
 
-One boundary is worth remembering early: a word with a `Type` parameter has no
+One boundary is worth remembering early: a word with a `type` parameter has no
 closed runtime ABI, so it cannot itself be exported as a function. Specialize it
 first, then export the specialization:
 
 ```text
-let identity_u32 = identity(U32)   -- export this, not `identity`
+let identity_u32 = identity(u32)   -- export this, not `identity`
 ```
 
-A runtime value cannot supply `Type`, and a public callable signature must be
+A runtime value cannot supply `type`, and a public callable signature must be
 closed (`syntax.md` §10).
 
 ---
@@ -753,12 +779,12 @@ closed (`syntax.md` §10).
 Partial keyed supply can make structural knowledge static:
 
 ```text
-let Point = {
-    x: U32,
-    y: U32,
+let point = {
+    x: u32,
+    y: u32,
 }
 
-let X3 = Point {
+let at_x3 = point {
     x = 3,
 }
 ```
@@ -766,13 +792,13 @@ let X3 = Point {
 `x` is now part of the specialized schema.
 
 A use of that field can therefore resolve to the known value instead of
-necessarily becoming a runtime load. For `X3 { y = 4 }.x`, the compiler emits the
+necessarily becoming a runtime load. For `at_x3 { y = 4 }.x`, the compiler emits the
 constant directly.
 
 But distinguish this from ordinary saturated construction:
 
 ```text
-let p = Point {
+let p = point {
     x = 3,
     y = 4,
 }
@@ -852,12 +878,12 @@ cannot inspect, and even constant arguments do not make that call foldable
 Therefore:
 
 ```text
-extern let read_sensor(): U32
+extern let read_sensor(): u32
 
-let scale(k, x: U32): U32 = k * x
+let scale(k, x: u32): u32 = k * x
 let scale100 = scale(100)
 
-let main(): U32 =
+let main(): u32 =
     scale100(read_sensor())
 ```
 
@@ -878,7 +904,7 @@ Specialization is valuable until a dimension has too many possible static values
 Suppose:
 
 ```text
-let process(mode: Mode, threshold: U32, input: Input) = ...
+let process(mode: mode, threshold: u32, input: input) = ...
 ```
 
 If `mode` has three possibilities but `threshold` has millions, specializing both
@@ -901,9 +927,9 @@ parameter, foreign result, mutable runtime state, or another runtime computation
 For example:
 
 ```text
-let scale(n, x: U32): U32 = n * x
+let scale(n, x: u32): u32 = n * x
 
-let run(n, x: U32): U32 =
+let run(n, x: u32): u32 =
     scale(n, x)
 ```
 
@@ -938,10 +964,10 @@ Therefore prefer ordinary higher-order composition:
 
 ```text
 let with_logging(
-    logger: Logger,
-    operation: Operation,
-    input: Input,
-): Result = ...
+    logger: logger,
+    operation: operation,
+    input: input,
+): result = ...
 ```
 
 rather than introducing a callback framework or polymorphic interface merely
@@ -993,15 +1019,15 @@ The handler keys are the alternatives of a sum, and the match is exhaustive
 (`syntax.md` §8.1). A complete shape makes the connection visible:
 
 ```text
-let Outcome = OneOf {
-    processing_completed: Completed,
-    validation_failed: ValidationError,
+let outcome = oneof {
+    processing_completed: completed,
+    validation_failed: validation_error,
 }
 
-let run(input: Input): U32 =
+let run(input: input): u32 =
     process(input) {
-        processing_completed = |completed: Completed| -> completed.count,
-        validation_failed = |error: ValidationError| -> 0,
+        processing_completed = |completed: completed| -> completed.count,
+        validation_failed = |error: validation_error| -> 0,
     }
 ```
 
@@ -1075,14 +1101,14 @@ next state from the handlers instead, and let one tail self-call in the loop wor
 own body drive it:
 
 ```text
-let advance(m: Machine): Machine =
+let advance(m: machine): machine =
   m.code[m.pc] {
-    push = |value: U32| -> do ... return m end,
-    add  = |unit: Unit| -> do ... return m end,
-    halt = |unit: Unit| -> do m.done = true return m end,
+    push = |value: u32| -> do ... return m end,
+    add  = |unit: unit| -> do ... return m end,
+    halt = |unit: unit| -> do m.done = true return m end,
   }
 
-let run(m: Machine): U32 = do
+let run(m: machine): u32 = do
   let next = advance(m)
   if next.done then return next.result end
   return run(next)
@@ -1094,7 +1120,7 @@ end
 never stay on the stack after their step. `examples/dispatch.let` is this shape.
 
 Prefer the hot state as the loop's **parameters** rather than a record: a code
-`Ptr`, the `pc`, a stack `Ptr` and `sp` are one word each, so a step copies no
+`ptr`, the `pc`, a stack `ptr` and `sp` are one word each, so a step copies no
 aggregate at all, and the handlers return the transition instead of the machine.
 `examples/interpreter.let` is that form — one back edge, no per-step copy.
 
@@ -1115,12 +1141,12 @@ foreign result or mutable storage.
 
 ## 18. Use sums and keyed handlers instead of artificial class hierarchies
 
-Wordlet's `OneOf` builds sum types from keyed alternatives:
+Wordlet's `oneof` builds sum types from keyed alternatives:
 
 ```text
-let Shape = OneOf {
-    circle: Circle,
-    rectangle: Rectangle,
+let shape = oneof {
+    circle: circle,
+    rectangle: rectangle,
 }
 ```
 
@@ -1128,8 +1154,8 @@ Matching is itself keyed application:
 
 ```text
 shape {
-    circle = |circle: Circle| -> ...,
-    rectangle = |rectangle: Rectangle| -> ...,
+    circle = |circle: circle| -> ...,
+    rectangle = |rectangle: rectangle| -> ...,
 }
 ```
 
@@ -1149,11 +1175,11 @@ If yes, a sum plus keyed handlers often states the domain more directly.
 Wordlet's small ontology does not mean collapsing concepts that carry genuinely
 different guarantees.
 
-`Ref(T)` and `Ptr(T)` are intentionally different.
+`ref(T)` and `ptr(T)` are intentionally different.
 
-A `Ref` is checked: its target must outlive its use.
+A `ref` is checked: its target must outlive its use.
 
-A `Ptr` deliberately carries no such lifetime guarantee. It may be null or
+A `ptr` deliberately carries no such lifetime guarantee. It may be null or
 dangling; the programmer is responsible (`syntax.md` §8.5).
 
 This illustrates an important design principle:
@@ -1202,8 +1228,8 @@ Prefer:
 parse
 validate
 compile
-Document
-CompilationError
+document
+compilation_error
 ```
 
 over exposing every helper introduced during implementation.
@@ -1213,7 +1239,7 @@ A module boundary should make the system easier to speak about.
 Names at module boundaries deserve particular care because they become the
 language other modules use to describe the subsystem. Two practical reminders:
 
-- A generic word taking `Type` cannot itself be exported; export a specialization
+- A generic word taking `type` cannot itself be exported; export a specialization
   (see §9).
 - The export configuration is not a runtime record. It is compile-time module
   metadata, and its sections are only `types`, `functions` and `results`.
@@ -1243,7 +1269,7 @@ Ask whether the actual requirement can instead be expressed through:
 ordinary word
 ordered supply
 keyed supply
-Type argument
+type argument
 sum
 known callable
 continuation
@@ -1297,15 +1323,15 @@ becomes known*.
 For example:
 
 ```text
-let Engine = {
-    algorithm: Algorithm,
-    logger: Logger,
-    limit: U32,
+let engine = {
+    algorithm: algorithm,
+    logger: logger,
+    limit: u32,
 }
 
-let ProductionEngine = Engine {
-    algorithm = FastAlgorithm,
-    logger = ProductionLogger,
+let production_engine = engine {
+    algorithm = fast_algorithm,
+    logger = production_logger,
 }
 ```
 
@@ -1324,10 +1350,10 @@ Binding time is part of the design.
 Names should reinforce it:
 
 ```text
-ProductionEngine
-DebugEngine
-FixedSizePacketDecoder
-RuntimeConfiguredPacketDecoder
+production_engine
+debug_engine
+fixed_size_packet_decoder
+runtime_configured_packet_decoder
 ```
 
 rather than hiding the distinction behind generic names.
@@ -1344,7 +1370,7 @@ When starting a Wordlet system:
 4. Decide whether requirement identity is positional or keyed.
 5. Give keys names that explain their semantic role.
 6. Put structural/dependent requirements early in ordered words.
-7. Use `Type` arguments instead of inventing separate generic machinery, and
+7. Use `type` arguments instead of inventing separate generic machinery, and
    specialize before exporting.
 8. Partially supply stable information naturally.
 9. Give specialized words names describing what has been fixed.
@@ -1355,7 +1381,7 @@ When starting a Wordlet system:
     useful.
 14. Use CPS when it keeps borrowed state local or prevents stack growth.
 15. Use sums for genuine closed alternatives.
-16. Use `Ref` only when its lifetime guarantee is meaningful; use `Ptr` when
+16. Use `ref` only when its lifetime guarantee is meaningful; use `ptr` when
     deliberately crossing into unchecked address semantics.
 17. Keep resources scoped where practical.
 18. Keep module exports small, explicit and domain-oriented.
@@ -1423,6 +1449,101 @@ What remains after specialization, and why?
 ## 27. Wordlet naming rules
 
 A compact naming style for Wordlet.
+
+### Spell names in lowercase `snake_case`
+
+Wordlet's own words are lowercase, and so are the names a program introduces:
+
+```text
+document_byte_offset
+terminal_column
+visible_document_lines
+command_arguments
+```
+
+Capitalization is not carrying a category here, so there is no reason to spend it. A
+name spelled `DocumentByteOffset` would suggest a type/value distinction the language
+does not make.
+
+### Name the meaning, not the representation
+
+Two values can share a machine representation and still be different ideas:
+
+```text
+document_byte_offset
+cursor_position
+viewport_origin
+selection_anchor
+search_match_position
+```
+
+Even when an alias resolves to the same `u32`, the name is what keeps them from being
+substituted for one another by mistake. The same applies to types built from a
+primitive:
+
+```text
+let document_bytes = array(u8, 4096)
+let terminal_cells = array(terminal_render_cell, 80 * 24)
+```
+
+rather than a program that keeps saying `array` and `u8` long after the meaning was
+known.
+
+### Let the containing type supply the context
+
+An alternative lives inside its sum, so it does not need to repeat it:
+
+```text
+editor_mode.normal
+editor_mode.insert
+```
+
+not `EDITOR_MODE_NORMAL`, `NormalMode` or `EditorModeNormal`. The containing type
+already said which mode this is.
+
+### Name outcomes for why control arrived
+
+A callable's name should say why it was reached, not what mechanism delivered it.
+Prefer:
+
+```text
+save_requested
+document_saved
+document_save_failed
+```
+
+over `on_save`, `callback`, or `save_handler`. The first group describes the
+occurrence; the second describes the plumbing.
+
+### Avoid machinery suffixes
+
+Names like these describe the implementation language, not the domain:
+
+```text
+Manager  Factory  Impl  Interface  Base  Abstract
+DTO  Controller  Service  Callback  Handler  Object  Class
+```
+
+Use them only when they are genuinely part of the domain architecture, and prefer a
+capability name when they are not: `load_customer` and `store_customer` over
+`customer_repository`.
+
+### Qualify only to remove a real ambiguity
+
+Context should do most of the work. `column` inside terminal-specific code is clearer
+than `terminal_column` repeated everywhere; `terminal_column` is better when the file
+also deals with document columns. Qualify against a confusion the reader could
+actually make, not against one that no longer exists in that scope.
+
+### A descriptive name buys clarity, not a guarantee
+
+Naming is architecture, but it is not checking. Two aliases with different names are
+still the same type to the compiler. A callable field named `save_requested` is still
+just a callable that may return normally; its name does not make it asynchronous, nor
+does it prove it never returns to its caller. A `ptr(u8)` called
+`terminal_input_buffer` is named better and is exactly as unchecked as before; the
+wrapper is what has to establish the length and lifetime. Use names to make intent
+obvious, and use the type system, ownership rules and tests to make it true.
 
 ### Prefer clarity over brevity
 
@@ -1551,7 +1672,7 @@ into a global update; it receives an explicit contract, and the parent decides w
 each exit means:
 
 ```text
-Editor {
+editor {
     document_changed = update_document_state,
     save_requested = save_current_document,
     close_requested = close_editor,
@@ -1576,10 +1697,10 @@ handler:
 
 ```text
 let admit(
-    request: Request,
-    on_admitted: (Accepted): Unit,
-    on_denied: (Rejected): Unit,
-): Unit = ...
+    request: request,
+    on_admitted: (accepted): unit,
+    on_denied: (rejected): unit,
+): unit = ...
 ```
 
 `on_admitted` and `on_denied` are the operations the child may perform; the parent
@@ -1609,7 +1730,7 @@ diagnostics: they fire precisely when a child tried to keep authority past its
 owner's lifetime.
 
 `examples/pipeline.let` shows one child serving both directions through an
-`R: Type` parameter: `settle` supplies exits that yield a scalar, `evaluate` returns
+`R: type` parameter: `settle` supplies exits that yield a scalar, `evaluate` returns
 the outcome as a sum, and `summarize` dispatches it.
 
 ### State ownership and architectural ownership point the same way
@@ -1618,9 +1739,9 @@ A child can own real mutable state without every transition becoming a global
 message:
 
 ```text
-let Editor = {
-    cursor: U32,
-    selection: U32,
+let editor = {
+    cursor: u32,
+    selection: u32,
     ...
 }
 ```
@@ -1652,7 +1773,7 @@ which is why they should be deliberate.
   exhaustive match.
 - **A child's state is tree-shaped by value.** Records copy on pass and return, so a
   parent that wants a child to mutate shared state passes a place — a method
-  receiver or an enclosing owner — not a copy. `Ref` to a sibling local is rejected
+  receiver or an enclosing owner — not a copy. `ref` to a sibling local is rejected
   on purpose (`syntax.md` §8.2).
 
 ### The same shape outside UI

@@ -100,87 +100,87 @@ end
 local CASES = {
     {
         name = "affine",
-        source = "let affine(a, b, x: U32) : U32 = a * x + b\nreturn { functions = { affine } }",
+        source = "let affine(a, b, x: u32) : u32 = a * x + b\nreturn { functions = { affine } }",
         entry = "affine", arity = 3,
         inputs = { { 3, 7, 4 }, { 1, 0, 0 }, { 4294967295, 1, 1 }, { 65536, 65536, 65537 } },
     },
     {
         name = "branch",
-        source = "let pick(x: U32) : U32 = if x == 0 then 7 else x * 2\nreturn { functions = { pick } }",
+        source = "let pick(x: u32) : u32 = if x == 0 then 7 else x * 2\nreturn { functions = { pick } }",
         entry = "pick", arity = 1,
         inputs = { { 0 }, { 1 }, { 2147483648 }, { 4294967295 } },
     },
     {
         name = "comparison",
-        source = "let classify(x: U32) : U32 = if x < 10 then 1 else if x == 10 then 2 else 3\n"
+        source = "let classify(x: u32) : u32 = if x < 10 then 1 else if x == 10 then 2 else 3\n"
             .. "return { functions = { classify } }",
         entry = "classify", arity = 1,
         inputs = { { 0 }, { 9 }, { 10 }, { 11 }, { 4294967295 } },
     },
     {
         name = "results",
-        source = "let divmod(a, b: U32) : (U32, U32) = do return a / b, a % b end\n"
-            .. "let recompose(a, b: U32) : U32 = do let q, r = divmod(a, b) return q * b + r end\n"
+        source = "let divmod(a, b: u32) : (u32, u32) = do return a / b, a % b end\n"
+            .. "let recompose(a, b: u32) : u32 = do let q, r = divmod(a, b) return q * b + r end\n"
             .. "return { functions = { divmod, recompose } }",
         entries = { { entry = "divmod", arity = 2 }, { entry = "recompose", arity = 2 } },
         inputs = { { 17, 5 }, { 1, 1 }, { 4294967295, 3 }, { 100, 7 } },
     },
     {
         name = "calls",
-        source = "let inc(x: U32) : U32 = x + 1\n"
-            .. "let twice(x: U32) : U32 = inc(inc(x))\n"
-            .. "let offset(x: U32) : U32 = twice(x) + inc(x)\n"
+        source = "let inc(x: u32) : u32 = x + 1\n"
+            .. "let twice(x: u32) : u32 = inc(inc(x))\n"
+            .. "let offset(x: u32) : u32 = twice(x) + inc(x)\n"
             .. "return { functions = { twice, offset } }",
         entries = { { entry = "twice", arity = 1 }, { entry = "offset", arity = 1 } },
         inputs = { { 0 }, { 1 }, { 4294967294 } },
     },
     {
         name = "recursion",
-        source = "let sum_to(n: U32) : U32 = if n == 0 then 0 else n + sum_to(n - 1)\n"
-            .. "let factorial(n: U32) : U32 = if n == 0 then 1 else n * factorial(n - 1)\n"
+        source = "let sum_to(n: u32) : u32 = if n == 0 then 0 else n + sum_to(n - 1)\n"
+            .. "let factorial(n: u32) : u32 = if n == 0 then 1 else n * factorial(n - 1)\n"
             .. "return { functions = { sum_to, factorial } }",
         entries = { { entry = "sum_to", arity = 1 }, { entry = "factorial", arity = 1 } },
         inputs = { { 0 }, { 1 }, { 5 }, { 10 } },
     },
     {
         name = "staticspecialization",
-        source = "let scale(k, x: U32) : U32 = k * x\n"
+        source = "let scale(k, x: u32) : u32 = k * x\n"
             .. "let by3 = scale(3)\n"
-            .. "let scaled(x: U32) : U32 = by3(x) + scale(5)(x)\n"
+            .. "let scaled(x: u32) : u32 = by3(x) + scale(5)(x)\n"
             .. "return { functions = { scaled } }",
         entry = "scaled", arity = 1,
         inputs = { { 0 }, { 1 }, { 7 }, { 1000000 } },
     },
     {
         name = "shifts",
-        source = "let xorshift(a, b, c, s: U32) : U32 = do\n"
+        source = "let xorshift(a, b, c, s: u32) : u32 = do\n"
             .. "  let s1 = s ~ (s << a)\n  let s2 = s1 ~ (s1 >> b)\n  return s2 ~ (s2 << c)\nend\n"
             .. "let next32 = xorshift(13, 17, 5)\n"
-            .. "let third(s: U32) : U32 = next32(next32(next32(s)))\n"
+            .. "let third(s: u32) : u32 = next32(next32(next32(s)))\n"
             .. "return { functions = { next32, third } }",
         entries = { { entry = "next32", arity = 1 }, { entry = "third", arity = 1 } },
         inputs = { { 0 }, { 1 }, { 42 }, { 4294967295 } },
     },
     {
         name = "guard",
-        source = "let safe_div(a, b: U32) : U32 = a / b\nreturn { functions = { safe_div } }",
+        source = "let safe_div(a, b: u32) : u32 = a / b\nreturn { functions = { safe_div } }",
         entry = "safe_div", arity = 2,
         inputs = { { 100, 3 }, { 7, 1 }, { 4294967295, 65536 } },
     },
     {
         name = "records",
-        source = "let P = { x: U32, y: U32 }\n"
-            .. "let build(a, b: U32) : U32 = do\n"
+        source = "let P = { x: u32, y: u32 }\n"
+            .. "let build(a, b: u32) : u32 = do\n"
             .. "  let p = P { x = a, y = b }\n  return p.x * 1000 + p.y\nend\n"
-            .. "let bump(p: P) : U32 = do p.x += 1 return p.x end\n"
-            .. "let caller(n: U32) : U32 = do\n"
+            .. "let bump(p: P) : u32 = do p.x += 1 return p.x end\n"
+            .. "let caller(n: u32) : u32 = do\n"
             .. "  let p = P { x = n, y = 5 }\n  let raised = bump(p)\n"
             .. "  return raised * 1000 + p.x * 10 + p.y\nend\n"
-            .. "let pair(a: U32) : P = P { x = a, y = a + 1 }\n"
-            .. "let use(a: U32) : U32 = do let q = pair(a) return q.x * 10 + q.y end\n"
-            .. "let alias(n: U32) : U32 = do\n"
+            .. "let pair(a: u32) : P = P { x = a, y = a + 1 }\n"
+            .. "let use(a: u32) : u32 = do let q = pair(a) return q.x * 10 + q.y end\n"
+            .. "let alias(n: u32) : u32 = do\n"
             .. "  let p = P { x = n, y = 0 }\n  let q = p\n  q.y = 9\n  return p.x * 10 + p.y\nend\n"
-            .. "let compound(n: U32) : U32 = do\n"
+            .. "let compound(n: u32) : u32 = do\n"
             .. "  let p = P { x = n, y = 3 }\n  p.x += 4\n  p.y *= 2\n  p.x -= 1\n"
             .. "  return p.x * 100 + p.y\nend\n"
             .. "return { types = { P }, functions = { build, caller, use, alias, compound } }",
@@ -193,12 +193,12 @@ local CASES = {
     },
     {
         name = "methods",
-        source = "let Counter = {\n  value: U32,\n  inc() : U32 = do value += 1 return value end,\n"
-            .. "  add(n: U32) : U32 = do value += n return value end,\n}\n"
-            .. "let observe(n: U32, change: Bool) : (U32, U32) = do\n"
+        source = "let Counter = {\n  value: u32,\n  inc() : u32 = do value += 1 return value end,\n"
+            .. "  add(n: u32) : u32 = do value += n return value end,\n}\n"
+            .. "let observe(n: u32, change: bool) : (u32, u32) = do\n"
             .. "  let c = Counter { value = n }\n  let old = c.value\n"
             .. "  if change then c.inc() end\n  return old, c.value\nend\n"
-            .. "let twice(n: U32) : U32 = do\n"
+            .. "let twice(n: u32) : u32 = do\n"
             .. "  let c = Counter { value = n }\n  c.inc()\n  c.add(5)\n  return c.value\nend\n"
             .. "return { types = { Counter }, functions = { observe, twice } }",
         entries = { { entry = "observe", arity = 2 }, { entry = "twice", arity = 1 } },
@@ -206,9 +206,9 @@ local CASES = {
     },
     {
         name = "tails",
-        source = "let sum_to(n, acc: U32) : U32 = if n == 0 then acc else sum_to(n - 1, acc + n)\n"
-            .. "let count_down(n: U32) : U32 = if n == 0 then 7 else count_down(n - 1)\n"
-            .. "let swapdown(a, b: U32) : U32 = if a == 0 then b else swapdown(b, a - 1)\n"
+        source = "let sum_to(n, acc: u32) : u32 = if n == 0 then acc else sum_to(n - 1, acc + n)\n"
+            .. "let count_down(n: u32) : u32 = if n == 0 then 7 else count_down(n - 1)\n"
+            .. "let swapdown(a, b: u32) : u32 = if a == 0 then b else swapdown(b, a - 1)\n"
             .. "return { functions = { sum_to, count_down, swapdown } }",
         entries = { { entry = "sum_to", arity = 2 }, { entry = "count_down", arity = 1 },
             { entry = "swapdown", arity = 2 } },
@@ -218,23 +218,23 @@ local CASES = {
         -- A keyed requirement annotated with a signature types the lambda supplied for it, so the
         -- lambda's parameter carries no annotation of its own (structure.md §5.4).
         name = "keyedsig",
-        source = "let apply2 { f: (U32): U32, x: U32 } : U32 = f(x)\n"
-            .. "let g() : U32 = apply2 { f = |a| -> a + 1, x = 5 }\n"
+        source = "let apply2 { f: (u32): u32, x: u32 } : u32 = f(x)\n"
+            .. "let g() : u32 = apply2 { f = |a| -> a + 1, x = 5 }\n"
             .. "return { functions = { g } }",
         entry = "g", arity = 0,
         inputs = { {} },
     },
     {
         name = "closures",
-        source = "let apply(f: (U32): U32, x: U32) : U32 = f(x)\n"
-            .. "let twice(f: (U32): U32, x: U32) : U32 = f(f(x))\n"
-            .. "let make_adder(n: U32) = |x: U32| -> n + x\n"
-            .. "let run(n, x: U32) : U32 = do let add = make_adder(n) return apply(add, x) end\n"
-            .. "let inline(x: U32) : U32 = twice(|y: U32| -> y + 1, x)\n"
-            .. "let compose(a, b, x: U32) : U32 = do\n"
+        source = "let apply(f: (u32): u32, x: u32) : u32 = f(x)\n"
+            .. "let twice(f: (u32): u32, x: u32) : u32 = f(f(x))\n"
+            .. "let make_adder(n: u32) = |x: u32| -> n + x\n"
+            .. "let run(n, x: u32) : u32 = do let add = make_adder(n) return apply(add, x) end\n"
+            .. "let inline(x: u32) : u32 = twice(|y: u32| -> y + 1, x)\n"
+            .. "let compose(a, b, x: u32) : u32 = do\n"
             .. "  let f = make_adder(a)\n  let g = make_adder(b)\n  return apply(f, apply(g, x))\nend\n"
-            .. "let C = { v: U32, mk() = |x: U32| -> v + x }\n"
-            .. "let snap(n: U32) : U32 = do\n"
+            .. "let C = { v: u32, mk() = |x: u32| -> v + x }\n"
+            .. "let snap(n: u32) : u32 = do\n"
             .. "  let c = C { v = n }\n  let f = c.mk()\n  c.v += 5\n  return f(100)\nend\n"
             .. "return { types = { C }, functions = { run, inline, compose, snap } }",
         entries = { { entry = "run", arity = 2 }, { entry = "inline", arity = 1 },
@@ -243,13 +243,13 @@ local CASES = {
     },
     {
         name = "contextual",
-        source = "let twice(f: (U32): U32, x: U32): U32 = f(f(x))\n"
-            .. "let adder(n: U32): (U32): U32 = |x| -> x + n\n"
-            .. "let inc: (U32): U32 = |x| -> x + 1\n"
-            .. "let use(n, x: U32): U32 = do\n"
+        source = "let twice(f: (u32): u32, x: u32): u32 = f(f(x))\n"
+            .. "let adder(n: u32): (u32): u32 = |x| -> x + n\n"
+            .. "let inc: (u32): u32 = |x| -> x + 1\n"
+            .. "let use(n, x: u32): u32 = do\n"
             .. "  let f = adder(n)\n  return twice(f, x) + inc(x)\nend\n"
-            .. "let inline(x: U32): U32 = twice(|y| -> y * 2, x)\n"
-            .. "let capture(x: U32): U32 = twice(|y| -> y + x, 1)\n"
+            .. "let inline(x: u32): u32 = twice(|y| -> y * 2, x)\n"
+            .. "let capture(x: u32): u32 = twice(|y| -> y + x, 1)\n"
             .. "return { functions = { use, inline, capture } }",
         entries = { { entry = "use", arity = 2 }, { entry = "inline", arity = 1 },
             { entry = "capture", arity = 1 } },
@@ -257,16 +257,16 @@ local CASES = {
     },
     {
         name = "borrowed",
-        source = "let Counter = {\n  value: U32,\n"
-            .. "  bump(): U32 = do value += 1 return value end,\n}\n"
-            .. "let local_bumps(n: U32): U32 = do\n"
+        source = "let Counter = {\n  value: u32,\n"
+            .. "  bump(): u32 = do value += 1 return value end,\n}\n"
+            .. "let local_bumps(n: u32): u32 = do\n"
             .. "  let c = Counter { value = n }\n"
-            .. "  let f = |k: U32| -> c.bump() + k\n  return f(1) + f(2)\nend\n"
-            .. "let method_view(n: U32): U32 = do\n"
+            .. "  let f = |k: u32| -> c.bump() + k\n  return f(1) + f(2)\nend\n"
+            .. "let method_view(n: u32): u32 = do\n"
             .. "  let c = Counter { value = n }\n  let g = c.bump\n"
-            .. "  let h = |u: U32| -> g() + u\n  return h(10)\nend\n"
-            .. "let read_through(n: U32): U32 = do\n"
-            .. "  let c = Counter { value = n }\n  let peek = |u: U32| -> c.value + u\n"
+            .. "  let h = |u: u32| -> g() + u\n  return h(10)\nend\n"
+            .. "let read_through(n: u32): u32 = do\n"
+            .. "  let c = Counter { value = n }\n  let peek = |u: u32| -> c.value + u\n"
             .. "  c.value += 5\n  return peek(100)\nend\n"
             .. "return { types = { Counter }, functions = { local_bumps, method_view, read_through } }",
         entries = { { entry = "local_bumps", arity = 1 }, { entry = "method_view", arity = 1 },
@@ -275,23 +275,23 @@ local CASES = {
     },
     {
         name = "partial",
-        source = "let add = |a, b: U32| -> a + b\n"
+        source = "let add = |a, b: u32| -> a + b\n"
             .. "let add5 = add(5)\n"
-            .. "let use(x: U32): U32 = add5(x) + add(2)(3)\n"
+            .. "let use(x: u32): u32 = add5(x) + add(2)(3)\n"
             .. "return { functions = { use } }",
         entry = "use", arity = 1,
         inputs = { { 0 }, { 10 }, { 4294967290 } },
     },
     {
         name = "alias",
-        source = "let inc(x: U32) : U32 = x + 1\nreturn { functions = { a = inc, b = inc } }",
+        source = "let inc(x: u32) : u32 = x + 1\nreturn { functions = { a = inc, b = inc } }",
         entries = { { entry = "a", arity = 1 }, { entry = "b", arity = 1 } },
         inputs = { { 0 }, { 5 } },
     },
     {
         name = "unitandbool",
-        source = "let flag(x: U32) : Bool = x != 0\n"
-            .. "let both(a, b: U32) : Bool = (a < b) and (b != 0)\n"
+        source = "let flag(x: u32) : bool = x != 0\n"
+            .. "let both(a, b: u32) : bool = (a < b) and (b != 0)\n"
             .. "return { functions = { flag, both } }",
         entries = { { entry = "flag", arity = 1 }, { entry = "both", arity = 2 } },
         inputs = { { 0 }, { 1 }, { 5, 0 }, { 3, 9 }, { 9, 3 } },
@@ -299,22 +299,22 @@ local CASES = {
     {
         name = "sums",
         source = [==[
-let Circle = { radius: U32 }
-let Rect = { width: U32, height: U32 }
-let Shape = OneOf({ circle: Circle, rect: Rect })
-let area(s: Shape): U32 = s {
+let Circle = { radius: u32 }
+let Rect = { width: u32, height: u32 }
+let Shape = oneof { circle: Circle, rect: Rect }
+let area(s: Shape): u32 = s {
   circle = |c: Circle| -> c.radius * c.radius,
   rect = |r: Rect| -> r.width * r.height,
 }
-let wrap(n: U32): Shape = if n % 3 == 0 then Shape.rect { width = n, height = 2 } else Shape.circle { radius = n + 1 }
-let via_shape(n: U32): U32 = area(wrap(n))
-let direct(n: U32): U32 = area(Shape.circle { radius = n })
-let Opt = OneOf({ none: Unit, some: U32 })
-let or_else(o: Opt, d: U32): U32 = o {
-  none = |u: Unit| -> d,
-  some = |v: U32| -> v,
+let wrap(n: u32): Shape = if n % 3 == 0 then Shape.rect { width = n, height = 2 } else Shape.circle { radius = n + 1 }
+let via_shape(n: u32): u32 = area(wrap(n))
+let direct(n: u32): u32 = area(Shape.circle { radius = n })
+let Opt = oneof { none: unit, some: u32 }
+let or_else(o: Opt, d: u32): u32 = o {
+  none = |u: unit| -> d,
+  some = |v: u32| -> v,
 }
-let via_option(n: U32): U32 = or_else(if n == 0 then Opt.none() else Opt.some(n * 2), 7)
+let via_option(n: u32): u32 = or_else(if n == 0 then Opt.none() else Opt.some(n * 2), 7)
 return { types = { Circle, Rect, Shape }, functions = { via_shape, direct, via_option } }
 ]==],
         entries = { { entry = "via_shape", arity = 1 }, { entry = "direct", arity = 1 },
@@ -324,65 +324,65 @@ return { types = { Circle, Rect, Shape }, functions = { via_shape, direct, via_o
     {
         name = "known-match-lambdas",
         source = [[
-let T=OneOf({a:U32,b:U32})
-let U=OneOf({a:Unit,b:Unit})
-let choose(x:U32):U32=T.a(x){a=|v:U32|->v+1,b=|v:U32|->1+true}
-let unit(x:U32):U32=U.a(){a=|u:Unit|->x+2,b=|u|->missing_capture}
-let reversed(x:U32):U32=T.b(x){a=|v:MissingType|->0,b=|v:U32|->v+3}
-let Counter={value:U32}
+let T=oneof {a:u32,b:u32}
+let U=oneof {a:unit,b:unit}
+let choose(x:u32):u32=T.a(x){a=|v:u32|->v+1,b=|v:u32|->1+true}
+let unit_payload(x:u32):u32=U.a(){a=|u:unit|->x+2,b=|u|->missing_capture}
+let reversed(x:u32):u32=T.b(x){a=|v:MissingType|->0,b=|v:u32|->v+3}
+let Counter={value:u32}
 let state=Counter{value=0}
-let effect(x:U32):U32=do state.value+=1 return x end
-let discarded(x:U32):U32=do
+let effect(x:u32):u32=do state.value+=1 return x end
+let discarded(x:u32):u32=do
   state.value=0
   let unused=T.a(effect(x))
   return state.value
 end
-return {functions={choose,unit,reversed,discarded}}
+return {functions={choose,unit_payload,reversed,discarded}}
 ]],
-        entries = {{entry="choose",arity=1},{entry="unit",arity=1},
+        entries = {{entry="choose",arity=1},{entry="unit_payload",arity=1},
             {entry="reversed",arity=1},{entry="discarded",arity=1}},
         inputs = {{0},{7},{4294967295}},
     },
     {
         name = "immediate-lambdas",
         source = [[
-let Box={n:U32}
+let Box={n:u32}
 let box=Box{n=0}
-let type_now()=do box.n=box.n*10+1 return U32 end
-let argument():U32=do box.n=box.n*10+2 return 7 end
+let type_now()=do box.n=box.n*10+1 return u32 end
+let argument():u32=do box.n=box.n*10+2 return 7 end
 let answer=(|x:type_now()|->x+1)(argument())
-let order(x:U32):U32=box.n*100+answer
-let direct(x:U32):U32=(|v:U32|->v+1)(x)
-let narrow(x:U32):U32=do
- let n=255 let got=(|u:U8|->n+1)(n) return got+(n+1)
+let order(x:u32):u32=box.n*100+answer
+let direct(x:u32):u32=(|v:u32|->v+1)(x)
+let narrow(x:u32):u32=do
+ let n=255 let got=(|u:u8|->n+1)(n) return got+(n+1)
 end
-let copy(x:U32):U32=do
+let copy(x:u32):u32=do
  let b=Box{n=x}
  let result=(|p:Box|->do p.n+=1 return p.n end)(b)
  return result*100+b.n
 end
-let work(n:U32):U32=do
+let work(n:u32):u32=do
  let b=Box{n=n}
- let bump():U32=do b.n+=1 return b.n end
- let result=(|u:Unit|->bump())(Unit())
+ let bump():u32=do b.n+=1 return b.n end
+ let result=(|u:unit|->bump())(unit())
  return result*100+b.n
 end
-let effects(x:U32):U32=work(3)
-let partial(x:U32):U32=(|a,b:U32|->a+b)(3)(x)
-let Op=OneOf({step:Unit,branch:Unit,halt:Unit})
-let instruction(pc:U32):Op=[Op.step(),Op.branch(),Op.halt()][pc]
-let vm(pc,n,a:U32):U32=instruction(pc){
- step=|u:Unit|->vm(pc+1,n,a+3),
- branch=|u:Unit|->if n==0 then vm(pc+1,n,a) else vm(0,n-1,a),
- halt=|u:Unit|->a,
+let effects(x:u32):u32=work(3)
+let partial(x:u32):u32=(|a,b:u32|->a+b)(3)(x)
+let Op=oneof {step:unit,branch:unit,halt:unit}
+let instruction(pc:u32):Op=[Op.step(),Op.branch(),Op.halt()][pc]
+let vm(pc,n,a:u32):u32=instruction(pc){
+ step=|u:unit|->vm(pc+1,n,a+3),
+ branch=|u:unit|->if n==0 then vm(pc+1,n,a) else vm(0,n-1,a),
+ halt=|u:unit|->a,
 }
-let folded(x:U32):U32=vm(0,10,7)
-let H=OneOf({a:Unit,b:Unit})
-let R={n:U32, matched():U32=H.a(){a=|u:Unit|->n,b=later()}}
+let folded(x:u32):u32=vm(0,10,7)
+let H=oneof {a:unit,b:unit}
+let R={n:u32, matched():u32=H.a(){a=|u:unit|->n,b=later()}}
 let r=R{n=2}
-let later():(Unit):U32=do r.n+=10 return |u:Unit|->0 end
+let later():(unit):u32=do r.n+=10 return |u:unit|->0 end
 let captured=r.matched()
-let capture_order(x:U32):U32=r.n*100+captured
+let capture_order(x:u32):u32=r.n*100+captured
 return {functions={order,direct,narrow,copy,effects,partial,folded,capture_order}}
 ]],
         entries = {{entry="order",arity=1},{entry="direct",arity=1},{entry="narrow",arity=1},
@@ -394,9 +394,9 @@ return {functions={order,direct,narrow,copy,effects,partial,folded,capture_order
         -- A record-valued conditional used to leak the arms' reads into the continuation.
         name = "recordbranch",
         source = [==[
-let R = { width: U32, height: U32 }
-let wrap(n: U32): R = if n == 0 then R { width = n + 2, height = 3 } else R { width = n, height = 1 }
-let width_of(n: U32): U32 = wrap(n).width
+let R = { width: u32, height: u32 }
+let wrap(n: u32): R = if n == 0 then R { width = n + 2, height = 3 } else R { width = n, height = 1 }
+let width_of(n: u32): u32 = wrap(n).width
 return { types = { R }, functions = { wrap, width_of } }
 ]==],
         entries = { { entry = "width_of", arity = 1 } },
@@ -407,32 +407,32 @@ return { types = { R }, functions = { wrap, width_of } }
         -- interpreter selects the arm statically, so it is an independent oracle for the dispatch.
         name = "tagged",
         source = [==[
-let inc(x: U32): U32 = x + 1
-let dec(x: U32): U32 = x - 1
-let pick(c: Bool): U32 = do
+let inc(x: u32): u32 = x + 1
+let dec(x: u32): u32 = x - 1
+let pick(c: bool): u32 = do
   let f = if c then inc else dec
   return f(10)
 end
-let twice(c: Bool, x: U32): U32 = do
-  let f = if c then |y: U32| -> y + x else |y: U32| -> y * 2
+let twice(c: bool, x: u32): u32 = do
+  let f = if c then |y: u32| -> y + x else |y: u32| -> y * 2
   return f(f(1))
 end
-let choose(c: Bool, x: U32): U32 = do
-  let f = if c then |y: U32| -> y + x else |y: U32| -> y * x
+let choose(c: bool, x: u32): u32 = do
+  let f = if c then |y: u32| -> y + x else |y: u32| -> y * x
   return f(3) + f(4)
 end
-let with_zero(c: Bool, x: U32): U32 = do
-  let f = if c then inc else |y: U32| -> y * 0
+let with_zero(c: bool, x: u32): u32 = do
+  let f = if c then inc else |y: u32| -> y * 0
   return f(x)
 end
-let pair(c: Bool, x: U32): (U32, U32) = do
+let pair(c: bool, x: u32): (u32, u32) = do
   let f = if c then inc else dec
   return f(x), f(f(x))
 end
-let length(c: Bool, x: U32): U32 = (if c then |y: U32| -> y + x else |y: U32| -> y * x)(7)
+let length(c: bool, x: u32): u32 = (if c then |y: u32| -> y + x else |y: u32| -> y * x)(7)
 -- A tagged callable that crosses a call boundary: the tag is only known at run time.
-let mk(c: Bool) = if c then inc else |y: U32| -> y * 3
-let use(c: Bool, x: U32): U32 = do
+let mk(c: bool) = if c then inc else |y: u32| -> y * 3
+let use(c: bool, x: u32): u32 = do
   let f = mk(c)
   return f(x)
 end
@@ -451,20 +451,20 @@ return { functions = { pick, twice, choose, with_zero, pair, length, mk, use } }
         -- environment view. The interpreter resolves both, so it is an independent oracle.
         name = "callables",
         source = [==[
-let C = { v: U32 }
-let apply(f: (U32): U32, x: U32): U32 = f(x)
-let run(x: U32): U32 = do
+let C = { v: u32 }
+let apply(f: (u32): u32, x: u32): u32 = f(x)
+let run(x: u32): u32 = do
   let c = C { v = 10 }
-  let g = |y: U32| -> y + c.v
+  let g = |y: u32| -> y + c.v
   return apply(g, x)
 end
-let chained(x: U32): U32 = do
+let chained(x: u32): u32 = do
   let c = C { v = 3 }
-  let g = |y: U32| -> y + c.v
+  let g = |y: u32| -> y + c.v
   return apply(g, apply(g, x))
 end
-let mk(): (U32): U32 = |x: U32| -> x + 1
-let pure(x: U32): U32 = do
+let mk(): (u32): u32 = |x: u32| -> x + 1
+let pure(x: u32): u32 = do
   let f = mk()
   return f(f(x))
 end
@@ -480,13 +480,13 @@ return { types = { C }, functions = { run, chained, mk, pure } }
         -- is an independent oracle.
         name = "methodpass",
         source = [==[
-let C = { v: U32, bump(): U32 = do v += 1 return v end }
-let apply(f: (): U32, x: U32): U32 = f() + x
-let run(x: U32): U32 = do
+let C = { v: u32, bump(): u32 = do v += 1 return v end }
+let apply(f: (): u32, x: u32): u32 = f() + x
+let run(x: u32): u32 = do
   let c = C { v = 10 }
   return apply(c.bump, x)
 end
-let twice(x: U32): U32 = do
+let twice(x: u32): u32 = do
   let c = C { v = 0 }
   return apply(c.bump, apply(c.bump, x))
 end
@@ -501,22 +501,22 @@ return { types = { C }, functions = { run, twice } }
         -- touches module state, so each input stands alone and the interpreter is a valid oracle.
         name = "references",
         source = [==[
-let Counter = { value: U32 }
-let borrowed(x: U32): U32 = do
+let Counter = { value: u32 }
+let borrowed(x: u32): u32 = do
   let c = Counter { value = x }
-  let f = |d: U32| -> do
-    let r = Ref(c)
+  let f = |d: u32| -> do
+    let r = ref(c)
     r.value += d
     return r.value
   end
   return f(3) * 10 + c.value
 end
-let aliased(x: U32): U32 = do
+let aliased(x: u32): u32 = do
   let c = Counter { value = x }
-  let g = |d: U32| -> do
-    let r = Ref(c)
+  let g = |d: u32| -> do
+    let r = ref(c)
     r.value += d
-    let s = Ref(c)
+    let s = ref(c)
     return s.value
   end
   return g(1) + g(2)
@@ -531,12 +531,12 @@ return { types = { Counter }, functions = { borrowed, aliased } }
         -- with an empty and a non-empty payload, and a tuple that contains a record.
         name = "aggregates",
         source = [==[
-let Point = { x: U32, y: U32 }
-let Opt = OneOf({ none: Unit, some: U32 })
-let point(x: U32): Point = Point { x = x, y = x + 1 }
-let wrap(x: U32): Opt = if x == 0 then Opt.none() else Opt.some(x * 2)
-let pair(x: U32): (Point, U32) = do return point(x), x end
-let nested(x: U32): Point = Point { x = wrap(x) { none = |u: Unit| -> 0, some = |v: U32| -> v }, y = x }
+let Point = { x: u32, y: u32 }
+let Opt = oneof { none: unit, some: u32 }
+let point(x: u32): Point = Point { x = x, y = x + 1 }
+let wrap(x: u32): Opt = if x == 0 then Opt.none() else Opt.some(x * 2)
+let pair(x: u32): (Point, u32) = do return point(x), x end
+let nested(x: u32): Point = Point { x = wrap(x) { none = |u: unit| -> 0, some = |v: u32| -> v }, y = x }
 return { types = { Point, Opt }, functions = { point, wrap, pair, nested } }
 ]==],
         entries = { { entry = "point", arity = 1 }, { entry = "wrap", arity = 1 },
@@ -549,27 +549,27 @@ return { types = { Point, Opt }, functions = { point, wrap, pair, nested } }
         name = "arrays",
         source = [==[
 let shared = [10, 20, 30]
-let first(): U32 = shared[0]
-let sum(): U32 = shared[0] + shared[1] + shared[2]
-let local_pick(i: U32): U32 = do
-  let b: Array(U32, 3) = [7, 8, 9]
+let first(): u32 = shared[0]
+let sum(): u32 = shared[0] + shared[1] + shared[2]
+let local_pick(i: u32): u32 = do
+  let b: array(u32, 3) = [7, 8, 9]
   return b[i]
 end
-let store(i: U32, v: U32): U32 = do
+let store(i: u32, v: u32): u32 = do
   let b = [1, 2, 3]
   b[i] = v
   return b[0] + b[1] + b[2]
 end
-let grid_cell(r: U32, c: U32): U32 = do
+let grid_cell(r: u32, c: u32): u32 = do
   let g = [[1, 2], [3, 4]]
   return g[r][c]
 end
-let sum2(a: Array(U32, 2)): U32 = a[0] + a[1]
-let total(x: U32): U32 = do
-  let b: Array(U32, 2) = [x, x + 1]
+let sum2(a: array(u32, 2)): u32 = a[0] + a[1]
+let total(x: u32): u32 = do
+  let b: array(u32, 2) = [x, x + 1]
   return sum2(b)
 end
-let doubled(x: U32): Array(U32, 3) = do
+let doubled(x: u32): array(u32, 3) = do
   let b = [x, x + 1, x + 2]
   b[1] += 10
   return b
@@ -589,22 +589,22 @@ return { types = {  }, functions = { first, sum, local_pick, store, grid_cell, t
         -- or written; the spill into storage must be seen by the store and by a later read.
         name = "callresult",
         source = [==[
-let make(x: U32): Array(U32, 3) = [x, x + 1, x + 2]
-let at_zero(x: U32): U32 = do let a = make(x) return a[0] end
-let set_one(x: U32): U32 = do
+let make(x: u32): array(u32, 3) = [x, x + 1, x + 2]
+let at_zero(x: u32): u32 = do let a = make(x) return a[0] end
+let set_one(x: u32): u32 = do
   let a = make(x)
   a[1] = 9
   return a[0] + a[1] + a[2]
 end
-let R = { v: U32, w: U32 }
-let wrap(x: U32): R = R { v = x, w = x + 1 }
-let bump(x: U32): U32 = do
+let R = { v: u32, w: u32 }
+let wrap(x: u32): R = R { v = x, w = x + 1 }
+let bump(x: u32): u32 = do
   let r = wrap(x)
   r.v = 9
   return r.v + r.w
 end
-let pick(a: Array(U32, 3), i: U32): U32 = a[i]
-let via_param(x: U32): U32 = do
+let pick(a: array(u32, 3), i: u32): u32 = a[i]
+let via_param(x: u32): u32 = do
   let a = make(x)
   return pick(a, 2)
 end
@@ -624,12 +624,12 @@ return { types = { R }, functions = { at_zero, set_one, bump, via_param } }
         source = [==[
 let shared = [10, 20, 30]
 let base = shared[2]
-let P = { x: U32, y: U32 }
+let P = { x: u32, y: u32 }
 let point = P { x = 3, y = 4 }
 let field = point.x + point.y
-let pick(i: U32): U32 = shared[i]
-let total(x: U32): U32 = x + base + field
-let via_point(): U32 = point.x * point.y
+let pick(i: u32): u32 = shared[i]
+let total(x: u32): u32 = x + base + field
+let via_point(): u32 = point.x * point.y
 return { types = { P }, functions = { pick, total, via_point } }
 ]==],
         entries = {
@@ -644,11 +644,11 @@ return { types = { P }, functions = { pick, total, via_point } }
         name = "modulemut",
         source = [==[
 let shared = [1, 2, 3]
-let bump(): U32 = do shared[0] = 9 return shared[0] end
+let bump(): u32 = do shared[0] = 9 return shared[0] end
 let base = shared[1]
 let changed = bump()
-let pick(i: U32): U32 = shared[i]
-let total(x: U32): U32 = x + base + changed
+let pick(i: u32): u32 = shared[i]
+let total(x: u32): u32 = x + base + changed
 return { functions = { pick, total } }
 ]==],
         entries = {
@@ -661,12 +661,12 @@ return { functions = { pick, total } }
         -- starting values from `wordlet_init`, including through module storage.
         name = "multibind",
         source = [==[
-let divmod(a, b: U32): (U32, U32) = do return a / b, a % b end
+let divmod(a, b: u32): (u32, u32) = do return a / b, a % b end
 let q, r = divmod(17, 5)
-let P = { x: U32 }
+let P = { x: u32 }
 let p1, p2 = P { x = q }, P { x = r }
-let pick(i: U32): U32 = if i == 0 then q else r
-let combine(x: U32): U32 = x + q * 100 + r + p1.x * 10 + p2.x
+let pick(i: u32): u32 = if i == 0 then q else r
+let combine(x: u32): u32 = x + q * 100 + r + p1.x * 10 + p2.x
 return { types = { P }, functions = { pick, combine } }
 ]==],
         entries = {
@@ -679,8 +679,8 @@ return { types = { P }, functions = { pick, combine } }
         -- declares it in the innermost statement list containing every use, which covers arms and loops.
         name = "cse",
         source = [==[
-let R = { v: U32 }
-let pick(c: Bool, x: U32): U32 = do
+let R = { v: u32 }
+let pick(c: bool, x: u32): u32 = do
   let r = R { v = 0 }
   if c then
     r.v = x ~ (x << 3)
@@ -689,12 +689,12 @@ let pick(c: Bool, x: U32): U32 = do
   end
   return r.v
 end
-let step(n: U32, x: U32): U32 = do
+let step(n: u32, x: u32): u32 = do
   if n == 0 then return x ~ (x << 3) end
   let y = x ~ (x << 3)
   return step(n - 1, y)
 end
-let mixed(c: Bool, n: U32, x: U32): U32 = do
+let mixed(c: bool, n: u32, x: u32): u32 = do
   let a = x ~ (x << 3)
   let b = if c then a + n else a - n
   return (x ~ (x << 3)) + b
@@ -712,29 +712,29 @@ return { types = { R }, functions = { pick, step, mixed } }
         -- a run-time narrowing conversion is checked, which is why each entry has its own inputs.
         name = "widths",
         source = [==[
-let wrap8(n: U32): U32 = do
-  let a: U8 = U8(n)
+let wrap8(n: u32): u32 = do
+  let a: u8 = u8(n)
   let b = a + 200
-  return U32(b)
+  return u32(b)
 end
-let mix8(n: U32): U32 = do
-  let a: U8 = U8(n)
-  return U32(a * 3) + U32(a / 2) + U32(a % 7)
+let mix8(n: u32): u32 = do
+  let a: u8 = u8(n)
+  return u32(a * 3) + u32(a / 2) + u32(a % 7)
 end
-let wrap16(n: U32): U32 = do
-  let a: U16 = U16(n)
+let wrap16(n: u32): u32 = do
+  let a: u16 = u16(n)
   let b = a * 3
-  return U32(b)
+  return u32(b)
 end
-let chain(n: U32): U32 = do
-  let a: U8 = U8(n)
-  let b: U16 = a
-  let c: U32 = b
+let chain(n: u32): u32 = do
+  let a: u8 = u8(n)
+  let b: u16 = a
+  let c: u32 = b
   return c
 end
-let bits(n: U32): U32 = do
-  let a: U8 = U8(n)
-  return U32(a & 15) + U32(a | 16) + U32(a ^ 255)
+let bits(n: u32): u32 = do
+  let a: u8 = u8(n)
+  return u32(a & 15) + u32(a | 16) + u32(a ^ 255)
 end
 return { types = {  }, functions = { wrap8, mix8, wrap16, chain, bits } }
 ]==],
@@ -751,33 +751,33 @@ return { types = {  }, functions = { wrap8, mix8, wrap16, chain, bits } }
         -- dividend's sign, and an arithmetic shift.
         name = "signed",
         source = [==[
-let round(n: U32): U32 = do
-  let a: I32 = I32(n)
+let round(n: u32): u32 = do
+  let a: i32 = i32(n)
   let b = a - 3
   let c = b * 2
-  return U32(c)
+  return u32(c)
 end
-let quotient(n: U32): U32 = do
-  let a: I32 = I32(n)
-  return U32(a / 3) + U32(a % 3)
+let quotient(n: u32): u32 = do
+  let a: i32 = i32(n)
+  return u32(a / 3) + u32(a % 3)
 end
-let shift(n: U32): U32 = do
-  let a: I32 = I32(n)
-  return U32(a >> 1)
+let shift(n: u32): u32 = do
+  let a: i32 = i32(n)
+  return u32(a >> 1)
 end
-let bits(n: U32): U32 = do
-  let a: I32 = I32(n)
-  return U32(a & I32(255)) + U32(a | I32(16)) + U32(a ^ I32(255))
+let bits(n: u32): u32 = do
+  let a: i32 = i32(n)
+  return u32(a & i32(255)) + u32(a | i32(16)) + u32(a ^ i32(255))
 end
-let negate(n: U32): U32 = do
-  let a: I32 = I32(n)
-  return U32(-a)
+let negate(n: u32): u32 = do
+  let a: i32 = i32(n)
+  return u32(-a)
 end
--- A converted operand is already I32, so 3 adopts I32 rather than the two sides being read as two
+-- A converted operand is already i32, so 3 adopts i32 rather than the two sides being read as two
 -- literals that cannot be widened across signedness, and a signed power stays exact at 32 bits.
-let add_lit(n: U32): I32 = I32(n) + 3
-let add_left(n: U32): I32 = 3 + I32(n)
-let power(n: U32): I32 = I32(n) ^ 31
+let add_lit(n: u32): i32 = i32(n) + 3
+let add_left(n: u32): i32 = 3 + i32(n)
+let power(n: u32): i32 = i32(n) ^ 31
 return { types = {  }, functions = { round, quotient, shift, bits, negate, add_lit, add_left, power } }
 ]==],
         entries = {
@@ -796,16 +796,16 @@ return { types = {  }, functions = { round, quotient, shift, bits, negate, add_l
         -- need both words, division and remainder of a signed value, and a shift into the high word.
         name = "wide",
         source = [==[
-let low(): U32 = U32(0xFFFFFFFFFFFFFFFF % 4294967296)
-let high(): U32 = U32(0xFFFFFFFFFFFFFFFF / 4294967296)
-let square_low(n: U32): U32 = U32(U64(n) * U64(n) % 4294967296)
-let square_high(n: U32): U32 = U32(U64(n) * U64(n) / 4294967296)
-let cube_low(n: U32): U32 = U32(U64(n) * U64(n) * U64(n) % 4294967296)
-let shift_high(n: U32): U32 = U32((U64(1) << (n % 64)) / 4294967296)
-let signed_quotient(n: U32): U32 = U32(I64(n) / I64(3))
-let signed_remainder(n: U32): U32 = U32(I64(n) % I64(3))
-let signed_shift(n: U32): U32 = U32((I64(4294967296) + I64(n)) >> I64(1))
-let big_literal(n: U32): U32 = U32((18446744073709551615 + U64(n)) % 4294967296)
+let low(): u32 = u32(0xFFFFFFFFFFFFFFFF % 4294967296)
+let high(): u32 = u32(0xFFFFFFFFFFFFFFFF / 4294967296)
+let square_low(n: u32): u32 = u32(u64(n) * u64(n) % 4294967296)
+let square_high(n: u32): u32 = u32(u64(n) * u64(n) / 4294967296)
+let cube_low(n: u32): u32 = u32(u64(n) * u64(n) * u64(n) % 4294967296)
+let shift_high(n: u32): u32 = u32((u64(1) << (n % 64)) / 4294967296)
+let signed_quotient(n: u32): u32 = u32(i64(n) / i64(3))
+let signed_remainder(n: u32): u32 = u32(i64(n) % i64(3))
+let signed_shift(n: u32): u32 = u32((i64(4294967296) + i64(n)) >> i64(1))
+let big_literal(n: u32): u32 = u32((18446744073709551615 + u64(n)) % 4294967296)
 return { types = {  }, functions = { low, high, square_low, square_high, cube_low, shift_high,
     signed_quotient, signed_remainder, signed_shift, big_literal } }
 ]==],
@@ -825,26 +825,26 @@ return { types = {  }, functions = { low, high, square_low, square_high, cube_lo
     {
         name = "strings",
         source = [[
-let length_of(): U32 = "hello".length
-let empty_length(): U32 = "".length
-let first_byte(): U32 = U32("A"[0])
-let last_byte(): U32 = U32("abc"[2])
-let same(): Bool = "hello" == "hello"
-let different(): Bool = "hello" == "world"
-let escaped(): U32 = "a\tb".length
-let nul(): U32 = U32("a\0b"[1])
-let sum(s: Slice(U32)): U32 = s[0] + s[1] + s[2]
-let through_call(): U32 = do
+let length_of(): u32 = "hello".length
+let empty_length(): u32 = "".length
+let first_byte(): u32 = u32("A"[0])
+let last_byte(): u32 = u32("abc"[2])
+let same(): bool = "hello" == "hello"
+let different(): bool = "hello" == "world"
+let escaped(): u32 = "a\tb".length
+let nul(): u32 = u32("a\0b"[1])
+let sum(s: slice(u32)): u32 = s[0] + s[1] + s[2]
+let through_call(): u32 = do
   let arr = [10, 20, 30]
-  return sum(Slice(arr))
+  return sum(slice(arr))
 end
-let whole(): U32 = do
+let whole(): u32 = do
   let arr = [4, 5, 6]
-  let view = Slice(arr)
+  let view = slice(arr)
   return view.length * 100 + view[1]
 end
-let size_at(s: String): U32 = s.length
-let byte_string(): U32 = size_at("four")
+let size_at(s: string): u32 = s.length
+let byte_string(): u32 = size_at("four")
 return { functions = { length_of, empty_length, first_byte, last_byte, same, different, escaped,
     nul, through_call, whole, byte_string } }
 ]],
@@ -865,10 +865,10 @@ return { functions = { length_of, empty_length, first_byte, last_byte, same, dif
     {
         name = "stringparam",
         source = [[
-let length_of(s: String): U32 = s.length
-let byte_at(s: String, i: U32): U32 = U32(s[i])
-let same(a: String, b: String): Bool = a == b
-let echo(s: String): String = s
+let length_of(s: string): u32 = s.length
+let byte_at(s: string, i: u32): u32 = u32(s[i])
+let same(a: string, b: string): bool = a == b
+let echo(s: string): string = s
 return { functions = { length_of, byte_at, same, echo } }
 ]],
         entries = {
@@ -881,20 +881,20 @@ return { functions = { length_of, byte_at, same, echo } }
     },
     {
         name = "f64",
-        source = "let half(x: F64): F64 = x / 2.0\n"
-            .. "let negate(x: F64): F64 = -x\n"
-            .. "let scaled(x: F64): F64 = half(x) * 2.0 + 1.0\n"
-            .. "let ordered(a: F64, b: F64): Bool = a < b\n"
-            .. "let equal(a: F64, b: F64): Bool = a == b\n"
-            .. "let truncate(x: F64): U32 = U32(x)\n"
-            .. "let widen(n: U32): F64 = F64(n)\n"
-            .. "let from_u64(): F64 = F64(18446744073709551615)\n"
-            .. "let nan(): F64 = 0.0 / 0.0\n"
-            .. "let infinity(): F64 = 1.0 / 0.0\n"
-            .. "let nan_eq(): Bool = (0.0 / 0.0) == (0.0 / 0.0)\n"
-            .. "let nan_ne(): Bool = (0.0 / 0.0) != (0.0 / 0.0)\n"
-            .. "let folded(): F64 = 2.0 * 3\n"
-            .. "let thirds(): F64 = 1.0 / 3.0\n"
+        source = "let half(x: f64): f64 = x / 2.0\n"
+            .. "let negate(x: f64): f64 = -x\n"
+            .. "let scaled(x: f64): f64 = half(x) * 2.0 + 1.0\n"
+            .. "let ordered(a: f64, b: f64): bool = a < b\n"
+            .. "let equal(a: f64, b: f64): bool = a == b\n"
+            .. "let truncate(x: f64): u32 = u32(x)\n"
+            .. "let widen(n: u32): f64 = f64(n)\n"
+            .. "let from_u64(): f64 = f64(18446744073709551615)\n"
+            .. "let nan(): f64 = 0.0 / 0.0\n"
+            .. "let infinity(): f64 = 1.0 / 0.0\n"
+            .. "let nan_eq(): bool = (0.0 / 0.0) == (0.0 / 0.0)\n"
+            .. "let nan_ne(): bool = (0.0 / 0.0) != (0.0 / 0.0)\n"
+            .. "let folded(): f64 = 2.0 * 3\n"
+            .. "let thirds(): f64 = 1.0 / 3.0\n"
             .. "return { functions = { half, negate, scaled, ordered, equal, truncate, widen, from_u64,\n"
             .. "    nan, infinity, nan_eq, nan_ne, folded, thirds } }",
         entries = {
@@ -918,58 +918,58 @@ return { functions = { length_of, byte_at, same, echo } }
         name = "defer",
         -- Every entry resets the counter first, so the case does not depend on call order.
         source = [==[
-let Counter = { n: U32 }
+let Counter = { n: u32 }
 let counter = Counter { n = 0 }
 
-let push(v: U32): U32 = do
-  let c = Ref(counter)
+let push(v: u32): u32 = do
+  let c = ref(counter)
   c.n = c.n * 10 + v
   return c.n
 end
 
-let reset(): U32 = do
-  let c = Ref(counter)
+let reset(): u32 = do
+  let c = ref(counter)
   c.n = 0
   return 0
 end
 
-let body(): U32 = do
+let body(): u32 = do
   defer push(1)
   defer push(2)
   return 0
 end
 
-let ordered(): U32 = do
+let ordered(): u32 = do
   reset()
   let before = body()
-  return (before + 1) * 1000 + Ref(counter).n
+  return (before + 1) * 1000 + ref(counter).n
 end
 
-let arm(): U32 = do
+let arm(): u32 = do
   defer push(7)
-  if Ref(counter).n == 0 then return 1 end
+  if ref(counter).n == 0 then return 1 end
   return 2
 end
 
-let via_arm(): U32 = do
+let via_arm(): u32 = do
   reset()
   let r = arm()
-  return r * 10 + Ref(counter).n
+  return r * 10 + ref(counter).n
 end
 
-let countdown(n: U32, acc: U32): U32 = do
+let countdown(n: u32, acc: u32): u32 = do
   if n == 0 then return acc end
   defer push(n)
   return countdown(n - 1, acc * 10 + n)
 end
 
-let tailed(): U32 = do
+let tailed(): u32 = do
   reset()
   let acc = countdown(3, 0)
-  return acc * 1000 + Ref(counter).n
+  return acc * 1000 + ref(counter).n
 end
 
-let counted(n: U32): U32 = do
+let counted(n: u32): u32 = do
   reset()
   return countdown(n, 0)
 end
@@ -984,12 +984,12 @@ return { functions = { ordered, via_arm, tailed, counted, countdown } }
     },
     {
         name = "recursionmix",
-        source = "let f(n: U32): U32 = do\n"
+        source = "let f(n: u32): u32 = do\n"
             .. "  if n == 0 then return 0 end\n"
             .. "  if n == 1 then return 100 + f(n - 1) end\n"
             .. "  return f(n - 1)\n"
             .. "end\n"
-            .. "let g(n: U32): U32 = if n == 0 then 0 else n + g(n - 1)\n"
+            .. "let g(n: u32): u32 = if n == 0 then 0 else n + g(n - 1)\n"
             .. "return { functions = { f, g } }",
         entries = {
             { entry = "f", arity = 1, inputs = { { 0 }, { 1 }, { 3 }, { 100 } } },
@@ -1006,17 +1006,17 @@ let banner = [=[
 ab
 cd
 ]=]
-let banner_length(): U32 = banner.length
-let banner_byte(i: U32): U32 = U32(banner[i])
-let binary(): U32 = 0b1010_1010
-let separated(): U32 = 1_000_000
-let hexsep(): U32 = 0xffff_ffff
-let byte_eq(): Bool = 'a' == 97
-let byte_nl(): U32 = U32('\n')
-let byte_adapt(x: U8): U8 = 'z' - x
-let byte_match(s: String): U32 = if s[0] == 'a' then 1 else 0
-let raw_quote(): U32 = [=[a "quoted" word]=].length
-let nested(): U32 = [[1, 2], [3, 4]][1][0]
+let banner_length(): u32 = banner.length
+let banner_byte(i: u32): u32 = u32(banner[i])
+let binary(): u32 = 0b1010_1010
+let separated(): u32 = 1_000_000
+let hexsep(): u32 = 0xffff_ffff
+let byte_eq(): bool = 'a' == 97
+let byte_nl(): u32 = u32('\n')
+let byte_adapt(x: u8): u8 = 'z' - x
+let byte_match(s: string): u32 = if s[0] == 'a' then 1 else 0
+let raw_quote(): u32 = [=[a "quoted" word]=].length
+let nested(): u32 = [[1, 2], [3, 4]][1][0]
 return { functions = { banner_length, banner_byte, binary, separated, hexsep, byte_eq,
     byte_nl, byte_adapt, byte_match, raw_quote, nested } }
 ]==],
@@ -1037,7 +1037,7 @@ return { functions = { banner_length, banner_byte, binary, separated, hexsep, by
     },
 }
 
--- A `String` argument is a slice, so it arrives as the same struct any other view uses: a pointer
+-- A `string` argument is a slice, so it arrives as the same struct any other view uses: a pointer
 -- to its bytes and its length. The bytes live in a compound literal with automatic storage, so
 -- they last for the call.
 -- A double written exactly. A hex float literal denotes the same bits in C11, and an infinity has no
@@ -1049,11 +1049,11 @@ local function cFloat(n)
 end
 
 local function cLiteral(value, sliceType)
-    -- A Lua number is a double, so a fractional one is an F64 argument written exactly and a whole one
-    -- is a U32. An F64 parameter takes the integer constant too, by conversion.
+    -- A Lua number is a double, so a fractional one is an f64 argument written exactly and a whole one
+    -- is a u32. An f64 parameter takes the integer constant too, by conversion.
     if type(value) == "number" then
         if value ~= value then return "NAN" end
-        -- The same rule `interpret` uses for an argument: a whole number that fits a U32 is one, and
+        -- The same rule `interpret` uses for an argument: a whole number that fits a u32 is one, and
         -- anything else is a double.
         if value % 1 ~= 0 or value < 0 or value > 4294967295 then return cFloat(value) end
         return "UINT32_C(" .. value .. ")"
@@ -1168,7 +1168,7 @@ end
 -- the previous one is a DAG. Naming the shared nodes keeps the generated C linear instead of
 -- exponential; this guards that and runs the result.
 do
-    local lines = { "let f(s: U32): U32 = do" }
+    local lines = { "let f(s: u32): u32 = do" }
     local previous = "s"
     for index = 1, 14 do
         lines[#lines + 1] = ("  let a%d = (%s ~ (%s << 3))"):format(index, previous, previous)
@@ -1198,19 +1198,19 @@ end
 -- forced-inlining attribute is never asked to inline a recursive function.
 do
     local source = table.concat({
-        "let Point = { x: U32, y: U32 }",
-        "let Shape = OneOf { dot: Point, empty: Unit }",
-        "let area(s: Shape): U32 = s {",
+        "let Point = { x: u32, y: u32 }",
+        "let Shape = oneof { dot: Point, empty: unit }",
+        "let area(s: Shape): u32 = s {",
         "  dot = |p: Point| -> p.x * p.y,",
-        "  empty = |u: Unit| -> 0,",
+        "  empty = |u: unit| -> 0,",
         "}",
-        "let first(a: Array(U32, 3)): U32 = a[0]",
-        "let at(s: Slice(U32), i: U32): U32 = s[i]",
-        "let apply(f: (U32): U32, x: U32): U32 = f(x)",
-        "let pair(a: U32, b: U32): (U32, U32) = do return a, b end",
-        "let inc(x: U32): U32 = x + 1",
-        "let dec(x: U32): U32 = x - 1",
-        "let choose(c: Bool, x: U32): U32 = (if c then inc else dec)(x)",
+        "let first(a: array(u32, 3)): u32 = a[0]",
+        "let at(s: slice(u32), i: u32): u32 = s[i]",
+        "let apply(f: (u32): u32, x: u32): u32 = f(x)",
+        "let pair(a: u32, b: u32): (u32, u32) = do return a, b end",
+        "let inc(x: u32): u32 = x + 1",
+        "let dec(x: u32): u32 = x - 1",
+        "let choose(c: bool, x: u32): u32 = (if c then inc else dec)(x)",
         "return { types = { Point, Shape }, functions = { area, first, at, apply, pair, choose } }",
     }, "\n")
     local generated = wordlet.compile{ source = source, name = "c99.let" }:unit()
@@ -1227,8 +1227,8 @@ end
 -- the call is a back edge and the depth is constant. This runs only in C because the reference
 -- interpreter would recurse in Lua.
 do
-    local source = "let count_down(n: U32) : U32 = if n == 0 then 7 else count_down(n - 1)\n"
-        .. "let sum_to(n, acc: U32) : U32 = if n == 0 then acc else sum_to(n - 1, acc + n)\n"
+    local source = "let count_down(n: u32) : u32 = if n == 0 then 7 else count_down(n - 1)\n"
+        .. "let sum_to(n, acc: u32) : u32 = if n == 0 then acc else sum_to(n - 1, acc + n)\n"
         .. "return { functions = { count_down, sum_to } }"
     local generated = wordlet.compile{ source = source, name = "deep.let" }:unit()
     local path = directory .. "/deep.c"
@@ -1248,11 +1248,11 @@ end
 -- Opaque runtime callables: a C caller supplies the invocation pointer, so this is a C-only test.
 -- The reference interpreter has no callable values to supply.
 do
-    local source = "let apply(f: (U32): U32, x: U32): U32 = f(x)\n"
-        .. "let twice_apply(f: (U32): U32, x: U32): U32 = apply(f, apply(f, x))\n"
-        .. "let compose(f: (U32): U32, g: (U32): U32, x: U32): U32 = f(g(x))\n"
-        .. "let invoke(f: (U32): (), x: U32): U32 = do f(x) return x end\n"
-        .. "let internal(x: U32): U32 = apply(|y: U32| -> y + 1, x)\n"
+    local source = "let apply(f: (u32): u32, x: u32): u32 = f(x)\n"
+        .. "let twice_apply(f: (u32): u32, x: u32): u32 = apply(f, apply(f, x))\n"
+        .. "let compose(f: (u32): u32, g: (u32): u32, x: u32): u32 = f(g(x))\n"
+        .. "let invoke(f: (u32): (), x: u32): u32 = do f(x) return x end\n"
+        .. "let internal(x: u32): u32 = apply(|y: u32| -> y + 1, x)\n"
         .. "return { functions = { apply, twice_apply, compose, invoke, internal } }"
     local generated = wordlet.compile{ source = source, name = "callbacks.let" }:unit()
     local path = directory .. "/callbacks.c"
@@ -1286,10 +1286,10 @@ end
 
 -- Module-level mutable state: the host calls the exported initialiser, then the state persists.
 do
-    local source = "let Counter = { value: U32, bump(): U32 = do value += 1 return value end }\n"
+    local source = "let Counter = { value: u32, bump(): u32 = do value += 1 return value end }\n"
         .. "let shared = Counter { value = 100 }\n"
-        .. "let bump_twice(x: U32): U32 = do shared.bump() shared.bump() return shared.value + x end\n"
-        .. "let bump_field(a: U32): U32 = do shared.value += a return shared.value end\n"
+        .. "let bump_twice(x: u32): u32 = do shared.bump() shared.bump() return shared.value + x end\n"
+        .. "let bump_field(a: u32): u32 = do shared.value += a return shared.value end\n"
         .. "return { types = { Counter }, functions = { bump_twice, bump_field } }"
     local generated = wordlet.compile{ source = source, name = "module.let" }:unit()
     local path = directory .. "/module.c"
@@ -1315,9 +1315,9 @@ end
 
 -- A callable stored in a signature-typed field: the field holds a view built from a local adapter.
 do
-    local source = "let Holder = { f: (U32): U32 }\n"
-        .. "let use(n: U32): U32 = do\n  let h = Holder { f = |x: U32| -> x + n }\n  return h.f(1)\nend\n"
-        .. "let chase(n: U32): U32 = do\n  let h = Holder { f = |x: U32| -> x * 2 }\n"
+    local source = "let Holder = { f: (u32): u32 }\n"
+        .. "let use(n: u32): u32 = do\n  let h = Holder { f = |x: u32| -> x + n }\n  return h.f(1)\nend\n"
+        .. "let chase(n: u32): u32 = do\n  let h = Holder { f = |x: u32| -> x * 2 }\n"
         .. "  return h.f(h.f(n))\nend\n"
         .. "return { types = { Holder }, functions = { use, chase } }"
     local generated = wordlet.compile{ source = source, name = "field.let" }:unit()
@@ -1343,14 +1343,14 @@ end
 -- and payload of one that comes back. This is C-only because the interpreter has no host values.
 do
     local source = [==[
-let Circle = { radius: U32 }
-let Rect = { width: U32, height: U32 }
-let Shape = OneOf({ circle: Circle, rect: Rect })
-let area(s: Shape): U32 = s {
+let Circle = { radius: u32 }
+let Rect = { width: u32, height: u32 }
+let Shape = oneof { circle: Circle, rect: Rect }
+let area(s: Shape): u32 = s {
   circle = |c: Circle| -> c.radius * c.radius,
   rect = |r: Rect| -> r.width * r.height,
 }
-let rect_of(w: U32): Shape = Shape.rect { width = w, height = 2 }
+let rect_of(w: u32): Shape = Shape.rect { width = w, height = 2 }
 return { types = { Circle, Rect, Shape }, functions = { area, rect_of } }
 ]==]
     local generated = wordlet.compile{ source = source, name = "shape.let" }:unit()
@@ -1379,16 +1379,16 @@ int main(void) {
         "a host-built variant or a returned variant crossed the ABI incorrectly")
 end
 
--- A Unit parameter is erased rather than represented: a Unit alternative's handler takes no C
+-- A unit parameter is erased rather than represented: a unit alternative's handler takes no C
 -- argument, and the generated code must still compile under -Werror.
 do
     local source = [==[
-let Opt = OneOf({ none: Unit, some: U32 })
-let or_else(o: Opt, d: U32): U32 = o {
-  none = |u: Unit| -> d,
-  some = |v: U32| -> v,
+let Opt = oneof { none: unit, some: u32 }
+let or_else(o: Opt, d: u32): u32 = o {
+  none = |u: unit| -> d,
+  some = |v: u32| -> v,
 }
-let unwrap_or(n: U32, d: U32): U32 = or_else(if n == 0 then Opt.none() else Opt.some(n), d)
+let unwrap_or(n: u32, d: u32): u32 = or_else(if n == 0 then Opt.none() else Opt.some(n), d)
 return { types = { Opt }, functions = { unwrap_or, or_else } }
 ]==]
     local generated = wordlet.compile{ source = source, name = "opt.let" }:unit()
@@ -1407,19 +1407,19 @@ int main(void) {
     local exe = directory .. "/opt"
     check(shell("timeout --kill-after=2s 30s " .. CC .. " -std=c11 -Wall -Wextra -Werror -O2 -o '"
         .. exe .. "' '" .. path .. "' 2> " .. directory .. "/opterr.txt") == 0,
-        "Unit-parameter C failed to compile:\n" .. read(directory .. "/opterr.txt"))
+        "unit-parameter C failed to compile:\n" .. read(directory .. "/opterr.txt"))
     check(shell("timeout --kill-after=2s 10s '" .. exe .. "'") == 0,
-        "a Unit alternative did not erase cleanly at the ABI")
+        "a unit alternative did not erase cleanly at the ABI")
 end
 
 -- A tagged callable as a host-visible value: the tag is a plain word and the payload union holds
 -- that arm environment, so a host can hold one and pass it back.
 do
     local source = [==[
-let inc(x: U32): U32 = x + 1
-let dec(x: U32): U32 = x - 1
-let mk(c: Bool) = if c then inc else dec
-let use(c: Bool, x: U32): U32 = do
+let inc(x: u32): u32 = x + 1
+let dec(x: u32): u32 = x - 1
+let mk(c: bool) = if c then inc else dec
+let use(c: bool, x: u32): u32 = do
   let f = mk(c)
   return f(x)
 end
@@ -1452,16 +1452,16 @@ end
 -- with a null environment, and a borrowing callable still has to point at its borrowed place.
 do
     local source = [==[
-let C = { v: U32 }
-let mk(): (U32): U32 = |x: U32| -> x + 1
-let pure(x: U32): U32 = do
+let C = { v: u32 }
+let mk(): (u32): u32 = |x: u32| -> x + 1
+let pure(x: u32): u32 = do
   let f = mk()
   return f(f(x))
 end
-let apply(f: (U32): U32, x: U32): U32 = f(x)
-let run(x: U32): U32 = do
+let apply(f: (u32): u32, x: u32): u32 = f(x)
+let run(x: u32): u32 = do
   let c = C { v = 10 }
-  let g = |y: U32| -> y + c.v
+  let g = |y: u32| -> y + c.v
   return apply(g, x)
 end
 return { types = { C }, functions = { mk, pure, run } }
@@ -1493,33 +1493,33 @@ end
 -- initialiser first, and the state then persists, so this is C-only.
 do
     local source = [==[
-let Counter = { value: U32 }
+let Counter = { value: u32 }
 let shared = Counter { value = 5 }
-let read_shared(x: U32): U32 = Ref(shared).value + x
+let read_shared(x: u32): u32 = ref(shared).value + x
 -- A call with a literal argument is still a run-time read of module storage, so it must observe a
 -- mutation the host made after `wordlet_init` rather than a snapshot folded while compiling.
-let peek(): U32 = read_shared(1)
-let via(r: Ref(Counter)): U32 = r.value
-let via_set(r: Ref(Counter), v: U32): U32 = do
+let peek(): u32 = read_shared(1)
+let via(r: ref(Counter)): u32 = r.value
+let via_set(r: ref(Counter), v: u32): u32 = do
   r.value = v
   return r.value
 end
-let bump_shared(x: U32): U32 = do
-  let r = Ref(shared)
+let bump_shared(x: u32): u32 = do
+  let r = ref(shared)
   r.value += 1
   return r.value + x
 end
-let Node = { value: U32, next: Link }
-let Link = OneOf({ none: Unit, some: Ref(Node) })
+let Node = { value: u32, next: Link }
+let Link = oneof { none: unit, some: ref(Node) }
 let n1 = Node { value = 10, next = Link.none() }
-let n0 = Node { value = 1, next = Link.some(Ref(n1)) }
-let following(): U32 = n0.next {
-  none = |u: Unit| -> 0,
-  some = |r: Ref(Node)| -> r.value,
+let n0 = Node { value = 1, next = Link.some(ref(n1)) }
+let following(): u32 = n0.next {
+  none = |u: unit| -> 0,
+  some = |r: ref(Node)| -> r.value,
 }
-let bump_following(): U32 = n0.next {
-  none = |u: Unit| -> 0,
-  some = |r: Ref(Node)| -> do
+let bump_following(): u32 = n0.next {
+  none = |u: unit| -> 0,
+  some = |r: ref(Node)| -> do
     r.value += 5
     return r.value
   end,
@@ -1570,12 +1570,12 @@ end
 -- to call, which is why a constant argument does not make a foreign call foldable.
 do
     local source = [==[
-extern let host_add(a: U32, b: U32) : U32
-extern let host_scale(a: U32) : U32
-extern let host_sink(a: U32) : Unit
+extern let host_add(a: u32, b: u32) : u32
+extern let host_scale(a: u32) : u32
+extern let host_sink(a: u32) : unit
 
-let combined(x: U32): U32 = host_add(x, host_scale(x))
-let ignored(x: U32): U32 = do
+let combined(x: u32): u32 = host_add(x, host_scale(x))
+let ignored(x: u32): u32 = do
   host_sink(x)
   return host_scale(x)
 end
@@ -1613,56 +1613,56 @@ end
 -- what survives in the generated code is the acquire, the body, and the release, in that order.
 do
     local source = [==[
-extern let host_region(bytes: U32) : Ptr(U8)
-extern let host_release(p: Ptr(U8)) : Unit
-extern let host_null() : Ptr(U8)
+extern let host_region(bytes: u32) : ptr(u8)
+extern let host_release(p: ptr(u8)) : unit
+extern let host_null() : ptr(u8)
 
-let with_region(R: Type, bytes: U32, body: (Ptr(U8)): R) : R = do
+let with_region(R: type, bytes: u32, body: (ptr(u8)): R) : R = do
   let region = host_region(bytes)
   let result = body(region)
   host_release(region)
   return result
 end
 
-let sum() : U32 = with_region(U32, 8, |p: Ptr(U8)| -> do
+let sum() : u32 = with_region(u32, 8, |p: ptr(u8)| -> do
   p[0] = 7
   p[1] = 35
-  return U32(p[0]) + U32(p[1])
+  return u32(p[0]) + u32(p[1])
 end)
 
-let missing() : Bool = host_null() == Null(U8)
-let present() : Bool = host_region(4) == Null(U8)
+let missing() : bool = host_null() == null(u8)
+let present() : bool = host_region(4) == null(u8)
 
 -- A pointer to a record selects a field through it, and a pointer is an indirection boundary, so a
 -- type may mention itself through one and still have a finite layout.
-let Point = { x: U32, y: U32 }
-extern let host_point() : Ptr(Point)
--- `Null(T)` names any element type, including a user record: the pointer is the runtime value, so
--- what must have a representation is `Ptr(T)`, not `T` itself.
-let nothing() : Ptr(Point) = Null(Point)
-let total() : U32 = host_point().x + host_point().y
-let raised() : U32 = do
+let Point = { x: u32, y: u32 }
+extern let host_point() : ptr(Point)
+-- `null(T)` names any element type, including a user record: the pointer is the runtime value, so
+-- what must have a representation is `ptr(T)`, not `T` itself.
+let nothing() : ptr(Point) = null(Point)
+let total() : u32 = host_point().x + host_point().y
+let raised() : u32 = do
   host_point().x += 10
   return host_point().x
 end
 
-let Node = { value: U32, next: Ptr(Node) }
-extern let host_node() : Ptr(Node)
+let Node = { value: u32, next: ptr(Node) }
+extern let host_node() : ptr(Node)
 -- A recursive named target is representable as a pointer even though the named cell itself is not a
 -- runtime value, so the null pointer to it is accepted.
-let none() : Ptr(Node) = Null(Node)
-let chain() : U32 = do
+let none() : ptr(Node) = null(Node)
+let chain() : u32 = do
   let head = host_node()
   return head.value + head.next.value
 end
 
--- `Ptr(place)` to storage the program already has. The array index is still checked; the pointer
+-- `ptr(place)` to storage the program already has. The array index is still checked; the pointer
 -- index that follows it is not, which is the whole difference between the two.
 let pool = [7, 8, 9]
-let at(i: U32) : U32 = Ptr(pool[i])[0]
-let set(i: U32, v: U32) : U32 = do
-  Ptr(pool[i])[0] = v
-  return Ptr(pool[i])[0]
+let at(i: u32) : u32 = ptr(pool[i])[0]
+let set(i: u32, v: u32) : u32 = do
+  ptr(pool[i])[0] = v
+  return ptr(pool[i])[0]
 end
 return { functions = { sum, missing, present, at, set, total, raised, chain, nothing, none } }
 ]==]
@@ -1684,12 +1684,12 @@ return { functions = { sum, missing, present, at, set, total, raised, chain, not
         "the region is acquired before the body and released after it")
     local path = directory .. "/ptr.c"
     -- The layouts are numbered by first use, so the host's own signatures are read from the artifact
-    -- rather than guessed: `Ptr(Point)` is a `Point *`, and a pointer to a record is that record's type.
+    -- rather than guessed: `ptr(Point)` is a `Point *`, and a pointer to a record is that record's type.
     local pointType = generated:match("(wordletrecord_%d+) %* host_point")
     local nodeType = generated:match("(wordletrecord_%d+) %* host_node")
     check(pointType ~= nil and nodeType ~= nil, "the pointer targets have named layouts")
     check(generated:match("(wordletrecord_%d+) %* wordlet_none") == nodeType,
-        "Null(Node) resolves a recursive named target to the node layout")
+        "null(Node) resolves a recursive named target to the node layout")
     write(path, generated .. ([[
 
 #include <assert.h>
@@ -1739,24 +1739,24 @@ int main(void) {
         "a pointer or a scoped region did not run correctly")
 end
 
--- A bare `return` and `Unit()` are one Unit result, which the ABI erases to `void`. The slot stays
--- logical, so a Unit in a multiple-result vector keeps its position while the C result drops it.
+-- A bare `return` and `unit()` are one unit result, which the ABI erases to `void`. The slot stays
+-- logical, so a unit in a multiple-result vector keeps its position while the C result drops it.
 do
     local source = [==[
-extern let sink(x: U32) : Unit
-let announce(x: U32) : Unit = do sink(x) return end
-let explicit(x: U32) : Unit = do sink(x) return; end
-let value(x: U32) : Unit = do sink(x) return Unit() end
-let pair(x: U32) : (Unit, U32) = do return Unit(), x end
-let use(x: U32) : U32 = do let u, y = pair(x) return y end
+extern let sink(x: u32) : unit
+let announce(x: u32) : unit = do sink(x) return end
+let explicit(x: u32) : unit = do sink(x) return; end
+let value(x: u32) : unit = do sink(x) return unit() end
+let pair(x: u32) : (unit, u32) = do return unit(), x end
+let use(x: u32) : u32 = do let u, y = pair(x) return y end
 return { functions = { announce, explicit, value, pair, use } }
 ]==]
     local generated = wordlet.compile{ source = source, name = "unit.let" }:unit()
-    check(generated:find("void wordlet_announce", 1, true) ~= nil, "a bare Unit return erases to void")
+    check(generated:find("void wordlet_announce", 1, true) ~= nil, "a bare unit return erases to void")
     check(generated:find("void wordlet_explicit", 1, true) ~= nil, "return; erases to void")
-    check(generated:find("void wordlet_value", 1, true) ~= nil, "Unit() erases to void")
+    check(generated:find("void wordlet_value", 1, true) ~= nil, "unit() erases to void")
     check(generated:find("uint32_t wordlet_pair", 1, true) ~= nil,
-        "a Unit slot erases from a multiple-result vector")
+        "a unit slot erases from a multiple-result vector")
     local path = directory .. "/unit.c"
     write(path, generated .. [[
 
@@ -1775,42 +1775,42 @@ int main(void) {
 ]])
     check(shell("timeout --kill-after=2s 30s " .. CC .. " -std=c11 -Wall -Wextra -Werror -O2 -o '"
         .. directory .. "/unit' '" .. path .. "' 2> " .. directory .. "/uniterr.txt") == 0,
-        "Unit C failed to compile:\n" .. read(directory .. "/uniterr.txt"))
+        "unit C failed to compile:\n" .. read(directory .. "/uniterr.txt"))
     check(shell("timeout --kill-after=2s 10s '" .. directory .. "/unit'") == 0,
-        "a Unit result did not erase and run correctly")
+        "a unit result did not erase and run correctly")
 end
 
 -- A residual match may yield a result vector, one slot per result, and a pointer may index record
 -- and sum storage. Both were assumptions the lowering and the verifier made too narrowly.
 do
     local source = [==[
-let Op = OneOf({ a: Unit, b: Unit, n: U32 })
-let classify(k: U32): Op =
+let Op = oneof { a: unit, b: unit, n: u32 }
+let classify(k: u32): Op =
   if k == 0 then Op.a()
   else if k == 1 then Op.b()
   else Op.n(k)
 
-let pick(op: Op, x: U32): (U32, U32) = op {
-  a = |u: Unit| -> do return x + 1, x + 2 end,
-  b = |u: Unit| -> do return x + 3, x + 4 end,
-  n = |v: U32| -> do return v, x end,
+let pick(op: Op, x: u32): (u32, u32) = op {
+  a = |u: unit| -> do return x + 1, x + 2 end,
+  b = |u: unit| -> do return x + 3, x + 4 end,
+  n = |v: u32| -> do return v, x end,
 }
-let total(k: U32, x: U32): U32 = do let p, q = pick(classify(k), x) return p + q end
+let total(k: u32, x: u32): u32 = do let p, q = pick(classify(k), x) return p + q end
 
-let Point = { x: U32, y: U32 }
-extern let host_points() : Ptr(Point)
-let point_at(i: U32): U32 = do
+let Point = { x: u32, y: u32 }
+extern let host_points() : ptr(Point)
+let point_at(i: u32): u32 = do
   let p = host_points()[i]
   return p.x + p.y
 end
 
 let program = [Op.n(7), Op.a()]
-let code_at(i: U32): U32 = do
-  let op = Ptr(program[0])[i]
+let code_at(i: u32): u32 = do
+  let op = ptr(program[0])[i]
   return op {
-    a = |u: Unit| -> 1,
-    b = |u: Unit| -> 2,
-    n = |v: U32| -> v,
+    a = |u: unit| -> 1,
+    b = |u: unit| -> 2,
+    n = |v: u32| -> v,
   }
 end
 return { types = { Point, Op }, functions = { total, point_at, code_at } }
@@ -1850,7 +1850,7 @@ int main(void) {
 end
 
 -- The hot-state interpreter example: the machine is the loop's parameters and the handlers return
--- the transition, so dispatch copies no aggregate and is one back edge. It indexes through a `Ptr`,
+-- the transition, so dispatch copies no aggregate and is one back edge. It indexes through a `ptr`,
 -- so only compiled code can run it.
 do
     local path = (source:match("^(.*[/\\])") or "./") .. "../examples/interpreter.let"
@@ -1868,20 +1868,20 @@ do
         "the hot-state interpreter did not run correctly")
 end
 
--- A pointer is not a reference, in either direction: it cannot satisfy a `Ref` requirement, and
--- `Ref(p)` cannot turn one back into a checked borrow.
+-- A pointer is not a reference, in either direction: it cannot satisfy a `ref` requirement, and
+-- `ref(p)` cannot turn one back into a checked borrow.
 do
-    local shared = "extern let host_null() : Ptr(U8)\n"
+    local shared = "extern let host_null() : ptr(u8)\n"
     local ok, err = pcall(function()
         return wordlet.compile{ source = shared
-            .. "let takes(r: Ref(U8)): U32 = 0\nlet use(): U32 = takes(host_null())\n"
+            .. "let takes(r: ref(u8)): u32 = 0\nlet use(): u32 = takes(host_null())\n"
             .. "return { functions = { use } }", name = "ptrref.let" }
     end)
     check(not ok and D.is(err) and err.code == "type-mismatch",
         "a pointer does not satisfy a reference requirement")
     local ok2, err2 = pcall(function()
         return wordlet.compile{ source = shared
-            .. "let use(): U32 = do\n  let r = Ref(host_null())\n  return 1\nend\n"
+            .. "let use(): u32 = do\n  let r = ref(host_null())\n  return 1\nend\n"
             .. "return { functions = { use } }", name = "ptrref2.let" }
     end)
     check(not ok2 and D.is(err2) and err2.code == "ref-target",
@@ -1892,15 +1892,15 @@ end
 -- run-time index needs. Both are runtime-only, so this is C-only.
 do
     local source = [==[
-let Counter = { value: U32 }
+let Counter = { value: u32 }
 let pool = [Counter { value = 1 }, Counter { value = 2 }, Counter { value = 3 }]
-let bump(i: U32, d: U32): U32 = do
-  let r = Ref(pool[i])
+let bump(i: u32, d: u32): u32 = do
+  let r = ref(pool[i])
   r.value += d
   return r.value
 end
-let read(i: U32): U32 = Ref(pool[i]).value
-let pick(i: U32): U32 = do
+let read(i: u32): u32 = ref(pool[i]).value
+let pick(i: u32): u32 = do
   let b = [10, 20, 30]
   return b[i]
 end
@@ -1952,8 +1952,8 @@ end
 -- A run-time narrowing conversion that does not fit aborts, like a run-time zero divisor.
 do
     local source = [==[
-let narrow(n: U32): U8 = U8(n)
-let read(n: U32): U32 = U32(narrow(n))
+let narrow(n: u32): u8 = u8(n)
+let read(n: u32): u32 = u32(narrow(n))
 return { functions = { narrow, read } }
 ]==]
     local generated = wordlet.compile{ source = source, name = "narrow.let" }:unit()
@@ -1975,14 +1975,14 @@ int main(void) {
         .. "/narrowRun.txt") ~= 0, "a run-time conversion that does not fit must abort")
 end
 
--- Bool and Unit equality are documented (syntax.md section 7) and used to reject. Bool compares by
--- value; Unit has one value, so its answer is known. Ordering is still not offered for either.
+-- bool and unit equality are documented (syntax.md section 7) and used to reject. bool compares by
+-- value; unit has one value, so its answer is known. Ordering is still not offered for either.
 do
-    local source = "let bool_eq(a: Bool, b: Bool): Bool = a == b\n"
-        .. "let bool_ne(a: Bool, b: Bool): Bool = a != b\n"
-        .. "let unit_eq(): Bool = Unit() == Unit()\n"
-        .. "let unit_ne(): Bool = Unit() != Unit()\n"
-        .. "let use(a: Bool, b: Bool): U32 = do\n"
+    local source = "let bool_eq(a: bool, b: bool): bool = a == b\n"
+        .. "let bool_ne(a: bool, b: bool): bool = a != b\n"
+        .. "let unit_eq(): bool = unit() == unit()\n"
+        .. "let unit_ne(): bool = unit() != unit()\n"
+        .. "let use(a: bool, b: bool): u32 = do\n"
         .. "  if bool_eq(a, b) then return 1 end\n"
         .. "  if bool_ne(a, b) then return 2 end\n"
         .. "  return 3\nend\n"
@@ -2004,24 +2004,24 @@ int main(void) {
     local exe = directory .. "/boolunit"
     check(shell("timeout --kill-after=2s 30s " .. CC .. " -std=c11 -Wall -Wextra -Werror -O2 -o '"
         .. exe .. "' '" .. path .. "' 2> " .. directory .. "/buerror.txt") == 0,
-        "Bool/Unit equality C failed to compile:\n" .. read(directory .. "/buerror.txt"))
+        "bool/unit equality C failed to compile:\n" .. read(directory .. "/buerror.txt"))
     check(shell("timeout --kill-after=2s 10s '" .. exe .. "'") == 0,
-        "Bool/Unit equality produced the wrong value")
+        "bool/unit equality produced the wrong value")
     local ok, err = pcall(function()
-        return wordlet.compile{ source = "let f(a: Bool, b: Bool): Bool = a < b\n"
+        return wordlet.compile{ source = "let f(a: bool, b: bool): bool = a < b\n"
             .. "return { functions = { f } }", name = "boolorder.let" }
     end)
-    check(not ok and D.is(err) and err.code == "type-mismatch", "ordering Bool is still rejected")
+    check(not ok and D.is(err) and err.code == "type-mismatch", "ordering bool is still rejected")
 end
 
 -- A non-tail self-call leaves a genuinely recursive function, which GCC refuses to force-inline.
 -- The function keeps plain `static` linkage so the program compiles under -Werror and still runs.
 do
-    local source = "let sum_from(n: U32): U32 = do\n"
+    local source = "let sum_from(n: u32): u32 = do\n"
         .. "  if n == 0 then return 0 end\n"
         .. "  let rest = sum_from(n - 1)\n"
         .. "  return n + rest\nend\n"
-        .. "let sum(n: U32): U32 = sum_from(n)\n"
+        .. "let sum(n: u32): u32 = sum_from(n)\n"
         .. "return { functions = { sum } }"
     local generated = wordlet.compile{ source = source, name = "recur.let" }:unit()
     check(generated:find("static uint32_t wordletfn_", 1, true) ~= nil,
@@ -2040,10 +2040,10 @@ end
 -- A definition used once is lowered at its use: no `(void)` cast, a returned call inlined, and a
 -- record conditional stores its construction instead of reading each field back and rebuilding it.
 do
-    local source = "let inc(x: U32): U32 = x + 1\n"
-        .. "let use(x: U32): U32 = inc(x)\n"
-        .. "let Point = { x: U32, y: U32 }\n"
-        .. "let make(c: Bool, x: U32): Point = if c then Point { x = x, y = 0 } else Point { x = 0, y = x }\n"
+    local source = "let inc(x: u32): u32 = x + 1\n"
+        .. "let use(x: u32): u32 = inc(x)\n"
+        .. "let Point = { x: u32, y: u32 }\n"
+        .. "let make(c: bool, x: u32): Point = if c then Point { x = x, y = 0 } else Point { x = 0, y = x }\n"
         .. "return { types = { Point }, functions = { use, make } }"
     local generated = wordlet.compile{ source = source, name = "clean.let" }:unit()
     check(not generated:find("(void)", 1, true), "a used call result must not need a `(void)` cast")
@@ -2057,9 +2057,9 @@ end
 -- directly, a nested literal builds one Make instead of spilling and copying each inner array, and a
 -- conditional whose arms agree on one known value needs neither a join slot nor an `If`.
 do
-    local source = "let sum2(a: Array(U32, 2)): U32 = a[0] + a[1]\n"
-        .. "let agree(c: Bool): U32 = if c then 7 else 7\n"
-        .. "let nested(): U32 = do\n  let a = [1, 2]\n  let c = [a, a]\n"
+    local source = "let sum2(a: array(u32, 2)): u32 = a[0] + a[1]\n"
+        .. "let agree(c: bool): u32 = if c then 7 else 7\n"
+        .. "let nested(): u32 = do\n  let a = [1, 2]\n  let c = [a, a]\n"
         .. "  return c[0][0] + c[1][1]\nend\n"
         .. "return { functions = { sum2, agree, nested } }"
     local generated = wordlet.compile{ source = source, name = "arraysclean.let" }:unit()
@@ -2076,8 +2076,8 @@ end
 -- A captured local array is a mutable instance, so the closure borrows it as a place rather than
 -- taking a by-value copy. A mutation through the closure is therefore visible afterward.
 do
-    local source = "let f(): U32 = do\n  let a = [1, 2, 3]\n"
-        .. "  let g = |i: U32| -> do a[i] = 9 return a[i] end\n"
+    local source = "let f(): u32 = do\n  let a = [1, 2, 3]\n"
+        .. "  let g = |i: u32| -> do a[i] = 9 return a[i] end\n"
         .. "  let x = g(0)\n  return x * 100 + a[0]\nend\n"
         .. "return { functions = { f } }"
     local generated = wordlet.compile{ source = source, name = "borrowarray.let" }:unit()

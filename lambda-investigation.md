@@ -27,7 +27,7 @@ The evaluator suite adds 49 checks for named and closure paths, zero/exact capac
 retries, initializer replacement, and session isolation. The implementation does not assume that
 `#order` always equals map cardinality.
 
-A one-off registry probe requested real bodies of `f(x,k:U32):U32=x+k` with runtime `x` and 16,384
+A one-off registry probe requested real bodies of `f(x,k:u32):u32=x+k` with runtime `x` and 16,384
 distinct static `k` values: cold wall time was 2.74 s before and 2.08 s after the change. Smaller
 samples were nearly unchanged. These are single diagnostic samples, not a general speedup claim;
 body construction and GC remain substantial costs. Scratch artifacts are under
@@ -70,8 +70,8 @@ Three fixtures run at each count:
 3. A lambda chain, without any sum or match:
 
    ```wordlet
-   let chain(n:U32):U32 =
-     if n==0 then 0 else (|u:Unit|->chain(n-1)+1)(Unit())
+   let chain(n:u32):u32 =
+     if n==0 then 0 else (|u:unit|->chain(n-1)+1)(unit())
    ```
 
 The chain's depth is `2*n+2`, so its logical word-call count matches the VM's `2*n+3` transitions.
@@ -107,7 +107,7 @@ these are explanatory fixture measurements, not production workload forecasts. F
 2. It unconditionally allocates a new definition id, puts that id in `plan.key`, and requests a base
    through `callableInstanceCPS` to discover the closure's result signature.
 3. `constructCallableInstanceCPS` checks the lambda body under residual construction. In these fixtures,
-   captures are known, and the Unit parameter contributes no unknown payload. Calling the recursive
+   captures are known, and the unit parameter contributes no unknown payload. Calling the recursive
    word therefore folds the remaining suffix while building the base.
 4. After construction, `invokeClosureCPS` sees known arguments and captures in a non-residual frame.
    `evaluateClosureStaticallyCPS` evaluates the same lambda body concretely, repeating the suffix.
@@ -127,7 +127,7 @@ its result signature. Its plan is internal compiler data, never a provisional so
 `completeLambdaCPS` remains the ordinary checked-base path for a first-class callable.
 
 A direct literal call or selected known-match literal, in a non-residual frame, can use the prepared
-plan immediately when saturated with known integer/F64/Bool/Unit/string arguments and no runtime or
+plan immediately when saturated with known integer/f64/bool/unit/string arguments and no runtime or
 borrowed captures. It enters the existing closure invocation owner and executes the body once.
 No code identity is shared, no result is cached, and no result type is guessed. The invocation checks
 its parameters and the actually selected body path. Enclosing result contracts still apply.
@@ -158,7 +158,7 @@ and 5,000 steps, and compile its result to constant 40 under default compilation
 The later validation log in VALIDATION.md is authoritative for the final full-suite run.
 
 Regression coverage includes annotation/capture/argument/handler ordering, exact-once local effects,
-record parameter copies, numeric retagging, Unit/result vectors, partial/contextual callable inputs,
+record parameter copies, numeric retagging, unit/result vectors, partial/contextual callable inputs,
 wrong parameter types, borrow/reference rejection, and unchanged first-class checking. The C corpus
 checks both residual credits 0 and 256. General code-template sharing remains separate future work;
 the diagnostic shape counts are not a license to merge plans or activation-specific bindings.

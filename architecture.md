@@ -78,7 +78,7 @@ OwnedCallable(code_identity, environment)
 BorrowedCallable(code_identity_or_signature, environment_bindings)
 Sum(alternative_names_and_payload_types)
 TaggedCallable(visible_signature, arms_of_code_identity_and_environment)
-Ref(target_type)                        -- a checked borrow of a place, `target_type *` in C
+ref(target_type)                        -- a checked borrow of a place, `target_type *` in C
 Named(reserved_recursive_cell)          -- the identity of a recursive definition
 ```
 
@@ -156,7 +156,7 @@ fields, including fields found through the active method receiver.
 
 ### 4.1 Separate meanings from layouts
 
-Runtime primitives are U32, Bool and Unit. Type is a static-only value category. A record's semantic
+Runtime primitives are u32, bool and unit. type is a static-only value category. A record's semantic
 meaning includes data requirements, static supplies and executable members. Its C layout contains
 only runtime data fields. Equal layouts alone do not establish source type equality.
 
@@ -252,7 +252,7 @@ calls instead require a complete runtime signature and emit Indirect.
 
 ### 5.4 Static results and runtime effects
 
-A residual call cannot return an unrepresented Type or word proxy in a C value slot. The evaluator
+A residual call cannot return an unrepresented type or word proxy in a C value slot. The evaluator
 therefore records a source result description: each slot is either an exact static value or a typed
 runtime result. Only runtime slots are returned by the private body's ABI. The caller reconstructs
 static slots after emitting the call. A constant result is never permission to omit the call or its
@@ -260,7 +260,7 @@ possible nontermination.
 
 Infer an exact static result only after all reachable returning arms agree on its value. Different
 known scalars of the same type become a runtime result. Different static-only types cannot be joined
-into a runtime Type and reject. Dynamic captures prevent a callable value from being classified as
+into a runtime type and reject. Dynamic captures prevent a callable value from being classified as
 an entirely static word.
 
 Public and opaque-callable entries have runtime signatures. Entry adapters materialize known scalar
@@ -286,7 +286,7 @@ later statements may consume.
 
 For a known condition, evaluate only the selected arm. For an unknown condition:
 
-1. require Bool and materialize its immutable value;
+1. require bool and materialize its immutable value;
 2. elaborate each arm into a separate statement list and child lexical environment;
 3. collect each arm's completion and result vector;
 4. for an expression conditional, compare the values of arms that continue;
@@ -303,7 +303,7 @@ immutable result value. The checker proves every reachable continuation initiali
 No arm-local value definition is referenced directly from outside its scope.
 
 Short-circuit and/or elaborate the right operand only in the appropriate arm, never eagerly.
-Both operands and the result are Bool; and binds tighter than or. A known left operand may avoid
+Both operands and the result are bool; and binds tighter than or. A known left operand may avoid
 evaluating the right operand entirely. There is no operand-valued truthiness.
 
 Known sum matches likewise skip unselected lambda literals before capture planning or base-instance
@@ -415,14 +415,14 @@ Names distinguish immutable value IDs (`Ir.Value`) from mutable storage IDs (`Ir
 reads nothing, which is what lets a record field hold a reference; it is the one addition to the
 original "no address acquisition" wording, and it stays pure because computing a place reads
 nothing: storage, field names, and whatever index expression an indexed place carries.
-`Ir.Place.Deref` is the route through a reference or a `Ptr`. `Ir.Stmt` is ordered by list position.
+`Ir.Place.Deref` is the route through a reference or a `ptr`. `Ir.Stmt` is ordered by list position.
 `Ir.Expr` is deliberately not interned by ASDL, since `Ir.Value` IDs are function-local; the builder
 interns expressions per function (`interfaces.md` §4).
 
 Key shapes (see `ir.asdl` for the exact fields):
 
 ```
-Ir.Expr  = Const | Ref | Un | Bin | Get | Make | Convert | Addr | SliceLength | Null
+Ir.Expr  = Const | ref | Un | Bin | Get | Make | Convert | Addr | SliceLength | null
 Ir.Place = Local | Project | Deref | Index | SliceIndex | PtrIndex
 Ir.Arg   = ValueArg | BorrowArg
 Ir.Stmt  = Let | Var | Read | Store | View | Call | Indirect
@@ -432,7 +432,7 @@ Ir.Param = ValueParam | PlaceParam
 Ir.Fn    = (id, role, hidden, Ty.Input* inputs, Ty.V* results, Param* params, Stmt* body)
 ```
 
-`Ty.Slice(V)` is a runtime-length view: a pointer to the element and a `U32` length. `Make(Slice(T),
+`Ty.slice(V)` is a runtime-length view: a pointer to the element and a `u32` length. `Make(slice(T),
 {data, length})` builds one from a reference and a length, `Literal.Str` is its one literal spelling,
 `SliceLength` projects the length (pure, like a record field), and `SliceIndex` names an element place.
 The view is an expression operand rather than a place base because a view needs no storage of its own.
@@ -441,7 +441,7 @@ It is read-only, so `SliceIndex` is reached by `Read` and never by `Store`: `vie
 
 A reference is a type whose representation is a pointer but whose meaning is a checked borrow: the
 target must provably outlive every use (section 8.2). Its implementation follows the same order as every other
-family here: `Ty.Ref`/`Ty.Named` and the two IR additions first; then the `Ref` builtin, whose terminal
+family here: `Ty.ref`/`Ty.Named` and the two IR additions first; then the `ref` builtin, whose terminal
 returns a type for a type argument and a reference for a place argument, so no new syntax is needed;
 then the reservation of an open cell around a `let` type definition and the `type-cycle` rejection
 when a knot closes by value, with a sealed definition canonicalising its own occurrences so one knot
@@ -450,7 +450,7 @@ stays one type; then the two lifetime rules, `ref-target` and `ref-escape`; then
 already accept. The `c-order` check stays as the layout backstop for a cycle that slips past the
 type-level rejection. It is the only indirection boundary that makes
 a recursive layout finite, and `Named` is the identity a recursive definition reserves for itself
-while its own layout is still being computed. A `Ref` field makes its holder non-retaining in one
+while its own layout is still being computed. A `ref` field makes its holder non-retaining in one
 direction and tied to its target lifetime in the other, and a by-value cycle stays rejected.
 
 A tagged callable is the callable counterpart of a sum: a closed set of code identities that share
@@ -462,8 +462,8 @@ layout and the lowering; only the type family and how the arms are called differ
 
 A sum is the one aggregate family whose alternatives are selected by a tag rather than by a static
 field name, so it has three statements of its own. `ConstructVariant(value, Ty.Sum, tag, Expr?)`
-builds one alternative; the payload expression is absent for a `Unit` alternative.
-`VariantMatches(value, variant, Ty.Sum, tag)` tests the tag and defines a `Bool`.
+builds one alternative; the payload expression is absent for a `unit` alternative.
+`VariantMatches(value, variant, Ty.Sum, tag)` tests the tag and defines a `bool`.
 `VariantPayload(value, variant, Ty.Sum, tag)` projects the payload of an alternative that the
 matching arm has already established, defining a value of that alternative's type. All three name
 their `Ty.Sum`, so the checker can reject a tag or a projection that does not belong to the type,
@@ -501,7 +501,7 @@ be referenced many times. The emitter names a node used more than once in one lo
 declaration goes in the innermost statement list that contains all of its uses, immediately before
 the earliest statement in that list that uses it; in a structured IR nesting is dominance, so this
 covers arms and loops with no separate dominance check. An operand shared by the node is declared
-first, and a `Const` or `Ref` is never named, because duplicating a leaf is free. This is why an
+first, and a `Const` or `ref` is never named, because duplicating a leaf is free. This is why an
 `Ir.Expr` must stay pure: a trap or a read is a statement materialised at its point, so no guarded
 operation is ever hoisted out of the arm that guards it.
 
@@ -588,7 +588,7 @@ It checks:
 9. no escaping borrowed provenance through records, results or callable environments;
 10. Owned and View construction against their respective code/environment contracts;
 11. guards for partial operations on every path reaching their evaluation;
-12. absence of Type values, source words and unresolved signatures from runtime operands;
+12. absence of type values, source words and unresolved signatures from runtime operands;
 13. completed reachable function bodies and finite by-value layouts.
 
 A Call result ID is a definition even though no Let introduces it. Nested-list analysis tracks both
@@ -626,9 +626,9 @@ backend.
 
 | Entity | C representation |
 | --- | --- |
-| U32 / U16 / U8 | uint32_t / uint16_t / uint8_t |
-| Bool | bool |
-| Unit | erased payload, while logical result positions remain tracked |
+| u32 / u16 / u8 | uint32_t / uint16_t / uint8_t |
+| bool | bool |
+| unit | erased payload, while logical result positions remain tracked |
 | record value | struct, by value, fields in canonical name order |
 | sum value | struct with a tag plus a union of alternative payloads, by value |
 | reference | `T *`, with a forward declaration for a recursive target and no allocation |
@@ -641,9 +641,9 @@ backend.
 | non-retaining callable view | invocation pointer plus const void *environment |
 | captured borrowed bindings | compiler-private local bundle with typed pointers and saved values |
 
-Empty/all-Unit aggregates need one private padding byte in C11. Unit erasure must not accidentally
+Empty/all-unit aggregates need one private padding byte in C11. unit erasure must not accidentally
 change source arity. A sum's tag is the alternative's canonical index; its union holds one member per
-alternative, and a `Unit` alternative contributes no payload member. Construction is a compound
+alternative, and a `unit` alternative contributes no payload member. Construction is a compound
 literal with the tag and the one live payload member set by name, projection reads that member, and a
 tag test compares the tag word. Because the payload union is only ever read in an arm guarded by the
 matching tag test, an inactive payload is never interpreted.
@@ -667,7 +667,7 @@ constant and a run-time index is the value the guard checks. A run-time index is
 `Trap`, in the same style as a run-time divisor: the builder emits it and the verifier does not
 re-derive it.
 
-A `Unit` parameter is erased rather than represented, exactly like a `Unit` result: it produces no
+A `unit` parameter is erased rather than represented, exactly like a `unit` result: it produces no
 `Ty.Input`, no `Ir.Param` and no C parameter, and a call site emits no argument for it. Erasure
 happens when the input plan is built, so the IR argument list, `Ty.Input*`, `Ir.Param*` and the C
 signature stay positionally consistent. A view adapter casts its environment to its exact private layout, then invokes
@@ -737,7 +737,7 @@ selector, and no new IR schema is required.
 
 `residualInlineBudget` defaults to zero and is independent of `inline`, which still controls host
 attributes. A required root component is mandatory regardless of optional credit. Every additional
-copy spends its complete base IR weight from the same per-Unit budget before nested expansion; the
+copy spends its complete base IR weight from the same per-unit budget before nested expansion; the
 expression DAG is counted once, effects as occurrences. Optional nesting stops at 32 groups. The
 compilation-wide `limits.emittedNodes` default is 1,000,000 weighted nodes, including mandatory
 components; exhaustion is `resource [c-size]`, never permission to cut an internal tail edge.
@@ -748,7 +748,7 @@ while the emitted root order contains only required bodies. Existing alias wrapp
 adapters remain. Header/source/cdef views read the same closed artifact.
 
 C-return fusion must honor the current destination: an outlined call inside an expanded helper must
-not return from the whole Unit. Discarded helper results still receive a void use at their return
+not return from the whole unit. Discarded helper results still receive a void use at their return
 point so the template's definition-use analysis remains valid. Typed by-value copies, read snapshots,
 guards, implicit View environments and source effect order survive expansion.
 
@@ -804,7 +804,7 @@ vendor/              the ASDL runtime and terra-lists, with their licenses
 The namespace is `wordlet`; `require("wordlet")` resolves through `wordlet/init.lua`. The bootstrap
 toolkit uses the separate `wordletkit` namespace, so compiler module names never collide with it.
 
-`eval.lua` holds the bootstrap primitives — `U32`, `Bool`, `Unit` and `Type`, plus the `OneOf` type
+`eval.lua` holds the bootstrap primitives — `u32`, `bool`, `unit` and `type`, plus the `oneof` type
 constructor — in its `load`, rather than in a `builtins.lua`, so a primitive is defined on the same
 path as any other word. Binding is resolved during evaluation rather than by a separate pass,
 because a name can denote a word, a value, a schema or a field depending on values that only exist
@@ -835,29 +835,29 @@ borrow checking, effect order or ABI layout. Those are properties of the languag
 The source rules are defined in syntax.md, not inferred from implementation conveniences:
 
 1. Lambdas always use pipes, including `|x| -> ...` and `|| -> ...`, and `->` introduces only a
-   lambda body. A result is written `:` after the parameter list (`let f(x: U32): U32`), and a
-   signature parenthesizes its inputs (`(U32): U32`). `:` after a name stays an annotation, so a
-   signature inside a lambda's parameter list is unambiguous: `|f: (U32): U32| -> f`. Missing
+   lambda body. A result is written `:` after the parameter list (`let f(x: u32): u32`), and a
+   signature parenthesizes its inputs (`(u32): u32`). `:` after a name stays an annotation, so a
+   signature inside a lambda's parameter list is unambiguous: `|f: (u32): u32| -> f`. Missing
    lambda parameter types require an expected signature; explicit annotations are checked.
 2. Named parameters may share an annotation; ordinary result-binding names have individual optional
-   annotations. Requirements are checked left-to-right, including dependencies on earlier Type inputs.
+   annotations. Requirements are checked left-to-right, including dependencies on earlier type inputs.
 3. Partial application accepts static supplies only. Saturated calls may have runtime arguments.
    Empty calls preserve an incomplete word, invoke a nullary terminal, and never invent missing code.
    Overapplication rejects rather than automatically applying a returned word.
 4. Expression bodies forward result vectors. Explicit-return blocks have no implicit final value.
    Expression conditionals require else; statement conditionals have end and may omit else.
 5. Expression conditionals join complete logical result vectors, checking arity and each type.
-   Unit and equal known components need no slot; other components keep typed private slots and
+   unit and equal known components need no slot; other components keep typed private slots and
    borrow flags. Arm effects/control are emitted once, including when both arms tail-transfer.
-   F64 signed zeros are not interchangeable known constants.
+   f64 signed zeros are not interchangeable known constants.
    Multiple-result annotations use `(T1, T2)`; binding uses `let a, b = ...`. These are result lists,
    not general tuple values/patterns. Scalar contexts and explicit grouping select the first result.
    Final expressions expand in argument/return/binding lists; bindings alone fill missing slots with
-   Unit. Preserve source slots separately from runtime Unit erasure.
+   unit. Preserve source slots separately from runtime unit erasure.
 6. Saturated call statements discard their result vector. An unused partial word is not a call for
    effects. Arbitrary arithmetic is not an expression statement.
-7. and/or/not operate on Bool, short-circuit where appropriate, and preserve the specified precedence.
-   There is no Lua truthiness, proxy comparison protocol or implicit Bool/U32 conversion.
+7. and/or/not operate on bool, short-circuit where appropriate, and preserve the specified precedence.
+   There is no Lua truthiness, proxy comparison protocol or implicit bool/u32 conversion.
 8. Keyed schemas and named initializers have different grammatical roles. Keyed partial supply is
    static; complete construction creates an instance. Module export configuration is a third,
    deliberately separate grammar, not a general runtime table language.

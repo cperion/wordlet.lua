@@ -8,26 +8,26 @@
 --
 -- Expected: main() = 7
 
-let Op = OneOf { push: U32, add: Unit, halt: Unit }
+let op = oneof { push: u32, add: unit, halt: unit }
 
-let Machine = {
-  code: Array(Op, 4),
-  pc: U32,
-  top: U32,
-  stack: Array(U32, 4),
-  done: Bool,
+let machine = {
+  code: array(op, 4),
+  pc: u32,
+  top: u32,
+  stack: array(u32, 4),
+  done: bool,
 }
 
 -- Decode and apply one opcode, returning the machine to run next.
-let advance(m: Machine): Machine =
+let advance(m: machine): machine =
   m.code[m.pc] {
-    push = |value: U32| -> do
+    push = |value: u32| -> do
       m.stack[m.top] = value
       m.top += 1
       m.pc += 1
       return m
     end,
-    add = |unit: Unit| -> do
+    add = |unit: unit| -> do
       let right = m.stack[m.top - 1]
       let left = m.stack[m.top - 2]
       m.stack[m.top - 2] = left + right
@@ -35,27 +35,27 @@ let advance(m: Machine): Machine =
       m.pc += 1
       return m
     end,
-    halt = |unit: Unit| -> do
+    halt = |unit: unit| -> do
       m.done = true
       return m
     end,
   }
 
 -- The loop. `run(next)` is in tail position of `run`, so it is a back edge.
-let run(m: Machine): U32 = do
+let run(m: machine): u32 = do
   let next = advance(m)
   if next.done then return next.stack[next.top - 1] end
   return run(next)
 end
 
-let initial(): Machine = Machine {
-  code = [Op.push(3), Op.push(4), Op.add(), Op.halt()],
+let initial(): machine = machine {
+  code = [op.push(3), op.push(4), op.add(), op.halt()],
   pc = 0,
   top = 0,
   stack = [0, 0, 0, 0],
   done = false,
 }
 
-let main(): U32 = run(initial())
+let main(): u32 = run(initial())
 
 return { functions = { main } }

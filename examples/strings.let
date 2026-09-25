@@ -5,11 +5,11 @@
 --           escaped()=4         empty_length()=0      module_view(1)=20  sliced_sum()=60
 --           count_a("banana",0)=3  banner_length()=13  banner_first()=102  banner_is_raw()=4
 
-let byte_at(s: String, i: U32) : U32 = U32(s[i])
-let length_of(s: String) : U32 = s.length
+let byte_at(s: string, i: u32) : u32 = u32(s[i])
+let length_of(s: string) : u32 = s.length
 
 -- A byte literal is one byte written readably, and it adapts like any other numeric literal.
-let count_from(s: String, b: U8, i: U32) : U32 = do
+let count_from(s: string, b: u8, i: u32) : u32 = do
   if i >= s.length then return 0 end
   if s[i] == b then return 1 + count_from(s, b, i + 1) end
   return count_from(s, b, i + 1)
@@ -17,16 +17,16 @@ end
 
 -- The starting position is a run-time value, so the recursion consumes the view instead of growing a
 -- specialization: a recursive word whose static arguments change specializes once per value.
-let count_a(s: String, i: U32) : U32 = count_from(s, 'a', i)
+let count_a(s: string, i: u32) : u32 = count_from(s, 'a', i)
 
 -- A byte sequence has no identity a program can observe, so `==` compares content.
-let same() : Bool = "hello" == "hello"
-let different() : Bool = "hello" == "world"
+let same() : bool = "hello" == "hello"
+let different() : bool = "hello" == "world"
 
 -- Escapes decode to bytes, a literal may be empty, and digits may be grouped to be read.
-let escaped() : U32 = "a\tb\n".length
-let empty_length() : U32 = "".length
-let grouped() : U32 = 1_000_000 + 0b1010_1010
+let escaped() : u32 = "a\tb\n".length
+let empty_length() : u32 = "".length
+let grouped() : u32 = 1_000_000 + 0b1010_1010
 
 -- A long string is raw and may span lines. One newline after the opening bracket is dropped, so a body
 -- can begin on the line below it, and the level lets the body contain a bracket of its own.
@@ -35,26 +35,26 @@ first
 second
 ]=]
 
-let banner_length() : U32 = banner.length
-let banner_first() : U32 = U32(banner[0])
-let banner_is_raw() : U32 = [=[a\tb]=].length
+let banner_length() : u32 = banner.length
+let banner_first() : u32 = u32(banner[0])
+let banner_is_raw() : u32 = [=[a\tb]=].length
 
 -- An array in module storage, viewed at a runtime length. A view of module storage may be returned.
 let xs = [10, 20, 30]
-let view() : Slice(U32) = Slice(xs)
-let module_view(i: U32) : U32 = view()[i]
+let view() : slice(u32) = slice(xs)
+let module_view(i: u32) : u32 = view()[i]
 
 -- A slice parameter: the callee does not know its length while compiling, so it reads the length and
 -- checks each index when it runs.
-let sum_three(v: Slice(U32)) : U32 = do
+let sum_three(v: slice(u32)) : u32 = do
   let n = v.length
   if n < 3 then return 0 end
   return v[0] + v[1] + v[2]
 end
 
-let sliced_sum() : U32 = do
+let sliced_sum() : u32 = do
   let three = [10, 20, 30]
-  return sum_three(Slice(three))
+  return sum_three(slice(three))
 end
 
 return {

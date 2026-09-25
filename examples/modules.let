@@ -6,11 +6,11 @@
 
 use modules_util
 
-let twice(n: U32): U32 = modules_util.helper(n)
-let bumped(n: U32): U32 = modules_util.secret(n)
+let twice(n: u32): u32 = modules_util.helper(n)
+let bumped(n: u32): u32 = modules_util.secret(n)
 
 -- An imported type is a type like any other: it annotates a binding and supplies a record.
-let origin(): modules_util.Point = modules_util.Point { x = 1, y = 2 }
-let sum_point(): U32 = origin().x + origin().y
+let origin(): modules_util.point = modules_util.point { x = 1, y = 2 }
+let sum_point(): u32 = origin().x + origin().y
 
 return { types = {  }, functions = { twice, bumped, sum_point } }

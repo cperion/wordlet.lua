@@ -20,16 +20,16 @@ function M.int(ty, n) return make{ tag = "int", ty = ty, n = n } end
 -- A 64-bit integer, held as the two words of its value because a Lua number cannot hold it.
 function M.int64(ty, high, low) return make{ tag = "int", ty = ty, high = high, low = low } end
 function M.isWide(v) return v.tag == "int" and v.high ~= nil end
-function M.u32(n) return M.int(S.U32, n) end
-function M.u8(n) return M.int(S.U8, n) end
-function M.u16(n) return M.int(S.U16, n) end
+function M.u32(n) return M.int(S.u32, n) end
+function M.u8(n) return M.int(S.u8, n) end
+function M.u16(n) return M.int(S.u16, n) end
 function M.isInteger(v) return v.tag == "int" end
-function M.bool(b) return make{ tag = "bool", ty = S.Bool, b = b } end
+function M.bool(b) return make{ tag = "bool", ty = S.bool, b = b } end
 -- An IEEE-754 double, held as a Lua number, which is one. Its type says which rules apply to it.
 function M.float(ty, n) return make{ tag = "float", ty = ty, n = n } end
-function M.f64(n) return M.float(S.F64, n) end
-function M.unit() return make{ tag = "unit", ty = S.Unit } end
-function M.type(ty) return make{ tag = "type", ty = S.Type, value = ty } end
+function M.f64(n) return M.float(S.f64, n) end
+function M.unit() return make{ tag = "unit", ty = S.unit } end
+function M.type(ty) return make{ tag = "type", ty = S.type, value = ty } end
 -- `place` is the place the value was read from, when there is one: a reference read from storage
 -- needs it to reach its target.
 function M.runtime(expr, ty, borrowed, place)
@@ -42,7 +42,7 @@ function M.word(def, args, span) return make{ tag = "word", def = def, args = ar
 function M.record(ty, fields, schema) return make{ tag = "record", ty = ty, fields = fields, schema = schema } end
 
 -- A schema: data fields, methods and any statically bound fields.
-function M.schema(def) return make{ tag = "schema", def = def, ty = S.Type } end
+function M.schema(def) return make{ tag = "schema", def = def, ty = S.type } end
 
 -- A record instance in residual code. A record is mutable, so a place is what makes a store to a
 -- field observable; but storage is only demanded when something actually needs an address. Until
@@ -89,12 +89,12 @@ end
 -- A module namespace: the exported functions and types of a `use`d module, reached by member
 -- selection. Its members are ordinary values, so no new call or supply rules are needed.
 function M.namespace(module, members)
-    return make{ tag = "namespace", ty = S.Type, module = module, members = members }
+    return make{ tag = "namespace", ty = S.type, module = module, members = members }
 end
 
 -- A constructor for one alternative of a sum type, named by member selection on the type.
 function M.ctor(sum, case, caseType)
-    return make{ tag = "ctor", ty = S.Type, sum = sum, case = case, caseType = caseType }
+    return make{ tag = "ctor", ty = S.type, sum = sum, case = case, caseType = caseType }
 end
 
 -- A sum value: which alternative it holds, and that alternative's payload.
@@ -257,7 +257,7 @@ end
 function M.describe(v)
     if M.is(v) and v.tag == "float" then return string.format("%.17g", v.n) end
     if not M.is(v) then return tostring(v) end
-    if v.tag == "type" then return "Type(" .. S.encode(v.value) .. ")" end
+    if v.tag == "type" then return "type(" .. S.encode(v.value) .. ")" end
     if v.tag == "runtime" then return "residual<" .. S.encode(v.ty) .. ">#" .. tostring(v.expr.kind) end
     if v.tag == "object" then return "object<" .. S.encode(v.ty) .. ">" end
     if v.tag == "record" then return "record<" .. S.encode(v.ty) .. ">" end

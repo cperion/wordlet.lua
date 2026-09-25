@@ -161,8 +161,8 @@ function M.interpret(options)
     end
     local args = {}
     for index, value in ipairs(options.args or {}) do
-        -- A Lua number is a double, so a fractional one is an F64 argument and a whole one is a U32.
-        -- An entry that wants an integral F64 takes a U32 and converts it, or a test passes a
+        -- A Lua number is a double, so a fractional one is an f64 argument and a whole one is a u32.
+        -- An entry that wants an integral f64 takes a u32 and converts it, or a test passes a
         -- fractional value; either way the argument's type is never guessed from the parameter.
         if type(value) == "number" then
             if value % 1 == 0 and value >= 0 and value <= 4294967295 then
@@ -171,7 +171,7 @@ function M.interpret(options)
                 args[index] = V.f64(value)
             end
         elseif type(value) == "boolean" then args[index] = V.bool(value)
-        elseif type(value) == "string" then args[index] = V.string(S.String, value)
+        elseif type(value) == "string" then args[index] = V.string(S.string, value)
         else D.reject("interpret-arg", "Unsupported argument " .. tostring(value)) end
     end
     local span = word.span
@@ -205,7 +205,7 @@ local function describe(session, value, seen, depth)
     end
     -- A 64-bit value is held as two words, so it is printed rather than returned as a Lua number.
     -- A float is a Lua number, so it is printed with enough digits to round-trip.
-    -- An F64 is a Lua number already, and the differential harness compares it through the C return
+    -- An f64 is a Lua number already, and the differential harness compares it through the C return
     -- type, so the value is handed back as one rather than as a rounded string.
     if tag == "float" then return value.n end
     if tag == "int" and value.high ~= nil then
@@ -257,10 +257,10 @@ local function describe(session, value, seen, depth)
         if index == nil then D.bug("interpret-result", "A variant has no tag for its alternative") end
         local caseType = S.caseOf(value.ty, value.case)
         return { variant = true, tag = index, case = value.case,
-            payload = caseType == S.Unit and "unit"
+            payload = caseType == S.unit and "unit"
                 or describe(session, value.payload, seen, depth + 1) }
     end
-    D.todo("interpret-result", "Cannot interpret result of type " .. S.encode(value.ty or S.Unit))
+    D.todo("interpret-result", "Cannot interpret result of type " .. S.encode(value.ty or S.unit))
 end
 
 M.describe = describe   -- exported so a test can inspect one value directly

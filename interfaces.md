@@ -61,7 +61,7 @@ Current reality, so the table is not read as a promise of empty files:
   pass would have to duplicate that. The architecture gives `resolve` bindings as well; this is the
   one deliberate deviation, and it is why `Resolution` has no `bindings` table here.
 - Primitive bootstrap lives in `wordlet/eval.lua` (`load`) rather than a `builtins.lua`: the names
-  U32, Bool, Unit and Type, plus the `OneOf` type constructor. `OneOf` is an ordinary word with a
+  u32, bool, unit and type, plus the `oneof` type constructor. `oneof` is an ordinary word with a
   compiler-provided terminal (`Eval:builtin`), so it is applied, partially supplied and type-checked
   through the same path as any other word; its terminal receives the keyed schema and returns a
   `Ty.Sum` type value.
@@ -155,7 +155,7 @@ Key points:
   `demanding`, restoring them on success or diagnostic unwinding: building code inside an initializer
   or interpreter run does not execute that code. A nested initializer demand has its own permission.
 - **Conditional joins are logical vectors.** Continuing arms agree in arity and per-position type;
-  Unit and common known components need no storage. Other components get private typed slots,
+  unit and common known components need no storage. Other components get private typed slots,
   preserving borrow flags. Materialization stays inside its selected arm; one `If` contains all arm
   effects and transfers. Terminated arms contribute no result, but their control is still emitted.
 - The builder interns E per `Ir.Fn` (`Builder.memo`), as required by `architecture.md` §7. ASDL
@@ -209,7 +209,7 @@ Two rules are easy to get wrong and are therefore explicit:
   input type recorded for it, so a builder that appends one without the other silently loses the
   expected type. That is invisible for scalars and records and wrong for callables and aggregates.
 - **Never write `cond and nil or x`.** When the `and` branch yields `nil` the `or` branch runs
-  anyway, which silently defeats an erasure guard such as a `Unit` payload. Use an explicit `if`.
+  anyway, which silently defeats an erasure guard such as a `unit` payload. Use an explicit `if`.
 
 ### 4.2 Self-tail rewrite at build time
 
@@ -269,7 +269,7 @@ Instance = {
   failure;            -- the Diagnostic a failed build recorded, re-raised by a later attempt
   results;            -- one entry per *source* result slot; `false` where a signature requirement
   resultRequirements; -- the Ty.Sig for each `false` slot
-  runtimeResults;     -- the same list with the Unit slots erased: what Ir.Fn.results carries
+  runtimeResults;     -- the same list with the unit slots erased: what Ir.Fn.results carries
   inputTypes;         -- Ty.V per input, in order
   inputPlan;          -- { kind = "value" | "place" } per input
   paramPositions;     -- the index in fn.params each input binds
@@ -280,9 +280,9 @@ Instance = {
 - An instance's ABI is its `Ir.Fn`. `inputTypes`/`inputPlan`/`paramPositions` record how each
   input was derived while the body was built; the backend reads the `fn`.
 - A *source* result slot that a signature requirement has yet to fix is `false`, with the
-  requirement in `resultRequirements`; `runtimeResults` drops the `Unit` slots and `Ir.Fn.results`
-  is built from it. `Eval:logicalResults` puts the `Unit` values back, which is what the reference
-  interpreter and an entry with a `Unit` result see.
+  requirement in `resultRequirements`; `runtimeResults` drops the `unit` slots and `Ir.Fn.results`
+  is built from it. `Eval:logicalResults` puts the `unit` values back, which is what the reference
+  interpreter and an entry with a `unit` result see.
 - The key is what `Eval:instanceKey` and `Eval:callableKey` build: the definition id (or the closure
   plan key), the receiver's static fields, and then every parameter position -- a static argument
   contributes its encoded value and type, a runtime callable its code identity (two closures must
@@ -338,18 +338,18 @@ These are the obligations `check.lua` verifies; the builder should not rely on t
    initialized. A `Read` whose place roots at a storage not in the set is a `bug`.
 4. **Places.** `Place.Local(storage)` requires storage declared by `Var`, by a `PlaceParam`, or by a
    module-level `Var` outside every function. `Place.Project(base, field)` requires a record-typed
-   base and an existing field. `Place.Deref` requires a base holding a `Ref` or a `Ptr`, and records
+   base and an existing field. `Place.Deref` requires a base holding a `ref` or a `ptr`, and records
    the pointee type on the node. `Place.Index` requires an array base with a matching element type
-   and a `U32` index; `Place.SliceIndex` requires a slice-typed view value and `Place.PtrIndex` a
-   `Ptr`-typed one, each with a `U32` index.
+   and a `u32` index; `Place.SliceIndex` requires a slice-typed view value and `Place.PtrIndex` a
+   `ptr`-typed one, each with a `u32` index.
 5. **Args and slots.** `Ir.Call` arguments match the target `Ir.Fn.inputs` positionally: `InValue` →
    `ValueArg`, `InPlace` → `BorrowArg`. `Ir.View` names a callable's code and binds the hidden prefix
    of its inputs in order, never more slots than that code declares; the remaining inputs must match
    the view's own visible signature, and the bound type is a `Ty.View`, or a `Ty.Owned` whose
-   environment is `Unit` for pure code. `Ir.Indirect` matches the `Ty.View`'s *visible* signature.
-   A `Unit`-typed parameter is erased when the input plan is built, so it contributes no `Ty.Input`
-   and no `Ir.Param` and appears in no argument list. The parameter's name is bound to the `Unit`
-   value directly, and because there is no `Ir.Literal` for `Unit`, a `Unit` value can never be
+   environment is `unit` for pure code. `Ir.Indirect` matches the `Ty.View`'s *visible* signature.
+   A `unit`-typed parameter is erased when the input plan is built, so it contributes no `Ty.Input`
+   and no `Ir.Param` and appears in no argument list. The parameter's name is bound to the `unit`
+   value directly, and because there is no `Ir.Literal` for `unit`, a `unit` value can never be
    materialised as an `Ir.Expr`.
 6. **Tagged callables.** A `Ty.Tagged` value is a tag plus the environment of the arm that tag
    names. Its arms are registered in `Eval.arms` under the identity that names them in the type, so a
@@ -361,9 +361,9 @@ These are the obligations `check.lua` verifies; the builder should not rely on t
    arm may not borrow storage, because the value holds its environments by value. Erasing a
    runtime-tagged value into a signature rejects (`callable-erase`).
 7. **Sum tags.** `Ir.ConstructVariant`/`Ir.VariantMatches`/`Ir.VariantPayload` each name their
-   `Ty.Sum`. The tag must be one of its alternatives; a construct of a `Unit` alternative must omit
+   `Ty.Sum`. The tag must be one of its alternatives; a construct of a `unit` alternative must omit
    its payload and any other alternative must have one whose type matches; a projection must not
-   target a `Unit` alternative, and its operand value must have been bound with that exact sum type.
+   target a `unit` alternative, and its operand value must have been bound with that exact sum type.
    A projection is only ever reachable inside an arm whose test established the tag, which is a
    builder obligation the checker cannot see from the statement list alone.
 8. **Visible versus actual signature.** `Ty.Owned`/`Ty.View` carry the source-visible signature in
@@ -372,12 +372,12 @@ These are the obligations `check.lua` verifies; the builder should not rely on t
    must not be conflated, and `cabi` derives the C signature from the `fn`.
 9. **Integer widths.** `Ir.Expr.Convert(operand, type)` is the only conversion, and both its operand
     and its type are integer widths. Arithmetic and bitwise operators take both operands at one width
-    and yield it; a shift takes an integer value and a `U32` amount and yields the value's width; a
-    comparison takes two integers of any widths and yields `Bool`. Which width an operand needs is
+    and yield it; a shift takes an integer value and a `u32` amount and yields the value's width; a
+    comparison takes two integers of any widths and yields `bool`. Which width an operand needs is
     decided from the source: a literal adopts the other operand's width when it fits, and otherwise
     the wider width wins, so the decision never depends on what happens to be known at compile time.
 11. **Indexes.** `Ir.Place.Index(base, index, type)` names one element: the base must be an array,
-    the recorded type must be its element type, and the index expression must be a `U32`. A known
+    the recorded type must be its element type, and the index expression must be a `u32`. A known
     index is checked while compiling and rejected when it is out of range; any other index is preceded
     on every path by `Trap(Ge(index, length), "index-range")`, which the builder emits and the
     verifier does not re-derive, exactly as for a run-time divisor.
@@ -465,9 +465,9 @@ Two compilations of identical input produce byte-identical header and source.
 Source (`app.let`):
 
 ```
-let inc(x: U32) : U32 = x + 1
-let apply(f: (U32): U32, x: U32) : U32 = f(x)
-let run(x: U32) : U32 = apply(inc, x)
+let inc(x: u32) : u32 = x + 1
+let apply(f: (u32): u32, x: u32) : u32 = f(x)
+let run(x: u32) : u32 = apply(inc, x)
 return { functions = { inc, run } }
 ```
 
@@ -480,16 +480,16 @@ lowered.
 Evaluation produces (schematically):
 
 ```
-Fn id=inc  role=Entry hidden=0 inputs=[InValue U32] results=[U32]
-  body: Return( Bin(Add, Ref(x), Const(U32,1)) )        -- x is ValueParam 0
+Fn id=inc  role=Entry hidden=0 inputs=[InValue u32] results=[u32]
+  body: Return( Bin(Add, ref(x), Const(u32,1)) )        -- x is ValueParam 0
 
-Fn id=run  role=Entry hidden=0 inputs=[InValue U32] results=[U32]
-  body: Call([v1], "inc", [ValueArg(Ref(x))])
-        Return( Ref(v1) )
+Fn id=run  role=Entry hidden=0 inputs=[InValue u32] results=[u32]
+  body: Call([v1], "inc", [ValueArg(ref(x))])
+        Return( ref(v1) )
 
-Fn id=body#1 role=Body hidden=0 inputs=[InValue U32] results=[U32]
-  body: Call([v1], "inc", [ValueArg(Ref(x))])   -- f is a static fact, so no callable input
-        Return( Ref(v1) )
+Fn id=body#1 role=Body hidden=0 inputs=[InValue u32] results=[u32]
+  body: Call([v1], "inc", [ValueArg(ref(x))])   -- f is a static fact, so no callable input
+        Return( ref(v1) )
 ```
 
 `inc` is known code, so `apply(inc, x)` specializes: `f` becomes a `Static` fact and the body key
