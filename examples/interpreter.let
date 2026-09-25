@@ -19,13 +19,13 @@ let run(code: ptr(op), pc: u32, stack: ptr(u32), sp: u32): u32 = do
       stack[sp] = value
       return pc + 1, sp + 1, false
     end,
-    add = |unit: unit| -> do
+    add = |u: unit| -> do
       let right = stack[sp - 1]
       let left = stack[sp - 2]
       stack[sp - 2] = left + right
       return pc + 1, sp - 1, false
     end,
-    halt = |unit: unit| -> do return pc, sp, true end,
+    halt = |u: unit| -> do return pc, sp, true end,
   }
   if done then return stack[sp - 1] end
   return run(code, npc, stack, nsp)

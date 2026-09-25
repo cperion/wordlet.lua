@@ -27,7 +27,7 @@ let advance(m: machine): machine =
       m.pc += 1
       return m
     end,
-    add = |unit: unit| -> do
+    add = |u: unit| -> do
       let right = m.stack[m.top - 1]
       let left = m.stack[m.top - 2]
       m.stack[m.top - 2] = left + right
@@ -35,7 +35,7 @@ let advance(m: machine): machine =
       m.pc += 1
       return m
     end,
-    halt = |unit: unit| -> do
+    halt = |u: unit| -> do
       m.done = true
       return m
     end,

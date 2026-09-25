@@ -461,6 +461,35 @@ This gives Wordlet a component model without introducing a component system:
 > **Requirements are the interface. The word or schema is the component. Partial keyed supply is
 > wiring. Saturation creates the runtime instance.**
 
+### There is no shorthand for `x = x`
+
+A keyed supply names a key and the value that fills it:
+
+```text
+let scaled(radius: u32): circle = circle { radius = radius }
+```
+
+Other languages let you write `circle { radius }` and infer the value from the key. Wordlet
+deliberately does not, for two reasons.
+
+The first is that the separator is what tells a definition from a supply. After a word, `name: type`
+builds a schema and applies it, while `name = value` supplies that word's keyed requirement
+(`syntax.md` §8). A bare `name` carries neither separator, so both the reader and the parser would have
+to decide from position alone — in the one place where both readings are genuinely wanted, because
+`oneof { circle: circle }` is a definition and `point { x = 3 }` is a supply.
+
+The second is that the two names do different work. The key says what role the value fills here; the
+value names the thing being passed. When they coincide, that is a fact about the program rather than
+noise to be optimized away, and when they differ, the difference is exactly the information worth
+keeping:
+
+```text
+circle { radius = requested_radius }
+```
+
+So write the pair out. If one of the two names adds nothing, that name is the thing to fix — not the
+syntax.
+
 ---
 
 ## 5. Contract first, implementation later
@@ -1459,6 +1488,8 @@ A compact checklist for review. The reasoning and the worked examples are in sec
   `config1`, `service2` (section 4).
 - **Do not be afraid of long names.** Wordlet removed the structural ceremony; spend some of the space
   on meaning.
+- **Do not hide a name behind a shorthand.** Wordlet has no `{ x }` form: write `x = x`, or give one
+  side a name that says more (section 4).
 - **A descriptive name is not a guarantee.** Naming is not checking, and section 2 says what is
   actually enforced.
 

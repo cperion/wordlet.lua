@@ -70,7 +70,7 @@ unused sum boxes without losing payload effects.
 
 Production validation on GCC 13.3 / Clang 18.1:
 
-- Full `tests/run.lua`: **PASS, 38.18 s** (peak RSS 167,780 KiB); evaluator 795 checks, C
+- Full `tests/run.lua`: **PASS, 55.62 s** (peak RSS 167,580 KiB); evaluator 795 checks, C
   differential/distribution 1407 checks across 43 programs, contextual 5115 checks, plus
   schema/parser/kernel, SHA-256, JIT and isolated deterministic distribution acceptance.
 - `CC=clang luajit tests/contextual.lua`: **PASS, 5115 checks, 3.46 s**.
