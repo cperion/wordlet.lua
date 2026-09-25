@@ -993,6 +993,39 @@ return {functions={direct,matched}}
     compile(initialized)
 end
 
+-- A declared result contract is checked against what the body returns, and a violation is a source
+-- diagnostic with a span rather than an internal bug. Before this check the mismatch reached the IR
+-- checker, which reported `BUG [ir-return]` for a user's type error.
+--
+-- The contract is exact (`syntax.md` §6): a return vector is neither widened to satisfy it nor padded.
+-- A `unit` result is still a logical slot on both sides, so `: unit` with `unit()` and an exact
+-- `(u32, unit)` remain well formed even though C erases the payload.
+do
+    rejects("type-mismatch",
+        "let take(n: u32): u32 = n\nlet f(): bool = take(1)\nreturn { functions = { f } }")
+    rejects("result-count",
+        "let take(n: u32): u32 = n\nlet f(): (u32, u32) = take(1)\nreturn { functions = { f } }")
+    rejects("result-count", "let f(): u32 = do return 1, 2 end\nreturn { functions = { f } }")
+    rejects("type-mismatch", "let g(x: u8): u32 = x\nreturn { functions = { g } }")
+    compile("let f(): unit = unit()\nreturn { functions = { f } }")
+    compile("let f(): (u32, unit) = do return 1, unit() end\nreturn { functions = { f } }")
+    check(interpret("f", {}, "let take(n: u32): u32 = n\nlet f(): u32 = take(41)\n"
+        .. "return { functions = { f } }")[1] == 41, "a well-typed declared result still builds")
+end
+
+-- A foreign declaration has no body, so nothing else compares its requirement with what the caller
+-- supplied. The check lives at the call, where both are known: a mistyped argument is a source
+-- rejection rather than the `BUG [ir-type]` the IR checker used to report.
+do
+    rejects("type-mismatch",
+        "extern let host_add(a: u32): u32\nlet f(): u32 = host_add(true)\nreturn { functions = { f } }")
+    local foreign = "extern let host_sink(p: ptr(u8), n: u32): u32\n"
+        .. "let buf: array(u8, 3) = [1, 2, 3]\n"
+        .. "let f(): u32 = host_sink(ptr(buf[0]), 3)\nreturn { functions = { f } }"
+    check(compile(foreign):unit():find("host_sink", 1, true) ~= nil,
+        "a pointer to a buffer is passed to a foreign word by address")
+end
+
 -- Rejections -----------------------------------------------------------------------------------
 rejects("variant-match", [==[
 let A = { x: u32 }

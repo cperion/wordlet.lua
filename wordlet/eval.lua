@@ -4156,6 +4156,7 @@ function Eval:constructCallableInstanceCPS(machine, key, callable, args, span, k
             return self:execBodyResidualCPS(m2, ctx, def.body, span, function(m3)
                 if not instance.results then instance.results = ctx.resultTypes end
         if not instance.results then D.reject("recursive-result", "Closure has no returning path", span) end
+        self:checkResultContract(instance.results, ctx.resultTypes, "Closure", span)
         for _, ty in ipairs(instance.results) do
             if not S.representable(ty) then
                 D.todo("static-callable-result",
@@ -4434,6 +4435,30 @@ function Eval:logicalResults(results, runtime)
         else out[#out + 1] = runtime[index]; index = index + 1 end
     end
     return out
+end
+
+-- The declared result contract against the result vector a body actually returned. The contract is
+-- exact (`syntax.md` §6): a return vector is neither widened to satisfy it nor padded, so a `unit`
+-- slot counts as a logical slot even though C erases its payload, and a `u8` where `u32` is declared
+-- rejects rather than widening. This runs after the body walk because the declared vector and the
+-- actual one are only both known then -- and it must run at all, because without it the mismatch
+-- reaches the IR checker, which reports a source mistake as an internal bug.
+--
+-- A slot the declaration left open (`false`) is filled from the body just before this, so it compares
+-- equal and is skipped. A body that never returned has its own diagnostic (`no-return`).
+function Eval:checkResultContract(declared, actual, subject, span)
+    if not declared or actual == nil then return end
+    if #declared ~= #actual then
+        D.reject("result-count", subject .. " declares " .. #declared .. " result"
+            .. (#declared == 1 and "" or "s") .. " but returns " .. #actual, span)
+    end
+    for index, want in ipairs(declared) do
+        local got = actual[index]
+        if want ~= false and got and want ~= got then
+            D.reject("type-mismatch", "Result " .. index .. " of " .. subject .. " is declared "
+                .. S.display(want) .. " but found " .. S.display(got), span)
+        end
+    end
 end
 
 -- A statement conditional. A known test runs one arm; an opaque one runs both arms into their own
@@ -4942,6 +4967,14 @@ function Eval:invokeForeignCPS(machine, ctx, def, values, span, k)
             .. "; a constant argument does not make the host call foldable", span)
     end
     return self:foreignInstanceCPS(machine, def, span, function(m, instance)
+        -- A foreign word has no body, so nothing else ever compares the supplied arguments with the
+        -- declared requirements. Both the contract and the values are known here, which is why the
+        -- check lives here: without it a mistyped argument reaches the IR checker and is reported as
+        -- an internal bug instead of a source error.
+        for index, value in ipairs(values) do
+            local want = instance.inputTypes[index]
+            if want then self:requireAgainst(value, want, span) end
+        end
         return self:emitCallCPS(m, ctx, instance, values, span, nil, k)
     end)
 end
@@ -5460,6 +5493,7 @@ function Eval:constructInstanceCPS(machine, key, def, values, span, receiver, k)
     if not instance.results then
         D.reject("recursive-result", "Word " .. def.name .. " has no returning path", span)
     end
+    self:checkResultContract(instance.results, ctx.resultTypes, "Word " .. def.name, span)
     if requirements then
         for index, requirement in pairs(requirements) do
             local actual = instance.results[index]

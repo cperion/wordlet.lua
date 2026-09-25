@@ -70,7 +70,7 @@ unused sum boxes without losing payload effects.
 
 Production validation on GCC 13.3 / Clang 18.1:
 
-- Full `tests/run.lua`: **PASS, 55.62 s** (peak RSS 167,580 KiB); evaluator 795 checks, C
+- Full `tests/run.lua`: **PASS, 74.38 s** (peak RSS 167,580 KiB); evaluator 817 checks; evaluator 795 checks, C
   differential/distribution 1407 checks across 43 programs, contextual 5115 checks, plus
   schema/parser/kernel, SHA-256, JIT and isolated deterministic distribution acceptance.
 - `CC=clang luajit tests/contextual.lua`: **PASS, 5115 checks, 3.46 s**.
@@ -292,6 +292,15 @@ Gates 1–5 and 9–11 have their first executable form in `tests/parse.lua`, `t
    checker also walks an array's element, so a cycle that crosses an array reports `type-cycle` rather
    than an eager initializer demand and names the boundary that would have made it finite; a type
    declared later is still not a cycle, and an indirection inside the array is still a boundary.
+8o. **A declared contract is enforced where it is written (implemented):** the frontend used to skip
+   two checks, so a user's mistake reached the IR checker and was reported as an internal bug
+   (`BUG [ir-return]`, `BUG [ir-type]`) rather than as a source rejection. Now a body's result vector
+   is compared against the declared result contract, and a foreign word's requirements are compared
+   against the supplied arguments at the call. The contract is exact (`syntax.md` §6): a result vector
+   is neither widened nor padded, so returning a `u8` where `u32` is declared rejects
+   (`type-mismatch`) instead of widening, and a vector of the wrong length rejects (`result-count`). A
+   `unit` result stays a logical slot on both sides, so `: unit` with `unit()` and an exact
+   `(u32, unit)` are accepted. Both checks are exercised by the evaluator suite.
 9. **IR/checking:** storage/value distinction, scope and definite assignment, target signature checks,
    module storage seeded outside every function,
    dynamic failure guards, transitive borrow provenance, finite layouts, no metadata runtime slots.
