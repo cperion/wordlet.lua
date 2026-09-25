@@ -46,6 +46,7 @@ this section states exactly how much of it runs today.
 | Self-tail calls (`Loop`/`Next` back edges) | implemented; tails run at constant C stack depth |
 | Safe scalar mutual-tail components | implemented in the C backend, including private scalar join forwarding; internal transfers use labels even at `-O0`. Borrowing/aggregate cases outside the reuse proof retain calls |
 | Optional residual-body expansion | implemented: `residualInlineBudget` (default `0`) permits bounded contextual copies, independently of host inlining |
+| Immediate static lambda execution | implemented for saturated known atom arguments with no runtime/borrowed captures: direct literals and selected known-match handlers execute without first building an unused base; no result memoization |
 | Module-level mutable records captured by runtime code | implemented as named file-scope storage plus an exported `wordlet_init()`. The host owns initialisation order; nothing is called implicitly |
 
 Working end to end today: U32/Bool/Unit, `let` bindings, named definitions with parameter and result
@@ -124,6 +125,9 @@ host compiler.
 - `tests/walk.lua`: asserts the schema-driven traversal reads the ASDL classes, so a field or variant cannot be skipped.
 - [ASDL.md](ASDL.md): the actual vendored API, limitations and integration rules.
 - [VALIDATION.md](VALIDATION.md): executable checks and the remaining compiler obligations.
+- [lambda-investigation.md](lambda-investigation.md): constant-time key accounting, the repeated
+  lambda-construction cause and immediate-use fix; reproduce with `luajit tools/profile-lambdas.lua`
+  (no memoization).
 - [THIRD_PARTY.md](THIRD_PARTY.md): verified Terra origins, local changes and MIT attribution.
 - [editor/README.md](editor/README.md): the Neovim syntax support shipped under `editor/nvim/`, and how each Wordlet role maps to a Vim highlight group.
 - [LICENSE](LICENSE) and [vendor/LICENSE](vendor/LICENSE): project and upstream MIT notices.

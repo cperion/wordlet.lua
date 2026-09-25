@@ -172,11 +172,21 @@ Key points:
   neither a closure plan nor a callable to invoke. Only a known tag may introduce this marker;
   opaque matches elaborate all arms. Non-lambda handler expressions keep their evaluation order
   and callable validation.
+- **Immediate static lambda use separates preparation from ABI construction.** `prepareLambdaCPS`
+  returns an internal plan with captures, resolved `paramTypes`/`inputs` and environment shape, but no
+  `sig` or `ty`. `completeLambdaCPS` builds the base and supplies those checked fields before exposing
+  a closure Value. Direct literal calls and known selected literal handlers in non-residual frames
+  can use `invokePreparedLambdaCPS`: saturated known atom arguments and a non-borrowing static
+  environment enter `invokeClosureCPS` without a base. Fallback completes a real callable and supplies
+  the already-evaluated arguments. First-class values and residual calls keep checked construction;
+  no pending plan is presented as a source Value or provisional return signature. Parameter types
+  are reused, including the bound-argument offset, rather than replaying annotations.
 - **One law for application.** `Eval:supply(ctx, callee, args, span)` is the only entry point: it
   appends the arguments to the callee's bound arguments, tests saturation, and hands a saturated
   call to the one owner for its kind — `invokeBuiltin`, `invokeForeign`, `invokeSource`,
   `invokeMethod`, `invokeClosure`, or `invokeRuntime` for a value whose representation is a
-  callable. A saturated word or method call shares one fold-or-build decision, `foldOrBuild`, and a
+  callable. An eligible prepared immediate lambda enters that same closure owner directly, without
+  manufacturing a first-class value merely to invoke it. A saturated word or method call shares one fold-or-build decision, `foldOrBuild`, and a
   call that cannot fold becomes an instance through `callInstance`, which emits the call or, in tail
   position, a `loopBack` back edge. A deferred action and a match handler call `supply` as well, so
   there is no second dispatcher to keep in step.

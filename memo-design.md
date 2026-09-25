@@ -1,6 +1,9 @@
 # Static-result memoization: cache completed, effect-free invocations
 
-**Status: design and isolated mechanism probes, not an implemented production cache.**
+**Status: deferred design, not an implemented production cache.** The selected work is instead
+constant-time key accounting and a targeted immediate-lambda fix; see
+[lambda-investigation.md](lambda-investigation.md). That fix runs the static-pc VM `(10,7)` in 23
+invocations with no residual bases or memoization. The cache machinery below remains a proposal.
 
 ## 1. Decision
 
@@ -21,7 +24,7 @@ Large compilation budgets remain legitimate developer choices. Cache capacity is
 budget, not a language limit. Exhausting it evicts or bypasses; it does not reject a program.
 Memoization does not promise to make every large or nonterminating computation affordable.
 
-## 2. What the current implementation requires us to handle
+## 2. Findings when this design was written
 
 - Words/methods use `foldOrBuildCPS` and `evaluateStaticallyCPS`. Closures have a separate path through
   `invokeClosureCPS` and `evaluateClosureStaticallyCPS`. Changing only the word path is not full coverage.
@@ -38,8 +41,8 @@ Memoization does not promise to make every large or nonterminating computation a
 - A lambda evaluation allocates a fresh definition id and eagerly builds its base instance. This can
   multiply work, but completed **word** results can already cut off repeated construction underneath
   them. We need not globally merge lambda identities to obtain that benefit.
-- Both residual-key admission paths count `instances` by scanning the whole map. N reservations do
-  O(N²) budget bookkeeping. Replace this independently with a maintained count; include failed
+- At design time both residual-key admission paths counted `instances` by scanning the whole map. N reservations do
+  O(N²) budget bookkeeping. This has since been fixed with a maintained count, including failed
   reservations and the module initializer accurately, rather than assuming every order-list append
   inserts a new map key.
 - `Machine.run` can raise a fuel error outside `Machine.step`'s protected call. Ordinary diagnostic

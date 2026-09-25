@@ -881,9 +881,116 @@ return {functions={run}}
     local jumps = 0
     for _, report in ipairs(artifact.layouts.contextual.reports) do jumps = jumps + report.jumps end
     check(jumps > 0, "static-pc VM and selected lambda handlers form a tail component")
-    for _, n in ipairs({0,1,3}) do
+    for _, n in ipairs({0,1,3,10,100}) do
         check(interpret("run", {n,7}, program)[1] == 7+3*(n+1), "static-pc VM result")
     end
+    check(wordlet.interpret{source=program, entry="run", args={10,7},
+        limits={keys=0,steps=5000}}[1] == 40,
+        "known immediate handlers execute without reserving any residual base")
+    local folded = program:gsub("return {functions={run}}",
+        "let folded():U32=run(10,7) return {functions={folded}}")
+    check(compile(folded):unit():find("UINT32_C(40)", 1, true) ~= nil,
+        "static-pc VM folds with default compilation budgets")
+end
+
+-- Immediate static lambda use prepares captures/parameters, not an unused generic C base.
+do
+    local chain = "let chain(n:U32):U32=if n==0 then 0 else (|u:Unit|->chain(n-1)+1)(Unit()) "
+        .. "return {functions={chain}}"
+    check(wordlet.interpret{source=chain, entry="chain", args={100},
+        limits={keys=0,steps=5000}}[1] == 100, "sum-free lambda chain is linear without memoization")
+    local function run(body)
+        return interpret("run", {}, "let run()=" .. body .. " return {functions={run}}")
+    end
+    check(run("(|a,b:U32|->a+b)(3)(4)")[1] == 7, "partial immediate use finishes the ordinary callable")
+    check(run("(|a:U32,f:(U32):U32|->f(a))(3)(|x|->x+1)")[1] == 4,
+        "partial lambda uses the remaining resolved callable requirement")
+    check(run("(||->Unit())()")[1] == "unit", "nullary immediate Unit result")
+    local narrowing = "let run():U32=do let n=255 let got=(|u:U8|->n+1)(n) "
+        .. "return got+(n+1) end return {functions={run}}"
+    check(interpret("run", {}, narrowing)[1] == 512, "parameter coercion preserves binding/capture types")
+    compile(narrowing)
+    local vector = run("(|u:Unit|->do return Unit(),3 end)(Unit())")
+    check(vector[1] == "unit" and vector[2] == 3, "immediate lambda preserves logical result vectors")
+    check(run("(|x:U32|->if x==0 then 7 else x+true)(0)")[1] == 7,
+        "known immediate invocation checks the selected body path, like a static word call")
+    rejects("type-mismatch", "let run():U32=(|u:Bool|->1)(3) return {functions={run}}", "run")
+    rejects("type-mismatch", "let run():U32=(|u:Bool|->1)(3) return {functions={run}}")
+    rejects("type-mismatch", "let run():U32=(|x:U32|->if x==0 then 7 else x+true)(1) "
+        .. "return {functions={run}}", "run")
+    rejects("type-mismatch", "let f=|x:U32|->x+true return {functions={}}")
+    rejects("type-mismatch", "let Op=OneOf({a:U32}) let run():U32=Op.a(3){a=|v:Bool|->1} "
+        .. "return {functions={run}}", "run")
+    rejects("arity", "let run():U32=(||->1)(2) return {functions={run}}", "run")
+    rejects("lambda-annotation", "let run():U32=(|x|->x)(2) return {functions={run}}", "run")
+    rejects("borrow-escape", "let Box={n:U32} let run():U32="
+        .. "(|u:Unit|->do let b=Box{n=1} return |x:U32|->b.n+x end)(Unit())(0) "
+        .. "return {functions={run}}", "run")
+    rejects("ref-target", "let Box={n:U32} let run()="
+        .. "(|u:Unit|->do let b=Box{n=1} return Ref(b) end)(Unit()) "
+        .. "return {functions={run}}", "run")
+
+    local ordered = [[
+let Box={n:U32}
+let box=Box{n=0}
+let type_now()=do box.n=box.n*10+1 return U32 end
+let argument():U32=do box.n=box.n*10+2 return 7 end
+let answer=(|x:type_now()|->x+1)(argument())
+let run():U32=box.n*100+answer
+return {functions={run}}
+]]
+    check(interpret("run", {}, ordered)[1] == 1208, "annotation executes once, before arguments")
+    compile(ordered)
+    local stored = ordered:gsub("let answer=%(%|x:type_now%(%)%|%->x%+1%)%(argument%(%)%)",
+        "let f=|x:type_now()|->x+1 let answer=f(argument())")
+    check(stored ~= ordered, "stored-closure fixture is distinct")
+    check(interpret("run", {}, stored)[1] == 1208, "stored closure also reuses resolved parameter types")
+    compile(stored)
+    local copies = [[
+let Box={n:U32}
+let run():U32=do
+ let b=Box{n=1}
+ let result=(|p:Box|->do p.n+=1 return p.n end)(b)
+ return result*100+b.n
+end
+return {functions={run}}
+]]
+    check(interpret("run", {}, copies)[1] == 201, "static closure parameters copy record data")
+    compile(copies)
+    local effects = [[
+let Box={n:U32}
+let work(n:U32):U32=do
+ let b=Box{n=n}
+ let bump():U32=do b.n+=1 return b.n end
+ let result=(|u:Unit|->bump())(Unit())
+ return result*100+b.n
+end
+let run():U32=work(3)
+return {functions={run}}
+]]
+    check(interpret("run", {}, effects)[1] == 404, "local helper effects run once, not during an unused base")
+    check(compile(effects):unit():find("UINT32_C(404)", 1, true) ~= nil,
+        "normalizing an immediate lambda preserves exact-once effects")
+    local captures = [[
+let Op=OneOf({a:Unit,b:Unit})
+let R={n:U32,
+ direct():U32=(|u:U32|->n+u)(bump()),
+ matched():U32=Op.a(){a=|u:Unit|->n,b=later()},
+}
+let r=R{n=2}
+let bump():U32=do r.n+=10 return 1 end
+let later():(Unit):U32=do r.n+=10 return |u:Unit|->0 end
+let direct():U32=do let answer=r.direct() return r.n*100+answer end
+let matched():U32=do let answer=r.matched() return r.n*100+answer end
+return {functions={direct,matched}}
+]]
+    check(interpret("direct", {}, captures)[1] == 1203, "capture snapshot precedes argument effects")
+    check(interpret("matched", {}, captures)[1] == 1202, "capture precedes later handler expression effects")
+    compile(captures:gsub("return {functions={direct,matched}}", "return {functions={direct}}"))
+    local initialized = captures:gsub("return {functions={direct,matched}}",
+        "let captured=matched() let run():U32=captured return {functions={run}}")
+    check(interpret("run", {}, initialized)[1] == 1202, "handler ordering also holds in initialization")
+    compile(initialized)
 end
 
 -- Rejections -----------------------------------------------------------------------------------

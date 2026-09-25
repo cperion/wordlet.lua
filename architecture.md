@@ -311,6 +311,17 @@ construction. A skipped literal still counts for coverage and duplicate checks. 
 expressions retain written-order evaluation and callable checks; only the selected handler is invoked.
 Opaque matches elaborate every handler. This cutoff does not make closure construction generally lazy.
 
+For non-residual immediate literal calls and selected literal handlers, `prepareLambdaCPS` separates
+capture/parameter preparation from `completeLambdaCPS`'s checked callable ABI. A prepared plan is
+private compiler data with no claimed result signature or source Value type. Saturated known atom
+arguments with no runtime or borrowed captures enter the ordinary closure invocation owner directly;
+its concrete body executes once instead of first folding the same suffix during base construction.
+Other uses complete the ordinary callable, without replaying arguments. Borrowed/runtime environments
+complete at the literal's original position. First-class lambda values and residual calls remain eager.
+Resolved parameter types are reused at invocation, including after partial supply. Static closure
+parameters are checked and copied by value; numeric wrappers and numeric captures are isolated from
+in-place coercion so a parameter cannot retag a caller binding or captured snapshot.
+
 ### 6.2 Recursion
 
 The target requires an explicit runtime result contract for every member of a RESIDUAL recursive

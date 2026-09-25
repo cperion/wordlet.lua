@@ -763,6 +763,7 @@ function Eval:evalMatchCPS(machine, ctx, base, expr, span, k)
     span = span or expr.span
     local handlers, order = {}, {}
     local selected = V.tag(base) == "variant" and base.case or nil
+    local selectedPlan
     local function handler(index)
         if index > #expr.fields then
             for _, name in ipairs(S.casesOf(base.ty)) do
@@ -772,7 +773,8 @@ function Eval:evalMatchCPS(machine, ctx, base, expr, span, k)
                 end
             end
             for _, name in ipairs(order) do
-                if handlers[name] ~= false and not (V.tag(handlers[name]) == "word"
+                if not (selectedPlan and name == selected) and handlers[name] ~= false
+                    and not (V.tag(handlers[name]) == "word"
                     or V.tag(handlers[name]) == "closure" or V.tag(handlers[name]) == "method") then
                     D.reject("callable-required", "A match handler must be callable", expr.span)
                 end
@@ -780,6 +782,9 @@ function Eval:evalMatchCPS(machine, ctx, base, expr, span, k)
             if selected then
                 local payload = base.payload
                 if payload == nil then payload = V.unit() end
+                if selectedPlan then
+                    return self:invokePreparedLambdaCPS(machine, ctx, selectedPlan, { payload }, span, k)
+                end
                 return self:supplyCPS(machine, ctx, handlers[selected], { payload }, span, k)
             end
             if not ctx.residual then
@@ -801,6 +806,24 @@ function Eval:evalMatchCPS(machine, ctx, base, expr, span, k)
             handlers[name] = false
             order[#order + 1] = name
             return handler(index + 1)
+        end
+        if name == selected and not ctx.residual and entry.value.kind == "Lambda" then
+            self:step(entry.value.span)
+            return self:prepareLambdaCPS(machine, ctx, entry.value, nil, function(m, plan)
+                -- Ineligible environments keep ordinary construction at the written position.
+                if #plan.borrowedOrder > 0 or #plan.runtimeOrder > 0 then
+                    return self:completeLambdaCPS(m, plan, entry.value.span, function(m2, value)
+                        handlers[name] = value
+                        order[#order + 1] = name
+                        return handler(index + 1)
+                    end)
+                end
+                -- This private plan marks coverage; it never enters the source value channel.
+                -- Captures/annotations happen HERE, not after later handler expressions run.
+                selectedPlan, handlers[name] = plan, plan
+                order[#order + 1] = name
+                return handler(index + 1)
+            end)
         end
         return self:evalExprCPS(machine, ctx, entry.value, function(m, value)
             handlers[name] = value
@@ -3675,7 +3698,9 @@ function Eval:evaluateClosureStaticallyCPS(machine, plan, args, span, k)
         declare(sc, name, { kind = "value", name = name, value = value }, span)
     end
     for index, param in ipairs(plan.def.params) do
-        declare(sc, param.name.text, { kind = "value", name = param.name.text, value = args[index] }, param.span)
+        local value = self:copyArgument(args[index])
+        self:requireAgainst(value, plan.paramTypes[index], param.span)
+        declare(sc, param.name.text, { kind = "value", name = param.name.text, value = value }, param.span)
     end
     return self:execBodyCPS(machine, self:staticFrame(sc, span), plan.def.body, span,
         function(m, result)
@@ -3720,10 +3745,47 @@ function Eval:captureValueCPS(machine, ctx, name, span, k)
     if slot.kind == "word" then return k(machine, V.word(slot.def, {}, span)) end
     D.bug("capture", "Unknown capture binding kind " .. tostring(slot.kind))
 end
--- A lambda literal. The capture walk is the only recursive edge, so it is a local driver that answers
--- through `k` once the plan is complete; `captureValue`, `typeOf` and `callableInstance` are still
--- direct, so the plan is finished in one frame and only the closure itself is the answer.
+-- A first-class lambda needs a checked callable type. Immediate static use can instead consume
+-- the prepared captures/parameters directly, without first constructing an unused residual ABI.
 function Eval:evalLambdaCPS(machine, ctx, expr, expected, k)
+    return self:prepareLambdaCPS(machine, ctx, expr, expected, function(m, plan)
+        return self:completeLambdaCPS(m, plan, expr.span, k)
+    end)
+end
+
+function Eval:completeLambdaCPS(machine, plan, span, k)
+    self.plans[plan.key] = plan
+    return self:callableInstanceCPS(machine, { plan = plan }, {}, span, function(m, base)
+        plan.sig = S.sig(plan.inputs, base.results)
+        plan.ty = S.owned(plan.key, plan.sig, plan.envTy)
+        return k(m, V.closure(plan))
+    end)
+end
+
+-- A prepared plan is compiler data, NOT an untyped source closure or a provisional result. If the
+-- use is partial, residual or borrows storage, finish the ordinary callable and use normal supply.
+-- Arguments are already evaluated and are never replayed by that fallback.
+function Eval:invokePreparedLambdaCPS(machine, ctx, plan, args, span, k)
+    local concrete = not ctx.residual and #args == #plan.def.params
+        and #plan.runtimeOrder == 0 and #plan.borrowedOrder == 0
+    for _, value in ipairs(args) do
+        local tag = V.tag(value)
+        -- Keep aggregates, references and callable requirements on the checked-base path for now.
+        -- Known contents alone are not proof of value-copy/lifetime or callable-interface safety.
+        local atom = tag == "int" or tag == "float" or tag == "bool" or tag == "unit" or tag == "string"
+        concrete = concrete and atom
+    end
+    if concrete then
+        return self:invokeClosureCPS(machine, ctx, plan, nil, args, span, nil, k)
+    end
+    return self:completeLambdaCPS(machine, plan, span, function(m, value)
+        return self:supplyCPS(m, ctx, value, args, span, k)
+    end)
+end
+
+-- Prepare in written order: capture snapshots/borrows, then parameter annotations. No body is
+-- executed and no result signature is claimed until invocation or completeLambdaCPS demands it.
+function Eval:prepareLambdaCPS(machine, ctx, expr, expected, k)
     local order = Resolve.captures(expr)
 
     local plan = { def = self:define(expr, moduleTop(ctx.scope), nil, "|lambda|"), order = order,
@@ -3733,17 +3795,16 @@ function Eval:evalLambdaCPS(machine, ctx, expr, expected, k)
     plan.borrowed, plan.borrowedOrder = {}, {}
     local function capture(index)
         if index > #order then
-            local inputs, results = {}, {}
+            local inputs = {}
             -- Declared before the driver that calls it: a local declared later is not in scope for a
             -- closure created earlier, and the call would silently become a global one.
             local afterParameters
-            afterParameters = function(inputs, results)
-                if expr.annotation then results[1] = expr.annotation end
+            afterParameters = function(inputs)
                 -- Resolved parameter types travel with the plan: a contextually typed lambda has no annotation
                 -- to re-evaluate when its body is compiled.
                 plan.paramTypes = {}
                 for position, input in ipairs(inputs) do plan.paramTypes[position] = input.type end
-                plan.sig = S.sig(inputs, results)
+                plan.inputs = S.list(inputs)
                 plan.envNames = {}
                 local envFields = {}
                 for position, name in ipairs(plan.runtimeOrder) do
@@ -3766,23 +3827,11 @@ function Eval:evalLambdaCPS(machine, ctx, expr, expected, k)
                             or ("|" .. name .. "=#"))
                     end
                 end
-                self.plans = self.plans or {}
-                self.plans[plan.key] = plan
-                -- Build the base instance now: its result types become the visible signature of the closure
-                -- type, and a call-site specialisation must agree with them.
-                -- Compile the base instance now: its result types complete the closure's visible signature,
-                -- which is what lets a callable argument be checked against a required signature. Code that is
-                -- never called is left to the C compiler to discard.
-                return self:callableInstanceCPS(machine, { plan = plan }, {}, expr.span,
-                    function(m, base)
-                        plan.sig = S.sig(inputs, base.results)
-                        plan.ty = S.owned(plan.key, plan.sig, plan.envTy)
-                        return k(m, V.closure(plan))
-                    end)
+                return k(machine, plan)
             end
             local function parameter(position)
                 if position > #expr.params then
-                    return afterParameters(inputs, results)
+                    return afterParameters(inputs)
                 end
                 local param = expr.params[position]
                 if not param.annotation then
@@ -3814,6 +3863,7 @@ function Eval:evalLambdaCPS(machine, ctx, expr, expected, k)
         return self:captureValueCPS(machine, ctx, name, expr.span, function(m, value)
         local tag = V.tag(value)
         if V.isStatic(value) then
+            if V.isInteger(value) or tag == "float" then value = self:copyArgument(value) end
             plan.static[name] = value
             return capture(index + 1)
         end
@@ -4102,6 +4152,9 @@ function Eval:constructCallableInstanceCPS(machine, key, callable, args, span, k
         local param = def.params[index]
         local function withTy(m2, ty)
             local supplied = args[index]
+            if supplied and (V.isInteger(supplied) or V.tag(supplied) == "float") then
+                supplied = self:copyArgument(supplied)
+            end
             local bound = false
             if ty:isSig() then
                 -- A callable parameter: static code is specialised away entirely; otherwise the Owned
@@ -4555,25 +4608,28 @@ end
 -- scope as it goes.
 -- The argument vector. Every argument is a step, and a builtin parameter that names a type resolves
 -- on the type path and declares into the callee's scope as it goes.
-function Eval:evalArgumentsCPS(machine, ctx, exprs, callee, k)
+function Eval:evalArgumentsCPS(machine, ctx, exprs, callee, k, prepared)
     local def, offset
     local tag = V.tag(callee)
-    if tag == "word" then
+    local resolved = prepared or (tag == "closure" and callee.plan or nil)
+    if prepared then
+        def, offset = prepared.def, 0
+    elseif tag == "word" then
         def = callee.def
         offset = #callee.args
     elseif tag == "closure" then
         def = callee.plan.def
-        offset = 0
+        offset = #(callee.bound or {})
     elseif tag == "method" then
         def = callee.def
         offset = #(callee.args or {})
     end
-    local sc = (def and offset == 0) and scope(def.lexical) or nil
+    local sc = (def and (offset == 0 or resolved)) and scope(def.lexical) or nil
     local values = {}
     local function argument(index)
         if index > #exprs then return k(machine, values) end
         local expr = exprs[index]
-        local param = sc and def.params[index] or nil
+        local param = sc and def.params[index + offset] or nil
         if param and param.isType then
             -- A builtin parameter that names a type is resolved on the type path, which is the path
             -- that hands back the cell an open definition reserved instead of demanding its layout.
@@ -4608,6 +4664,10 @@ function Eval:evalArgumentsCPS(machine, ctx, exprs, callee, k)
         -- so a lambda passed to `f: Endo` gets its parameter type from it just as one passed to a
         -- written `(U32): U32` does. Only a signature is used this way, as that is what types a
         -- lambda.
+        if resolved and param then
+            local ty = resolved.paramTypes[index + offset]
+            return withExpected(ty:isSig() and ty or nil)
+        end
         if not (param and param.annotation) then return withExpected(nil) end
         return self:typeOfCPS(machine, param.annotation, sc, param.span, function(m, ty)
             return withExpected(ty:isSig() and ty or nil)
@@ -4735,6 +4795,22 @@ end
 function Eval:evalApplyCPS(machine, ctx, expr, k)
     local tail = ctx.tail
     ctx.tail = false
+    if not ctx.residual and expr.callee.kind == "Lambda" then
+        self:step(expr.callee.span)
+        return self:prepareLambdaCPS(machine, ctx, expr.callee, nil, function(m, plan)
+            local function arguments(m2, callee)
+                return self:evalArgumentsCPS(m2, ctx, expr.arguments, callee, function(m3, args)
+                    ctx.tail = tail
+                    if callee then return self:supplyCPS(m3, ctx, callee, args, expr.span, k) end
+                    return self:invokePreparedLambdaCPS(m3, ctx, plan, args, expr.span, k)
+                end, plan)
+            end
+            if #plan.borrowedOrder > 0 or #plan.runtimeOrder > 0 then
+                return self:completeLambdaCPS(m, plan, expr.callee.span, arguments)
+            end
+            return arguments(m)
+        end)
+    end
     return self:evalExprCPS(machine, ctx, expr.callee, function(m, callee)
         if V.tag(callee) == "word" and callee.def.sliceOf and #callee.args == 0 and #expr.arguments == 1 then
             return self:evalSliceCPS(m, ctx, expr.arguments[1], k)
@@ -5077,6 +5153,13 @@ end
 -- Ordinary parameter binding copies record data; a local alias keeps its instance, an argument
 -- does not. Field values are immutable, so a shallow copy of the field table is a value copy.
 function Eval:copyArgument(value)
+    if V.tag(value) == "int" or V.tag(value) == "float" then
+        -- Coercion retags numeric wrappers in place. The parameter owns its wrapper, not the
+        -- caller's binding or a captured snapshot that happens to refer to that same atom.
+        local copy = {}
+        for name, field in pairs(value) do copy[name] = field end
+        return setmetatable(copy, V.mt)
+    end
     if V.tag(value) == "array" then
         local items = {}
         for index, item in ipairs(value.items or {}) do items[index] = item end
@@ -5445,6 +5528,9 @@ function Eval:constructInstanceCPS(machine, key, def, values, span, receiver, k)
             end
             do
             local supplied = values[index]
+            if supplied and (V.isInteger(supplied) or V.tag(supplied) == "float") then
+                supplied = self:copyArgument(supplied)
+            end
             -- A supplied argument is checked against the requirement whichever branch binds it. The
             -- static branch below checks the type as well; without this line a run-time argument would
             -- reach the IR checker unchecked, where a wrong type is a compiler bug instead of a source

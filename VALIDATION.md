@@ -51,11 +51,11 @@ unused sum boxes without losing payload effects.
 
 Production validation on GCC 13.3 / Clang 18.1:
 
-- Full `tests/run.lua`: **PASS, 35.15 s**; evaluator 690 checks, C differential/distribution
-  1355 checks across 42 programs, contextual 5115 checks, plus schema/parser/kernel, SHA-256, JIT
-  and isolated deterministic distribution acceptance.
-- `CC=clang luajit tests/contextual.lua`: **PASS, 5115 checks, 3.49 s**.
-- `CC=clang luajit tests/c.lua`: **PASS, 1355 checks / 42 programs, 21.08 s**.
+- Full `tests/run.lua`: **PASS, 42.95 s** (peak RSS 167,796 KiB); evaluator 795 checks, C
+  differential/distribution 1407 checks across 43 programs, contextual 5115 checks, plus
+  schema/parser/kernel, SHA-256, JIT and isolated deterministic distribution acceptance.
+- `CC=clang luajit tests/contextual.lua`: **PASS, 5115 checks, 3.55 s**.
+- `CC=clang luajit tests/c.lua`: **PASS, 1407 checks / 43 programs, 22.40 s**.
 - An additional static-`pc`/known-match/payload-effect witness passed **12 compile/run combinations
   in 1.89 s**: GCC, Clang and tcc, C99/C11, credits 0/256, five million iterations on a 256 KiB stack.
   GCC/Clang used `-O0 -fno-inline -fno-optimize-sibling-calls -Wall -Wextra -Wpedantic -Werror`;
@@ -65,10 +65,19 @@ These are validation wall times, not benchmark speedups.
 
 The guarantee is only for recognized safe tail components. Unproved aggregate/borrowed ownership
 and remaining opaque or non-tail recursion retain ordinary calls. Nonzero residual credit is an
-optional code-size policy, not evidence of a general speedup. Static-call memoization and closure
-base-construction costs are unchanged: the static-`pc` test interprets only counts 0, 1 and 3; count 10
-currently exhausts the `keys` budget during closure construction. Its deep-run acceptance is compiled
-C, not a claim that large fully static interpreter invocations are now cheap.
+optional code-size policy, not evidence of a general speedup.
+
+Static-call memoization remains unimplemented and no result is cached anywhere. What changed is
+narrower: a saturated immediate literal call, and a selected known-match literal handler, in a
+non-residual frame, prepare captures and parameter types and then execute the body once instead of
+first building an unused generic base and folding the same suffix twice. Ineligible uses (borrowed or
+runtime environment, aggregate argument, partial supply, first-class value, residual call) still
+complete a checked callable. The static-`pc` VM therefore interprets counts 0, 1, 3, 10 and 100 and
+folds `run(10,7)` to a constant under default budgets; the evaluator test runs count 10 with
+`keys=0` and `steps=5000`, and `tools/profile-lambdas.lua 10` reports 23 lambda definitions and **0**
+base builds in 0.17 s wall time (peak RSS 5,864 KiB). Repeating a *bound* closure construction can
+still be expensive. Deep-run acceptance remains compiled C, not a claim that every fully static
+interpreter invocation is now cheap.
 
 ## Source examples (executable)
 

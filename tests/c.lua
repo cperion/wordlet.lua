@@ -344,6 +344,53 @@ return {functions={choose,unit,reversed,discarded}}
         inputs = {{0},{7},{4294967295}},
     },
     {
+        name = "immediate-lambdas",
+        source = [[
+let Box={n:U32}
+let box=Box{n=0}
+let type_now()=do box.n=box.n*10+1 return U32 end
+let argument():U32=do box.n=box.n*10+2 return 7 end
+let answer=(|x:type_now()|->x+1)(argument())
+let order(x:U32):U32=box.n*100+answer
+let direct(x:U32):U32=(|v:U32|->v+1)(x)
+let narrow(x:U32):U32=do
+ let n=255 let got=(|u:U8|->n+1)(n) return got+(n+1)
+end
+let copy(x:U32):U32=do
+ let b=Box{n=x}
+ let result=(|p:Box|->do p.n+=1 return p.n end)(b)
+ return result*100+b.n
+end
+let work(n:U32):U32=do
+ let b=Box{n=n}
+ let bump():U32=do b.n+=1 return b.n end
+ let result=(|u:Unit|->bump())(Unit())
+ return result*100+b.n
+end
+let effects(x:U32):U32=work(3)
+let partial(x:U32):U32=(|a,b:U32|->a+b)(3)(x)
+let Op=OneOf({step:Unit,branch:Unit,halt:Unit})
+let instruction(pc:U32):Op=[Op.step(),Op.branch(),Op.halt()][pc]
+let vm(pc,n,a:U32):U32=instruction(pc){
+ step=|u:Unit|->vm(pc+1,n,a+3),
+ branch=|u:Unit|->if n==0 then vm(pc+1,n,a) else vm(0,n-1,a),
+ halt=|u:Unit|->a,
+}
+let folded(x:U32):U32=vm(0,10,7)
+let H=OneOf({a:Unit,b:Unit})
+let R={n:U32, matched():U32=H.a(){a=|u:Unit|->n,b=later()}}
+let r=R{n=2}
+let later():(Unit):U32=do r.n+=10 return |u:Unit|->0 end
+let captured=r.matched()
+let capture_order(x:U32):U32=r.n*100+captured
+return {functions={order,direct,narrow,copy,effects,partial,folded,capture_order}}
+]],
+        entries = {{entry="order",arity=1},{entry="direct",arity=1},{entry="narrow",arity=1},
+            {entry="copy",arity=1},{entry="effects",arity=1},{entry="partial",arity=1},
+            {entry="folded",arity=1},{entry="capture_order",arity=1}},
+        inputs = {{0},{7},{4294967295}},
+    },
+    {
         -- A record-valued conditional used to leak the arms' reads into the continuation.
         name = "recordbranch",
         source = [==[

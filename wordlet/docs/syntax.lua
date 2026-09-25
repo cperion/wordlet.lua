@@ -208,7 +208,18 @@ let inc_2x = twice(|x| -> x + 1)
 
 Expected callable types are passed to lambda arguments as their corresponding requirements become
 known. This is checking, not permission to reorder argument effects. In a conditional checked against
-a signature, propagate that expectation into both value-producing arms.
+a signature, propagate that expectation into both value-producing arms. Once a lambda's parameter
+types are resolved, invocation uses those types; it does not evaluate their annotations again.
+
+A literal used immediately as a callee, or as the selected handler of a known match, need not first
+become a first-class callable value. During static execution, a saturated invocation with known
+numeric, Bool, Unit or string arguments and no runtime/place captures prepares captures and parameter
+types, then executes its body once. It checks the selected body path, like a fully static named word;
+no generic result signature or unused C base is invented first. Captures and annotations still occur
+at the literal's written position, before arguments or later handler expressions, and invocation waits
+for argument evaluation or match coverage/handler checking. First-class lambda values, runtime calls,
+partial supply and unsupported argument/environment shapes retain ordinary checked-base construction.
+This is not result memoization or general lazy closure checking.
 
 `->` introduces a lambda's BODY; it never denotes a result type. A lambda's result is declared by an
 annotated binding or by the requirement it is passed to. Typed lambda parameters plus an inferred
