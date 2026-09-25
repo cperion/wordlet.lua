@@ -200,9 +200,39 @@ Wordlet is not:
 
 > **A descriptive name documents a distinction. It does not enforce one.**
 
+### Why identity follows meaning
+
+This is not an oversight, and it is not only a simplification. It follows from three properties of
+the language, and it is worth understanding them before wishing for nominal aliases.
+
+**A type is a value, and equal values are equal.** `Ty` is an interned token: two structurally equal
+types are one value, and `==` is the whole comparison (`structure.md`). `S.encode` exists only to
+build a key string. That is what lets the compiler ask "is this the type I need?" with one operation
+instead of three.
+
+**Types specialize, so sharing them is not free to give up.** A generic is a word requiring a `type`
+(section 1). With meaning-based identity, `identity(u32)` is one specialization no matter how many
+names a program gives to `u32`. Under nominal identity every alias would be its own instantiation:
+more emitted functions, more compile time, and no way to notice that the two instantiations were the
+same code.
+
+**Equal shapes are one layout.** The C backend keys its layout registries per family by the type that
+asked for them, so equal shapes emit one struct. The same reasoning gives `oneof` its canonical rule:
+alternative order is canonical, not written order, so two spellings of the same alternatives are the
+same type and one layout (`syntax.md` §8.1, §8.2). Nominal aliases would make that rule quietly
+false whenever two spellings differed only in which alias they mentioned.
+
+Identity is still nominal in one place, deliberately: a recursive definition reserves a cell for
+itself, because otherwise the type written inside the definition and the type of an instance built
+from it would not compare equal — and only one such cell is kept per structural meaning. So the
+language is not "structural everywhere". It is nominal exactly where a hole has to be filled by
+identity, and meaning-based everywhere the question is really about shape.
+
+### When you do need it checked
+
 Naming is still architecture — the reviewer, the reader and the search box all see the distinction,
 and the name is what stops a real mistake from looking plausible. But where a distinction must be
-*checked*, use something the language does distinguish:
+*checked*, it has to be paid for in structure. Four shapes do it:
 
 - **different shape**: a record with named fields (`document_byte_offset` travels as a record, not a
   `u32`);
@@ -210,6 +240,12 @@ and the name is what stops a real mistake from looking plausible. But where a di
   (`syntax.md` §8.5), as are `array(T, N)` and `slice(T)`;
 - **different alternative set**: a `oneof` whose alternatives cannot be confused;
 - **different behaviour**: a word that takes a `document_byte_offset` and validates it.
+
+There is a fifth answer that costs nothing, and it is usually the right one inside a large program:
+**move the arithmetic behind a boundary**. If one component is the only code allowed to add two
+offsets, the distinction is enforced by the structure of the program rather than by the type. That is
+the same move section 17 makes for `ptr`, applied to a unit of measure: keep the raw representation
+inside the layer entitled to it, and let everything above speak in domain words.
 
 So the two halves of this section pull in the same direction:
 
