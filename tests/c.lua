@@ -98,6 +98,7 @@ end
 -- Source programs exercised end to end. Each case lists concrete input vectors; expected results
 -- are produced by the interpreter, then asserted by the compiled C.
 local CASES = {
+    require("tests.interface-cases"),
     {
         name = "affine",
         source = "let affine(a, b, x: u32) : u32 = a * x + b\nreturn { functions = { affine } }",
@@ -1080,12 +1081,16 @@ local function runCase(case, residualInlineBudget)
     for _, target in ipairs(case.entries or { { entry = case.entry, arity = case.arity } }) do
         -- An entry may carry its own inputs when the shared ones are not valid for it, which is what
         -- an entry with a constrained argument needs.
-        for _, input in ipairs(target.inputs or case.inputs) do
+        for inputIndex, input in ipairs(target.inputs or case.inputs) do
           if #input >= target.arity then
             local args = {}
             for index = 1, target.arity do args[index] = input[index] end
             local expected = wordlet.interpret{ source = case.source, name = case.name .. ".let",
                 entry = target.entry, args = args }
+            if target.expected then
+                check(#expected == 1 and expected[1] == target.expected[inputIndex],
+                    "interpreter disagrees with independent oracle for " .. target.entry)
+            end
             local literalArgs = {}
             -- The slice layout is numbered by first use, so the argument type is read from the unit.
             local sliceType = unit:match("(wordletslice_%d+)")
@@ -1847,6 +1852,43 @@ int main(void) {
         "match/pointer C failed to compile:\n" .. read(directory .. "/matchptrerr.txt"))
     check(shell("timeout --kill-after=2s 10s '" .. directory .. "/matchptr'") == 0,
         "a multi-result match or a pointer index did not run correctly")
+end
+
+-- Host data uses the schema written on the foreign result; a typed raw pointer borrows the
+-- addressed record's place but adds no ownership guarantee or runtime method table.
+do
+    local source = [=[
+let counter = { n: u32, bump(): u32 = do n += 1 return n end }
+let shared = counter { n = 0 }
+extern let host_counter(): counter
+let run(x: u32): u32 = do
+    shared.n = x
+    let c = host_counter()
+    let first = c.bump()
+    let p: ptr(counter) = ptr(shared)
+    return first * 10 + p[0].bump()
+end
+return { functions = { run } }
+]=]
+    local generated = wordlet.compile{ source = source, name = "hostinterface.let" }:unit()
+    local record = generated:match("(wordletrecord_%d+) host_counter%(")
+    check(record ~= nil, "foreign record result has a concrete C layout")
+    local path = directory .. "/hostinterface.c"
+    write(path, generated .. ([[
+#include <assert.h>
+%s host_counter(void) { %s c = { .f_n = UINT32_C(9) }; return c; }
+int main(void) {
+    wordlet_init();
+    assert(wordlet_run(UINT32_C(0)) == UINT32_C(101));
+    assert(wordlet_run(UINT32_C(3)) == UINT32_C(104));
+    return 0;
+}
+]]):format(record, record))
+    check(shell("timeout --kill-after=2s 30s " .. CC .. " -std=c11 -Wall -Wextra -Werror -O2 -o '"
+        .. directory .. "/hostinterface' '" .. path .. "' 2> " .. directory .. "/hostinterfaceerr.txt") == 0,
+        "schema-directed foreign/pointer C failed to compile:\n" .. read(directory .. "/hostinterfaceerr.txt"))
+    check(shell("timeout --kill-after=2s 10s '" .. directory .. "/hostinterface'") == 0,
+        "schema-directed foreign result or pointer did not reach the actual receiver")
 end
 
 -- The hot-state interpreter example: the machine is the loop's parameters and the handlers return

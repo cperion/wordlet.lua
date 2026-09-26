@@ -25,6 +25,13 @@ local i = context("ir.asdl")
 local record = i.Ty.Record("Counter", L{i.Ty.Field("value", i.Ty.u32)})
 assert(record == i.Ty.Record("Counter", L{i.Ty.Field("value", i.Ty.u32)}))
 assert(record ~= i.Ty.Record("Other", L{i.Ty.Field("value", i.Ty.u32)}))
+-- Source interfaces are separate from the interned data layout. Two schemas with that same
+-- record type can carry distinct method sets, and indirections retain only a face descriptor.
+local one, two = i.Surface.Schema(1), i.Surface.Schema(2)
+assert(one == i.Surface.Schema(1) and one ~= two)
+assert(i.Surface.Element(one) == i.Surface.Element(i.Surface.Schema(1)))
+assert(i.Surface.Element(one) ~= i.Surface.Element(two))
+assert(i.Surface.Knot("cell") == i.Surface.Knot("cell"))
 assert(i.Ir.Value(1) ~= i.Ir.Value(1) and i.Ir.Storage(1) ~= i.Ir.Storage(1))
 assert(i.Ir.Const(i.Ty.u32, i.Ir.UInt(3)) ~= i.Ir.Const(i.Ty.u32, i.Ir.UInt(3)))
 

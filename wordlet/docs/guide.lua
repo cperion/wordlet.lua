@@ -1300,6 +1300,12 @@ terminal_output_memory
 file_read_memory
 ```
 
+The memory itself is acquired inside `main` or a word it calls, not in a module initializer:
+module initializers run through compile-time evaluation and cannot perform `extern` effects.
+Wordlet also has no uninitialized module binding for a large scratch buffer. The host supplies
+storage at runtime; a narrow Wordlet interface immediately encloses its pointer. A wrapper that
+needs mutable data or state crosses the runtime boundary explicitly.
+
 The top of the program therefore talks almost exclusively about editing, and the bottom talks about
 representation and the machine. That separation emerges from vocabulary rather than from a heavyweight
 framework — which is the practical payoff of sections 1 through 3.
@@ -1603,7 +1609,14 @@ have to choose between "everything is globally immutable data" and "everything h
 everything else". You get **local mutable ownership with explicit continuation boundaries**.
 
 Methods borrow actual receivers, and nested lexical owners use the actual enclosing records rather than
-invented parent pointers, so the architecture tree and the storage tree are the same tree. Siblings
+invented parent pointers, so the architecture tree and the storage tree are the same tree.
+A field declared `child: child_component` selects the child's operations without changing its
+structural data type or storing a method table. Calling `parent.child.handle_input(...)` borrows the
+actual child field; `let copy = parent.child` copies that child's data, so a method on `copy` does
+not mutate the parent. Assigning an equal-layout value into `parent.child` retains the declared
+child interface rather than inheriting the value's original implementation. This is deliberate:
+when behavior really varies at runtime, express the choice with a sum or a callable instead of
+expecting a record's construction history to act as a hidden virtual dispatch table. Siblings
 share only through an owner reference or module storage, and both reintroduce the coupling the pattern
 otherwise keeps out — which is why they should be deliberate.
 

@@ -109,7 +109,14 @@ the first selection emits `Read(old_id, r.state)` immediately. The returned valu
 not r.state. Later stores or calls cannot change what that value denotes.
 
 A record constructor creates a fresh record instance. Ordinary record parameter binding, record
-field assignment and record return copy data. A local alias to an existing instance preserves that
+field assignment and record return copy data. Source interface descriptions live alongside values,
+slots, parameters and results, never on interned `Ty`: a schema annotation chooses methods for the
+destination, even when the source data was constructed with another equal-layout schema. A projected
+child method borrows the actual child place; a field read used as a value snapshots the data and its
+statically selected interface without redirecting later writes to the parent. A runtime reference
+with a schema annotation projects a place through one dereference. Different source interfaces can
+share a structural type and layout without sharing specialized method code. A join of incompatible
+interfaces erases interface information, never picks one implementation by accident. A local alias to an existing instance preserves that
 instance; selecting/copying a method view preserves its receiver borrow. Copying the record does not
 retarget an already selected method.
 
@@ -163,7 +170,14 @@ only runtime data fields. Equal layouts alone do not establish source type equal
 A schema partially supplied by name binds those fields statically and makes them non-writable.
 A saturated constructor's merely known arguments do not change the source mutability of its ordinary
 instance fields. Canonicalization must preserve that distinction, even when both have constant initial
-contents. Record fields are canonicalized by name before interning. Calling requirements are structural:
+contents. Record fields are canonicalized by name before interning. Schema/interface descriptors are separate
+compilation-owned `Surface.Face` nodes (`Schema(id)`, `Element(face)`, and a recursive `Knot(cell)`);
+`Session.schemas` resolves ids to source definitions, not structural types. Field declarations keep
+source interfaces so method lookup can follow projections without looking up methods by layout.
+`Surface.Face` changes no `Ty` identity or C layout. Static type arguments encode that interface in
+specialization keys where method lookup depends on it. A partially supplied schema also carries
+readonly static data; crossing a boundary from a different supply rejects, because equal layouts
+cannot prove those contents. Source methods cannot be recovered from an erased bare record type. Calling requirements are structural:
 independently written equivalent input/result signatures compare equal. Executable identity is not
 signature identity: two implementations with the same signature need not have the same behavior.
 

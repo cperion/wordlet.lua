@@ -439,6 +439,27 @@ Initializer expressions execute in written order even though fields are stored c
 are code members, not initializer fields or stored function pointers. Record arguments, assignments
 into fields and returns have value-copy semantics; local aliases to an instance retain that instance.
 
+A schema used as a declaration (`child: counter`, `c: counter`, a result `: counter`, or
+`ref(counter)`) selects a **source interface** in addition to its structural data type. Selecting
+`parent.child.bump()` invokes `counter`'s `bump` on the actual child field; selecting through a
+reference declared `ref(counter)` borrows the place it names. Assignment checks the structural data
+and retains the destination's declared interface, not the source's methods. Thus two schemas with
+identical fields remain the same type and layout, but a field declared with one uses that one's
+implementation even if initialized from the other. A field read copied to a local retains its
+statically known interface but copies data; changing the local does not change the parent.
+A bare structural type without an interface supplies no methods. An unannotated result can preserve
+one interface when every returning path agrees; incompatible interfaces at a join are erased rather
+than arbitrarily choosing one. A `type` parameter supplied with a schema conveys that schema as a
+static requirement; distinct supplied implementations specialize independently. This information
+is compile-time only: ordinary records have no runtime method table.
+
+Partial keyed schema supply also promises static readonly data. A value constructed with that
+specific supply may keep it; a structurally equal record from elsewhere cannot be annotated as the
+partially supplied schema (`interface-supply`) merely because its layout fits, nor may a readonly
+supplied field be assigned (`readonly-field`). An exported parameter or foreign result cannot prove
+such a static supply from untrusted host data, so it cannot promise one; ordinary schema annotations
+on foreign results can still choose method implementations.
+
 ```
 let rng = {
   state: u32,
@@ -561,7 +582,9 @@ passing or returning one passes the reference, not the instance. A function may 
 `ref(T)` and write through it, and a reference to module storage may be returned from a call and
 followed there. A host that holds such a pointer may pass it directly.
 
-`ref(T)` is not a copy of `T`. Reading or writing through a reference reaches the referenced
+`ref(T)` is not a copy of `T`. When `T` denotes a schema, that annotation also selects the
+schema's methods; a method call through the reference borrows its actual referent. It does not
+turn the reference into ownership or retarget the method to a copy. Reading or writing through a reference reaches the referenced
 instance, exactly as selecting that instance directly would, and two references to one instance
 observe each other's writes. A reference has stable identity under copying: copying a record that
 holds a reference copies the reference, not the referenced instance. Assigning through a reference

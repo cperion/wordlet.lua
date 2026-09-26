@@ -301,6 +301,17 @@ Gates 1–5 and 9–11 have their first executable form in `tests/parse.lua`, `t
    (`type-mismatch`) instead of widening, and a vector of the wrong length rejects (`result-count`). A
    `unit` result stays a logical slot on both sides, so `: unit` with `unit()` and an exact
    `(u32, unit)` are accepted. Both checks are exercised by the evaluator suite.
+8p. **Schema-directed nested interfaces (implemented):** `tests/interface-cases.lua` supplies an
+   independent oracle for 25 exported words under interpretation and strict-C differential tests at
+   both contextual budgets. It covers methods on a child field and a reference, local field copies
+   versus parent mutation, same-layout alternative implementations with annotation-directed dispatch,
+   parameters, results, type-specialized words, lambdas, array elements, conditional joins and deferred/callback
+   paths. `tests/eval.lua` additionally rejects an attempt to give arbitrary equal-layout data a
+   partially supplied schema's static field promise (`interface-supply`) and mutation of that supply's
+   readonly field (`readonly-field`), as well as partial-supply promises on unchecked ABI inputs
+   and foreign results. An ordinary schema-declared foreign result can still select its methods;
+   a C-only host witness checks the returned record and method calls through `ptr(counter)`.
+   Types remain structural and C layout contains only data.
 9. **IR/checking:** storage/value distinction, scope and definite assignment, target signature checks,
    module storage seeded outside every function,
    dynamic failure guards, transitive borrow provenance, finite layouts, no metadata runtime slots.

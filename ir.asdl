@@ -23,6 +23,14 @@ module Ty {
   Input = InValue(V type) unique | InPlace(V type) unique
 }
 
+# Compile-time source interfaces, separate from structural Ty identity and C layout. The ids
+# refer only to a compilation's schema registry; these interned nodes retain no source programs.
+module Surface {
+  Face = Schema(number id) unique
+       | Element(Face target) unique
+       | Knot(string cell) unique
+}
+
 module Ir {
   # Not marked unique, for the reason Ir.Expr gives: these ids are function-local, so interning by
   # value in the context-wide cache would make two functions' value 1 the same table.

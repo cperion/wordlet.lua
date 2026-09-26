@@ -2209,4 +2209,90 @@ return {functions={nested,known}}
     end
 end
 
+-- A schema annotation selects an interface, not a nominal data type or a runtime method table.
+-- These cases pin aliasing, snapshot/copy, nested borrowing, declared/inferred boundaries and
+-- same-layout implementations; the C suite checks the same independent oracle at both budgets.
+do
+    local corpus = require("tests.interface-cases")
+    -- A statically supplied schema is a value guarantee, not just a method spelling. Equal
+    -- structural layout must not let a different value inherit a false static field snapshot.
+    rejects("interface-supply", [[
+let position = { row: u32, column: u32 }
+let top_row = position { row = 0 }
+let bad(): u32 = do
+    let p: top_row = position { row = 5, column = 2 }
+    return p.row
+end
+return { functions = { bad } }
+]])
+    -- Joining two equal layouts with different operations must not silently choose one arm's
+    -- method implementation. The caller must declare an interface or dispatch explicitly.
+    rejects("unknown-member", [[
+let one = { n: u32, advance(): u32 = n + 1 }
+let two = { n: u32, advance(): u32 = n + 2 }
+let choose(b: bool) = if b then one { n = 1 } else two { n = 1 }
+let run(b: bool): u32 = do
+    let selected = choose(b)
+    return selected.advance()
+end
+return { functions = { run } }
+]])
+    -- An ABI input has no proof of a schema's statically supplied contents; nor does an
+    -- arbitrary foreign result. Ordinary schema-directed foreign results remain usable.
+    rejects("interface-supply", [[
+let position = { row: u32, column: u32 }
+let top_row = position { row = 0 }
+let read_row(p: top_row): u32 = p.row
+return { functions = { read_row } }
+]])
+    rejects("interface-supply", [[
+let position = { row: u32, column: u32 }
+let top_row = position { row = 0 }
+extern let host_position(): top_row
+let read_row(): u32 = host_position().row
+return { functions = { read_row } }
+]])
+    check(compile([[
+let counter = { n: u32, bump(): u32 = do n += 1 return n end }
+extern let host_counter(): counter
+let bump_host(): u32 = do let c = host_counter() return c.bump() end
+return { functions = { bump_host } }
+]]) ~= nil, "a foreign result's schema selects its methods")
+    rejects("interface-supply", [[
+let position = { row: u32, column: u32 }
+let top_row = position { row = 0 }
+let bad(): u32 = do
+    let cells: array(top_row, 1) = [position { row = 5, column = 2 }]
+    return cells[0].row
+end
+return { functions = { bad } }
+]])
+    rejects("unknown-member", [[
+let counter = { n: u32, bump(): u32 = n + 1 }
+let data = { n: u32 }
+let run(): u32 = do
+    let value: data = counter { n = 3 }
+    return value.bump()
+end
+return { functions = { run } }
+]])
+    rejects("readonly-field", [[
+let position = { row: u32, column: u32 }
+let top_row = position { row = 0 }
+let bad(): u32 = do
+    let p = top_row { column = 2 }
+    p.row = 5
+    return p.row
+end
+return { functions = { bad } }
+]])
+    for _, entry in ipairs(corpus.entries) do
+        for index, args in ipairs(entry.inputs) do
+            local got = interpret(entry.entry, args, corpus.source)
+            check(#got == 1 and got[1] == entry.expected[index],
+                "schema-directed interface: " .. entry.entry .. " (" .. tostring(args[1]) .. ")")
+        end
+    end
+end
+
 print(("PASS: evaluator semantics (%d checks)"):format(checks))

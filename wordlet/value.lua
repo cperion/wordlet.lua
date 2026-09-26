@@ -29,7 +29,7 @@ function M.bool(b) return make{ tag = "bool", ty = S.bool, b = b } end
 function M.float(ty, n) return make{ tag = "float", ty = ty, n = n } end
 function M.f64(n) return M.float(S.f64, n) end
 function M.unit() return make{ tag = "unit", ty = S.unit } end
-function M.type(ty) return make{ tag = "type", ty = S.type, value = ty } end
+function M.type(ty, face) return make{ tag = "type", ty = S.type, value = ty, face = face } end
 -- `place` is the place the value was read from, when there is one: a reference read from storage
 -- needs it to reach its target.
 function M.runtime(expr, ty, borrowed, place)
@@ -120,7 +120,7 @@ function M.tag(v) return M.is(v) and v.tag or nil end
 function M.isKnown(v)
     if not M.is(v) then return false end
     local tag = v.tag
-    if tag == "runtime" or tag == "object" or tag == "schema" or tag == "callable"
+    if tag == "runtime" or tag == "object" or tag == "callable"
         or tag == "namespace" then
         return false
     end
@@ -200,7 +200,16 @@ function M.encode(v)
     -- Enough digits to round-trip, so two equal floats encode equally and unequal ones do not.
     if tag == "float" then return S.encode(v.ty) .. ":" .. string.format("%.17g", v.n) end
     if tag == "unit" then return "unit" end
-    if tag == "type" then return "type:" .. S.encode(v.value) end
+    if tag == "schema" then return "schema:" .. tostring(v.def.id) end
+    if tag == "type" then
+        local function faceKey(face)
+            if not face then return "" end
+            if face.kind == "Schema" then return "@" .. face.id end
+            if face.kind == "Knot" then return "@k" .. face.cell end
+            return "[" .. faceKey(face.target) .. "]"
+        end
+        return "type:" .. S.encode(v.value) .. faceKey(v.face)
+    end
     if tag == "namespace" then return "namespace:" .. tostring(v.module) end
     if tag == "word" then
         local parts = { "word:" .. tostring(v.def.id) }

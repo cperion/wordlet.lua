@@ -181,6 +181,16 @@ Key points:
   the already-evaluated arguments. First-class values and residual calls keep checked construction;
   no pending plan is presented as a source Value or provisional return signature. Parameter types
   are reused, including the bound-argument offset, rather than replaying annotations.
+- **Schema-directed interfaces.** `Surface.Face` is a compilation-owned, interned descriptor
+  separate from structural `Ty`: a schema id, a container element face, or an open recursive
+  definition cell. `Session.schemas` resolves it to the actual schema definition. `fieldFaces`
+  records each schema field's declared interface. Value wrappers, field slots, parameter and result
+  metadata carry faces only while evaluating source; `Ir.Fn`, type equality, C layouts and runtime
+  records do not. A child method call projects the child's actual place and binds the method of its
+  declared face. Binding a field value elsewhere copies its data, not its parent's storage.
+  `withFace` changes the interface of a destination, not its type or code pointer; a partial supply
+  must first prove identical static supply (`interface-supply`). Interfaces on dynamic type inputs
+  participate in keys via the static type value's encoding, not via structural type identity.
 - **One law for application.** `Eval:supply(ctx, callee, args, span)` is the only entry point: it
   appends the arguments to the callee's bound arguments, tests saturation, and hands a saturated
   call to the one owner for its kind — `invokeBuiltin`, `invokeForeign`, `invokeSource`,

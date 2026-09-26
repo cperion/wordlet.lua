@@ -10,6 +10,7 @@ M.ctx = ASDL.NewContext()
 M.ctx:Define(require("wordlet.schema.ir"))
 M.Ty = M.ctx.Ty
 M.Ir = M.ctx.Ir
+M.Surface = M.ctx.Surface
 
 local Ty = M.Ty
 M.u32, M.u8, M.u16, M.i32 = Ty.u32, Ty.u8, Ty.u16, Ty.i32

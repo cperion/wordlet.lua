@@ -30,6 +30,8 @@ function Session.new(options)
         },
 
         -- Occurrences: what one compilation builds, keyed by the identity that distinguishes it.
+        schemas = {},           -- schema id -> source interface (never keyed by structural Ty)
+        schemaCells = {},       -- recursive definition cell -> its declaration slot
         defs = {},              -- source name -> definition
         instances = {},         -- instance key -> instance
         order = {},             -- Instance[], build order
