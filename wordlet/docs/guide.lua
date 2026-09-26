@@ -1310,9 +1310,12 @@ The top of the program therefore talks almost exclusively about editing, and the
 representation and the machine. That separation emerges from vocabulary rather than from a heavyweight
 framework — which is the practical payoff of sections 1 through 3.
 
-This sketch is a design, not a compiled program: this repository's `examples/` contain the dispatch,
-interpreter, pipeline and reference examples, not the editor. Its purpose is to show the shape a real
-program takes when the sections above are followed in order.
+This is the target architecture, not a claim that every subsystem is already finished.
+`terminal-editor/editor.let` and `terminal-editor/host.c` now run a bounded **one-line vertical slice**:
+raw terminal input, bounded printable-ASCII document load/save, cursor movement, insertion/deletion, a mode sum, wired save
+continuation and a tail-recursive edit loop. `terminal-editor/test.sh` checks scripted edits, file
+protection, a small-stack long session and raw-mode restoration. Search, command input, viewports,
+multiline layout and resize handling remain parts of the sketch, not capabilities of that program.
 
 ---
 
@@ -1695,11 +1698,13 @@ that exercises it:
 | tagged callables | `tagged.let` | `pick(true) = 11`, `across(false, 4) = 12` |
 | module vocabulary and namespaces | `modules.let`, `modules_util.let` | `modules_util.point`, `twice(4) = 8` |
 | a real program with an external oracle | `sha256.let` | `abc()` equals the published SHA-256 digest |
+| nested child methods and interface wiring | `terminal-editor/editor.let` | `document.insert_at` mutates the actual child; `save_requested` is wired by the application; `test.sh` exercises the vertical slice |
 
 Three suites keep those claims honest: `tests/eval.lua` (the documented values of `strings.let` and
 `dispatch.let`), `tests/c.lua` (interpreter/C differential, including `arithmetic.let` and
-`interpreter.let`) and `tests/sha256.lua` (the NIST vector and runtime seeds). Section 21's editor is
-a design sketch, not one of these programs.
+`interpreter.let`) and `tests/sha256.lua` (the NIST vector and runtime seeds). The separate
+`terminal-editor/test.sh` builds and runs section 21's bounded vertical slice; the rest of that
+section remains a design sketch.
 
 ---
 ]]

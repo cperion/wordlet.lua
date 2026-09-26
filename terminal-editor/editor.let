@@ -1,0 +1,146 @@
+-- A bounded, one-line document editor. The host owns POSIX layout; editing lives here.
+extern let host_terminal_enter_raw(): u32
+extern let host_terminal_restore(): u32
+extern let host_terminal_clear(): u32
+extern let host_terminal_cursor(column: u32): u32
+extern let host_terminal_write_range(bytes: ptr(u8), offset: u32, length: u32): u32
+extern let host_terminal_columns(): u32
+extern let host_read_byte(out: ptr(u8)): u32
+extern let host_document_memory(capacity: u32): ptr(u8)
+extern let host_document_load(bytes: ptr(u8), capacity: u32): u32
+extern let host_document_save(bytes: ptr(u8), length: u32): u32
+
+let document_capacity: u32 = 4096
+let editor_mode = oneof { normal: unit, insert: unit }
+let editor_outcome = oneof { editing: unit, quit: unit, save_failed: unit }
+
+let move_right(bytes: ptr(u8), first: u32, current: u32): unit = do
+    if current == first then return unit() end
+    bytes[current] = bytes[current - 1]
+    return move_right(bytes, first, current - 1)
+end
+let move_left(bytes: ptr(u8), current: u32, length: u32): unit = do
+    if current + 1 >= length then return unit() end
+    bytes[current] = bytes[current + 1]
+    return move_left(bytes, current + 1, length)
+end
+
+let document_component = {
+    bytes: ptr(u8),
+    capacity: u32,
+    length: u32,
+    insert_at(position: u32, byte: u8): unit = do
+        if length >= capacity then return unit() end
+        move_right(bytes, position, length)
+        bytes[position] = byte
+        length += 1
+        return unit()
+    end,
+    delete_before(position: u32): unit = do
+        if position == 0 then return unit() end
+        move_left(bytes, position - 1, length)
+        length -= 1
+        return unit()
+    end,
+}
+
+let is_insert(mode: editor_mode): bool = mode {
+    normal = |u: unit| -> false,
+    insert = |u: unit| -> true,
+}
+let exit_status(outcome: editor_outcome): u32 = outcome {
+    editing = |u: unit| -> 256,
+    quit = |u: unit| -> 0,
+    save_failed = |u: unit| -> 3,
+}
+let save_document(document: document_component): bool =
+    host_document_save(document.bytes, document.length) == 1
+
+let terminal_renderer_component = {
+    render(document: document_component, cursor: u32): unit = do
+        let width = host_terminal_columns() - 1
+        let first = if cursor >= width then cursor - width + 1 else 0
+        let remaining = document.length - first
+        let visible = if remaining < width then remaining else width
+        host_terminal_clear()
+        host_terminal_write_range(document.bytes, first, visible)
+        host_terminal_cursor(cursor - first + 1)
+        return unit()
+    end,
+}
+
+let editor_component = {
+    save_requested: (document_component): bool,
+    document: document_component,
+    cursor: u32,
+    mode: editor_mode,
+    handle_key(key: u32): editor_outcome = do
+        if key == 17 then return editor_outcome.quit() end
+        if is_insert(mode) then
+            if key == 27 then
+                mode = editor_mode.normal()
+            else
+                if key == 127 then
+                    if cursor > 0 then
+                        document.delete_before(cursor)
+                        cursor -= 1
+                    end
+                else
+                    if key >= 32 and key <= 126 then
+                        let before = document.length
+                        document.insert_at(cursor, u8(key))
+                        if document.length > before then cursor += 1 end
+                    end
+                end
+            end
+            return editor_outcome.editing()
+        end
+        if key == 113 then return editor_outcome.quit() end
+        if key == 105 then mode = editor_mode.insert() end
+        if key == 104 and cursor > 0 then cursor -= 1 end
+        if key == 108 and cursor < document.length then cursor += 1 end
+        if key == 115 or key == 19 then
+            if not save_requested(document) then return editor_outcome.save_failed() end
+        end
+        return editor_outcome.editing()
+    end,
+}
+
+-- Wiring precedes the runtime document: the editor cannot persist a file except by asking.
+let application_editor = editor_component { save_requested = save_document }
+
+let read_key(): u32 = do
+    let cell: array(u8, 1) = [0]
+    if host_read_byte(ptr(cell[0])) == 0 then return 256 end
+    return u32(cell[0])
+end
+let run(state: application_editor): u32 = do
+    let renderer = terminal_renderer_component {}
+    renderer.render(state.document, state.cursor)
+    let key = read_key()
+    if key == 256 then return 0 end
+    let outcome = state.handle_key(key)
+    let status = exit_status(outcome)
+    if status != 256 then return status end
+    return run(state)
+end
+
+let main(): u32 = do
+    let bytes = host_document_memory(document_capacity)
+    if bytes == null(u8) then return 1 end
+    let loaded = host_document_load(bytes, document_capacity)
+    if loaded > document_capacity then return 2 end
+    let document = document_component {
+        bytes = bytes,
+        capacity = document_capacity,
+        length = loaded,
+    }
+    host_terminal_enter_raw()
+    defer host_terminal_restore()
+    let editor = application_editor {
+        document = document,
+        cursor = document.length,
+        mode = editor_mode.normal(),
+    }
+    return run(editor)
+end

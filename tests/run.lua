@@ -37,10 +37,13 @@ local ok, err = xpcall(function()
     -- Whitelist the standalone tree, not its enclosing checkout or future .git.
     command("mkdir -p -- " .. q(temp .. "/project with ' quote"))
     local project = temp .. "/project with ' quote"
-    for _, path in ipairs({"vendor", "tools", "tests", "wordletkit", "wordlet", "examples", "wordletkit.lua", "bundle-manifest.lua",
+    for _, path in ipairs({"vendor", "tools", "tests", "wordletkit", "wordlet", "examples", "terminal-editor", "wordletkit.lua", "bundle-manifest.lua",
         "README.md", "AGENTS.md", "architecture.md", "syntax.md", "GUIDE.md", "interfaces.md", "ast.asdl", "ir.asdl",
         "ASDL.md", "u32.md", "u64.md", "THIRD_PARTY.md", "VALIDATION.md", "lambda-investigation.md", "LICENSE", ".gitignore"}) do        command("cp -R -- " .. q(root .. path) .. " " .. q(project .. "/"))
     end
+    -- The optional editor is not bundled, but its host and source must build and run after
+    -- relocation. The smoke path needs no PTY/Python; the editor's own test.sh covers those.
+    command("cd " .. q(project .. "/terminal-editor") .. " && timeout 20s sh test.sh --smoke > /dev/null")
     -- The optional profiler uses only the copied project, even when invoked from another cwd.
     command("cd " .. q(temp) .. " && timeout 15s " .. lua .. " "
         .. q(project .. "/tools/profile-lambdas.lua") .. " 1 > /dev/null")

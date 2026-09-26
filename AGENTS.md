@@ -50,6 +50,9 @@ an enclosing checkout. Keep bundled modules explicit in bundle-manifest.lua; use
 built-ins such as bit. The isolation test copies this project to a temporary directory and clears Lua
 search paths. If you add required project files, update its copy manifest too. The `editor/` tree
 is editor support, not a compiler dependency, so it is deliberately absent from that manifest.
+`terminal-editor/` is an optional compiled application, also absent from the bundle manifest;
+`tests/run.lua` copies it to test its build and scripted input after relocation. Run its full
+`test.sh` separately for the PTY/raw-mode and 256 KiB stack checks (Python 3 required for PTY).
 
 Keep compiler code separate from the vendored libraries. Record any vendor edits and provenance in
 THIRD_PARTY.md. Preserve upstream attribution. Do not install process-global ASDL caches retaining

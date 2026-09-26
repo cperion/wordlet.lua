@@ -311,7 +311,18 @@ Gates 1–5 and 9–11 have their first executable form in `tests/parse.lua`, `t
    readonly field (`readonly-field`), as well as partial-supply promises on unchecked ABI inputs
    and foreign results. An ordinary schema-declared foreign result can still select its methods;
    a C-only host witness checks the returned record and method calls through `ptr(counter)`.
-   Types remain structural and C layout contains only data.
+   Types remain structural and C layout contains only data. The editor's save shortcut also exposed
+   a pre-existing residual `or` arm reversal; its three-case truth table is checked against an
+   independent oracle in the shared interpreter/C corpus.
+8q. **Terminal editor vertical slice:** `tests/run.lua` builds/runs its scripted smoke test
+   from a relocated directory with a quote and spaces; independently, `terminal-editor/test.sh` builds the
+   Wordlet editor with its C11 POSIX host, scripts insert/delete/save/quit, rejects files larger
+   than its 4096-byte document or containing control bytes without truncating them, checks a
+   failed save is reported, runs
+   20,000 keys under `-O0` with host tail optimizations disabled and a 256 KiB stack, and verifies
+   raw-mode restoration with a pseudo-terminal and a bounded horizontal viewport. This is a
+   one-line editor, not a claim that the
+   search, command, viewport and multiline architecture in GUIDE.md §21 is finished.
 9. **IR/checking:** storage/value distinction, scope and definite assignment, target signature checks,
    module storage seeded outside every function,
    dynamic failure guards, transitive borrow provenance, finite layouts, no metadata runtime slots.
