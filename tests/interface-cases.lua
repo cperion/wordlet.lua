@@ -116,6 +116,7 @@ let array_dynamic(x: u32): u32 = do
     cells[x % 2].bump()
     return cells[0].n * 10 + cells[1].n
 end
+let save_shortcut(key: u32): bool = key == 115 or key == 19
 let parent_copy(p: parent): u32 = p.twice()
 let deep_copy(x: u32): u32 = do
     let p = parent { child = counter { n = x } }
@@ -130,7 +131,7 @@ end
 return { functions = { nested, copied, snapshot, declared, parameter, result, inferred_result,
     annotated_alias, lambda_parameter, lambda_result, specialization, joined, joined_same,
     returning_arms, reference, reference_result, reference_field, module_child, callback,
-    cleanup, configured, deep_copy, local_alias, array_element, array_dynamic } }
+    cleanup, configured, deep_copy, local_alias, array_element, array_dynamic, save_shortcut } }
 ]==],
     entries = {
         { entry = "nested", arity = 1, inputs = {{0}, {3}}, expected = {33, 66} },
@@ -156,6 +157,8 @@ return { functions = { nested, copied, snapshot, declared, parameter, result, in
         { entry = "configured", arity = 1, inputs = {{0}, {3}}, expected = {12, 45} },
         { entry = "array_element", arity = 1, inputs = {{0}, {3}}, expected = {11, 44} },
         { entry = "array_dynamic", arity = 1, inputs = {{0}, {3}}, expected = {11, 35} },
+        { entry = "save_shortcut", arity = 1, inputs = {{0}, {115}, {19}},
+            expected = {false, true, true} },
         { entry = "deep_copy", arity = 1, inputs = {{0}, {3}}, expected = {20, 53} },
         { entry = "local_alias", arity = 1, inputs = {{0}, {3}}, expected = {1, 4} },
     },

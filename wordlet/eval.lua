@@ -2897,15 +2897,18 @@ function Eval:evalShortCircuit(machine, ctx, expr, k)
         end
         return self:expressionCPS(m, ctx, left, nil, function(m2, test)
             local yesList, noList = {}, {}
-            local yesCtx = ctx:arm(yesList)
-            return self:evalExprCPS(m2, yesCtx, expr.right, function(m3, yesValue)
-                self:requireType(yesValue, S.bool, expr.right.span)
+            -- `and` evaluates the right operand when the left is true; `or` does so when
+            -- it is false. The short arm assigns the known left result instead.
+            local runList, shortList = isOr and noList or yesList, isOr and yesList or noList
+            local runCtx = ctx:arm(runList)
+            return self:evalExprCPS(m2, runCtx, expr.right, function(m3, right)
+                self:requireType(right, S.bool, expr.right.span)
                 local builder = ctx.builder
                 local storage = builder:var(ctx.body, S.bool, nil)
                 local place = Ir.Local(storage)
-                return self:expressionCPS(m3, yesCtx, yesValue, nil, function(m4, yesExpr)
-                    builder:store(yesList, place, yesExpr)
-                    builder:store(noList, place, builder:bool(isOr))
+                return self:expressionCPS(m3, runCtx, right, nil, function(m4, rightExpr)
+                    builder:store(runList, place, rightExpr)
+                    builder:store(shortList, place, builder:bool(isOr))
                     builder:emit(ctx.body, Ir.If(test, S.list(yesList), S.list(noList)))
                     return k(m4, V.runtime(builder:ref(builder:read(ctx.body, S.bool, place), S.bool),
                         S.bool))
